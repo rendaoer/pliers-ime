@@ -190,6 +190,9 @@ impl State {
                     preedit.selected + 1
                 ),
                 Action::Commit(text) => eprintln!("pliers:   → 提交文本 {text:?}"),
+                Action::CommitAndForward(text) => {
+                    eprintln!("pliers:   → 提交文本 {text:?}，再把这个键原样交给应用")
+                }
                 Action::Forward => {}
                 Action::Swallow => eprintln!("pliers:   → 吃掉这个抬起"),
             }
@@ -197,6 +200,12 @@ impl State {
         match action {
             Action::UpdatePreedit(preedit) => self.set_preedit(&preedit),
             Action::Commit(text) => self.commit_text(&text),
+            // 顺序要紧：先把文字提交给应用，再把这个键转过去，
+            // 应用才会把符号插在文字后面（不然就是 ",你好"）
+            Action::CommitAndForward(text) => {
+                self.commit_text(&text);
+                self.forward(keycode, pressed);
+            }
             Action::Forward => self.forward(keycode, pressed),
             // 被吃掉的键什么都不用做（连它的抬起也吃掉）
             Action::Swallow => {}
@@ -435,6 +444,20 @@ impl Dispatch<im::ZwpInputMethodV2, ()> for State {
             // 焦点离开输入框：按住没放的键不会再有抬起事件，账本一起清掉
             im::Event::Deactivate => {
                 state.active = false;
+                // 这里**上屏不了**，只能丢掉正在打的拼音。原因是合成器的时序：
+                // 它先发 deactivate 给我们，紧接着就把这次 text-input 会话收掉了
+                //（niri/smithay: keyboard.rs 里 deactivate_input_method() 之后
+                // 立刻 text_input_leave()，活动 text-input 被清空）。
+                // 等我们反应过来再 commit_string，合成器那边已经没有收件人了 ——
+                // 要么丢掉，要么落到**下一个**输入框里，后者更糟，所以不试。
+                // 想要打了一半的拼音不白打，就在换窗口前按空格/回车把它收掉
+                if let Some(text) = state.engine().take_raw()
+                    && state.debug
+                {
+                    eprintln!(
+                        "pliers: 焦点离开输入框，正在组的 {text:?} 只能丢掉（协议来不及上屏）"
+                    );
+                }
                 state.engine().reset();
                 state.sync_popup(&Preedit::default());
             }

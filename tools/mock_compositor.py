@@ -28,7 +28,8 @@ Note on the wire format: file descriptors travel as ancillary data and take
 Usage: mock_compositor.py <socket-path> [keys] [expected-committed-text] [mode]
 
 Modes: active | inactive | shortcut | shift | mixed | enter | escape | caps |
-       pick (数字选词) | nav (方向键换候选), each optionally with a _nomods suffix.
+       pick (数字选词) | nav (方向键换候选) | page (翻页) | symbol (组词中敲符号) |
+       switch (组词中切中英文), each optionally with a _nomods suffix.
 """
 import array
 import mmap
@@ -57,6 +58,8 @@ EVDEV = {
     "y": 21, "z": 44, " ": 57, "\x08": 14, "\n": 28, "\x1b": 1,
     # 数字 1-9：输入法用它们直接选候选
     "1": 2, "2": 3, "3": 4, "4": 5, "5": 6, "6": 7, "7": 8, "8": 9, "9": 10,
+    # 符号：组词当中敲它们时，输入法要先把候选上屏、再把这个键转过来
+    "/": 53, "0": 11, ";": 39, "'": 40, "[": 26, "]": 27,
 }
 # 方向键（组词时用来翻候选）
 EVDEV_DOWN = 108
@@ -378,9 +381,8 @@ def main():
                             conn.send(grab_id, 2, struct.pack("<IIIII", 0, 0, 0, 0, 0))
                         time.sleep(0.05)
                 elif base_mode == "mixed":
-                    # 用户的实际场景：先敲几个小写字母组词（预编辑挂着），按住 Shift 敲 A，
-                    # 最后按空格提交。期望整个 "aaaA" 一直待在预编辑里，
-                    # 只在最后提交一次 —— 打字中途不往应用塞任何字符
+                    # 组词当中按 Shift+A：大写字母并进预编辑（不能当场提交，
+                    # 更不能先蹦出「你」再补个 A），空格才把整串 "aaaA" 原样上屏
                     for ch in KEYS:
                         for st in (1, 0):
                             conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[ch], st))
@@ -395,11 +397,12 @@ def main():
                     if send_mods:
                         conn.send(grab_id, 2, struct.pack("<IIIII", 0, 0, 0, 0, 0))
                     time.sleep(0.05)
-                    for st in (1, 0):  # 空格：这时候才提交
+                    for st in (1, 0):  # 空格：这时候才把 "aaaA" 上屏
                         conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[" "], st))
                         time.sleep(0.03)
                 elif base_mode == "shift":
-                    # Shift+A：XKB 里 Shift = 1，字母 keysym 变成大写 'A'
+                    # Shift+A：XKB 里 Shift = 1，字母 keysym 变成大写 'A'。
+                    # 大写不参与匹配 → 没进组词、没候选，四个按键事件全转发
                     shift = 42
                     conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, shift, 1))
                     if send_mods:
@@ -424,6 +427,38 @@ def main():
                         conn.send(grab_id, 2, struct.pack("<IIIII", 0, 0, 0, 0, 0))
                     time.sleep(0.1)
                     for ch in KEYS:
+                        for st in (1, 0):
+                            conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[ch], st))
+                            time.sleep(0.03)
+                elif base_mode == "symbol":
+                    # 组词当中敲符号（/）：应该先把选中的候选上屏，再把符号转过来。
+                    # 顺序反了的话，应用里会先冒出符号、文字跟在后面（",你好"）
+                    for ch in KEYS:
+                        for st in (1, 0):
+                            conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[ch], st))
+                            time.sleep(0.03)
+                    for st in (1, 0):
+                        conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV["/"], st))
+                        time.sleep(0.03)
+                elif base_mode == "switch":
+                    # 组词当中按 Ctrl+空格 切中英文：打了一半的拼音要先上屏，不能消失。
+                    # 切完是英文模式，后面的字母全部原样转发
+                    for ch in KEYS:
+                        for st in (1, 0):
+                            conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[ch], st))
+                            time.sleep(0.03)
+                    ctrl = 29
+                    conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, ctrl, 1))
+                    if send_mods:
+                        conn.send(grab_id, 2, struct.pack("<IIIII", 0, 4, 0, 0, 0))
+                    for st in (1, 0):
+                        conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[" "], st))
+                        time.sleep(0.03)
+                    conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, ctrl, 0))
+                    if send_mods:
+                        conn.send(grab_id, 2, struct.pack("<IIIII", 0, 0, 0, 0, 0))
+                    time.sleep(0.1)
+                    for ch in "hi":
                         for st in (1, 0):
                             conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[ch], st))
                             time.sleep(0.03)
@@ -565,36 +600,41 @@ def main():
             flush=True,
         )
     elif mode == "mixed":
-        # 组词当中按 Shift+A，最后空格提交：整个 "aaaA" 一直待在预编辑里，
-        # 只在最后提交一次（所以 commits 恰好是 ['aaaA']，不是挨个字符往外蹦）
+        # 组词当中按 Shift+A：那个大写 A 并进预编辑（预编辑串看得出 "aaaA"，而且
+        # 不再出候选 —— 候选框最后是收起来的），**不当场提交**，空格才把整串原样上屏。
+        # 转发的只剩 Shift 自己的按下抬起
         want = KEYS + "A"
         ok = (
             grab_id is not None
             and commits == [want]
-            and preedits
-            and preedits[-1] == ""  # 提交后预编辑要清干净
+            and nonempty
+            and nonempty[-1] == want
+            and len(forwards) == 2
             and vk_mods == [1, 0]
+            and popup_events
+            and popup_events[-1][0] == "hide"
         )
         print(
             f"mock: {'PASS' if ok else 'FAIL'}: commits {commits} (期望 [{want!r}] 一次), "
-            f"最后一个预编辑 {preedits[-1] if preedits else None!r}",
+            f"预编辑 {nonempty[-1] if nonempty else None!r}, forwarded {len(forwards)}/2 keys, "
+            f"贴框 {len(shows)} 次、收框 {len(hides)} 次（最后要收起来）",
             flush=True,
         )
     elif mode == "shift":
-        # Shift+A：大写字母也留在预编辑里（"A"），打字中途不提交、不转发字符键。
-        # 转发只该剩 Shift 自己的按下抬起 2 个，修饰键掩码 [Shift 按下 1, 松开 0]
+        # Shift+A：大写不参与匹配 —— 不进组词、没有预编辑、不弹候选框，
+        # Shift 和 A 的按下抬起 4 个事件全部原样转发
         ok = (
             grab_id is not None
             and not commits
-            and preedits
-            and preedits[-1] == "A"
-            and len(forwards) == 2
+            and not preedits
+            and len(forwards) == 4
             and vk_mods == [1, 0]
-            and len(shows) == 1  # buffer 里有一个字符，候选框该弹一次
+            and not shows
         )
         print(
-            f"mock: {'PASS' if ok else 'FAIL'}: 预编辑 {preedits[-1] if preedits else None!r} (期望 'A'), "
-            f"commits {commits} (期望空), forwarded {len(forwards)}/2 keys",
+            f"mock: {'PASS' if ok else 'FAIL'}: commits {commits} (期望空), "
+            f"预编辑 {preedits} (期望空), forwarded {len(forwards)}/4 keys, "
+            f"贴框 {len(shows)} 次 (期望 0)",
             flush=True,
         )
     elif mode == "hidpi":
@@ -624,6 +664,43 @@ def main():
         print(
             f"mock: {'PASS' if ok else 'FAIL'}: committed {committed!r} (期望不是第一页的「你」), "
             f"贴框 {len(shows)} 次, forwarded {len(forwards)} keys",
+            flush=True,
+        )
+    elif mode == "symbol":
+        # 敲符号那一瞬间的顺序：提交候选必须在转发符号**之前**。
+        # log 是按到达顺序记的，比下标就行
+        commit_at = next((i for i, (op, _) in enumerate(log) if op == 0), None)
+        slash_at = next(
+            (i for i, (op, args) in enumerate(log) if op == "vk1" and args[1] == EVDEV["/"]),
+            None,
+        )
+        ok = (
+            grab_id is not None
+            and commits == [EXPECT]
+            and commit_at is not None
+            and slash_at is not None
+            and commit_at < slash_at
+            and len(forwards) == 2  # "/" 的按下和抬起都原样转给应用
+            and popup_ok
+        )
+        print(
+            f"mock: {'PASS' if ok else 'FAIL'}: committed {commits!r} (期望 {EXPECT!r}), "
+            f"提交下标 {commit_at} / 符号下标 {slash_at}（要前者小）, forwarded {len(forwards)} keys",
+            flush=True,
+        )
+    elif mode == "switch":
+        # 切中英文时半截拼音上屏：commits 恰好一次原始字母（不转换），
+        # 切换键自己被吃掉，切完是英文模式 → hi 全部原样转发
+        want = 2 + 2 * 2  # Ctrl 按下抬起 + h/i 各按下抬起
+        ok = (
+            grab_id is not None
+            and commits == [EXPECT]
+            and preedits[-1] == ""
+            and len(forwards) == want
+        )
+        print(
+            f"mock: {'PASS' if ok else 'FAIL'}: committed {commits!r} (期望 [{EXPECT!r}] 原始字母), "
+            f"forwarded {len(forwards)}/{want} keys, 最后一个预编辑 {preedits[-1] if preedits else None!r}",
             flush=True,
         )
     elif mode == "english":
@@ -695,17 +772,20 @@ def main():
             flush=True,
         )
     elif mode == "caps":
-        # Caps Lock 打开时：字母解出来是大写，照样攒进预编辑（"NIHAO"），
-        # 空格时查表大小写不敏感 → 提交 你好。转发只该剩 Caps Lock 自己 2 个
+        # Caps Lock 打开时：字母解出来全是大写 → 大写不参与匹配，
+        # 不进组词、不出候选，每个按键（连 Caps Lock 自己）原样转发
+        want = 2 + 2 * len(KEYS)
         ok = (
             grab_id is not None
-            and committed == EXPECT
-            and nonempty == ["N", "NI", "NIH", "NIHA", "NIHAO"]
-            and len(forwards) == 2  # CapsLock 按下抬起
+            and not commits
+            and not preedits
+            and len(forwards) == want
+            and not shows
         )
         print(
-            f"mock: {'PASS' if ok else 'FAIL'}: committed {committed!r} (期望 {EXPECT!r}), "
-            f"预编辑 {nonempty[-1] if nonempty else None!r}, forwarded {len(forwards)}/2 keys",
+            f"mock: {'PASS' if ok else 'FAIL'}: commits {commits} (期望空), "
+            f"预编辑 {preedits} (期望空), forwarded {len(forwards)}/{want} keys, "
+            f"贴框 {len(shows)} 次 (期望 0)",
             flush=True,
         )
     else:

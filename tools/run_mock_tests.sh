@@ -86,14 +86,18 @@ run active_nomods  "nihao "  你好  active_nomods
 run pick           "nihao2"  倪浩  pick          # 数字选词（第 2 个候选）
 run nav            "nihao"   倪浩  nav           # ↓ 换候选再空格
 run page           "ni"      ""    page          # → 挪 9 次自动翻到第二页
-run caps           "nihao "  你好  caps          # Caps Lock 打的大写
+run caps           "nihao "  ""    caps          # Caps Lock 打开 = 打大写英文，不进组词
 run enter          "nihao"   nihao enter         # 回车提交原文
 run escape         "nihao"   ""    escape        # Esc 取消
-run mixed          "aaa"     aaaA  mixed         # 组词当中 Shift+A
-run shift          "a"       ""    shift         # 纯 Shift+A
+run mixed          "aaa"     aaaA  mixed         # 组词中 Shift+A：并进预编辑，空格整串上屏
+run shift          "a"       ""    shift         # 纯 Shift+A：4 个事件全转发
 
 echo "== 中英文切换 =="
 run english        "hello "   ""    english       # Ctrl+空格 切英文后打英文
+run switch         "nihao"   nihao switch        # 组词中切英文：半截拼音先上屏
+
+echo "== 组词中敲符号 =="
+run symbol         "nihao"   你好  symbol        # 符号必须排在文字后面
 
 echo "== 高分屏 =="
 run hidpi          "nihao "  你好  hidpi  "PLIERS_SCALE=2"

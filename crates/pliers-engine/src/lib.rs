@@ -162,6 +162,14 @@ fn is_shift(keysym: u32) -> bool {
     keysym == 0xffe1 || keysym == 0xffe2
 }
 
+/// 这个 keysym 是不是"能打出一个可见半角字符"的键（字母、数字、符号都算）。
+/// 只看 0x20..=0x7e 这一段：符号（/ ; ' [ ] 0）和**大写字母**都在里面，
+/// 而 F1、Home、方向键、以及 Shift_L(0xffe1)/Caps_Lock 这些**功能键**
+/// 都在外面 —— 它们不该把正在组的词提前上屏
+fn is_printable(keysym: u32) -> bool {
+    (0x20..=0x7e).contains(&keysym)
+}
+
 /// 协议层翻译好的一个按键事件（keycode + keysym + 修饰键状态）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyInput {
@@ -211,6 +219,9 @@ pub enum Action {
     UpdatePreedit(Preedit),
     /// 把这段文本提交给应用
     Commit(String),
+    /// 先把这段文本提交给应用，再把这个按键原样转发（敲符号时用）。
+    /// 顺序不能反：符号得排在上屏的文字后面，不然屏幕上会变成 ",你好"
+    CommitAndForward(String),
     /// 原样转发给应用（走虚拟键盘）
     Forward,
     /// 吃掉，什么都不做（它的抬起事件也会被吃掉）
@@ -238,7 +249,7 @@ pub struct Engine {
     /// Shift 按下之后还没抬起来，且中间没按别的键（"轻按 Shift"用）
     shift_tap: bool,
 
-    /// 攒着的东西：拼音，或者用户用 Shift/Caps Lock 敲出来的大写英文
+    /// 攒着的东西：要么是拼音（全小写），要么是英文原文（混进了大写字母）
     buffer: String,
     /// 选中的是**池子里**第几个候选（当前是第几页由它算出来）
     cursor: usize,
@@ -316,19 +327,23 @@ impl Engine {
         self.page() * self.limit
     }
 
+    /// 这串是不是"英文原文"：里面混着用户按 Shift / Caps Lock 敲出来的大写字母。
+    /// 是的话就不查词了 —— 空格/回车原样上屏，一个候选都不出
+    fn literal(&self) -> bool {
+        self.buffer.chars().any(|c| c.is_ascii_uppercase())
+    }
+
     /// 问方案要候选。词库查不到、或者这串键根本不是有效输入，就是空的
     /// 查一次库，把候选池灌满（只在输入变了的时候调 ——
     /// 翻页/换选中都只是挪游标，不重新查）
     fn refresh_pool(&mut self) {
-        self.pool = if self.buffer.is_empty() {
+        self.pool = if self.buffer.is_empty() || self.literal() {
+            // 空串没什么好查的；带大写的串是英文原文（`nN`、`NIHAO`），
+            // 更不能拿去匹配拼音 —— "打 NIHC 也蹦出词"就是这么来的
             Vec::new()
         } else {
-            // 查库用的小写码；预编辑串保留用户敲的大小写
-            self.scheme.candidates(
-                &self.dict,
-                &self.buffer.to_ascii_lowercase(),
-                self.pool_size,
-            )
+            self.scheme
+                .candidates(&self.dict, &self.buffer, self.pool_size)
         };
     }
 
@@ -340,11 +355,11 @@ impl Engine {
         self.shift_tap = false;
     }
 
-    /// 切中英文：顺手把正在组的词取消掉（不然预编辑会挂在应用里）,
+    /// 切中英文：正在组的词不能被丢掉，交出来让调用方上屏（返回 Some(原始拼音)）。
     /// 协议层看到 mode 变了会去清预编辑、弹提示
-    fn switch_mode(&mut self) {
+    fn switch_mode(&mut self) -> Option<String> {
         self.mode = self.mode.toggle();
-        self.clear_composing();
+        self.take_raw()
     }
 
     /// 组词结束（上屏 / 取消）：只清组词状态，按键账本留着 ——
@@ -367,13 +382,15 @@ impl Engine {
         // ---- 中英文切换：放在最前面，两种模式下都得能用 ----
         //
         // 轻按 Shift：Shift 的按下和抬起之间没按过别的键，才算"轻按"。
-        // Shift 自己照旧转发给应用（大写得靠它），只是抬起的时候顺手切个模式
+        // Shift 自己照旧转发给应用（大写得靠它），只是抬起的时候顺手切个模式。
+        // 组词当中切模式的话，打了一半的字母要上屏（见下面 tapped）
+        let mut tapped: Option<String> = None;
         if self.toggle.shift_tap {
             if is_shift(key.keysym) {
                 if key.pressed {
                     self.shift_tap = true;
                 } else if std::mem::take(&mut self.shift_tap) {
-                    self.switch_mode();
+                    tapped = self.switch_mode();
                 }
             } else if key.pressed {
                 self.shift_tap = false; // 中间按了别的键 → 是 Shift+A 这种组合，不是轻按
@@ -383,9 +400,13 @@ impl Engine {
         // Ctrl+空格：切换模式，这个键谁都不给（它是输入法的热键）。
         // 注意必须认准 Ctrl：Alt+空格在很多应用里是窗口菜单
         if key.pressed && self.toggle.ctrl_space && key.ctrl && key.keysym == KEY_SPACE {
-            self.switch_mode();
+            let leftover = self.switch_mode();
             self.consumed.push(key.keycode);
-            return Action::Swallow;
+            // 组词当中按了切换键：先把打了一半的字母上屏，别让它们凭空消失
+            return match leftover {
+                Some(text) => Action::Commit(text),
+                None => Action::Swallow,
+            };
         }
 
         // 抬起事件：账本里有的继续吃掉（一次清光，长按会重复记账），
@@ -395,7 +416,11 @@ impl Engine {
                 self.consumed.retain(|k| *k != key.keycode);
                 return Action::Swallow;
             }
-            return Action::Forward;
+            // 轻按 Shift 切了模式、又有半截拼音：先上屏再放 Shift 抬起过去
+            return match tapped {
+                Some(text) => Action::CommitAndForward(text),
+                None => Action::Forward,
+            };
         }
 
         // 英文模式：什么都不拦。输入法这时候等于不存在，按键全部原样转发 ——
@@ -414,12 +439,37 @@ impl Engine {
 
         let composing = !self.buffer.is_empty();
 
-        // 能进组词的字符：一般就是 a-z，双拼方案可能还收分号。
-        // 一律攒进 buffer 当预编辑 —— 包括 Shift、Caps Lock 打出来的大写。
-        // 打字中途绝不往应用里塞字符：应用这时正处在预编辑状态，对"野生"字符的
-        // 处理不可靠（实测转发 Shift+A 过去，输入框里 A 和 a 都不出现）
+        // 能进组词的字符：**小写** a-z（双拼方案可能还收分号）。
+        // 大写有自己的去处，见下面那段
         if let Some(ch) = char::from_u32(key.keysym)
+            && !ch.is_ascii_uppercase()
             && self.scheme.accepts(ch.to_ascii_lowercase())
+        {
+            self.buffer.push(ch);
+            self.consumed.push(key.keycode);
+            return self.changed();
+        }
+
+        // 组词当中敲了大写字母（Shift+N、Caps Lock）：**不许上屏**。
+        // `n` 之后按 Shift+N 不该变成「你N」—— 那半截拼音跟这个 N 一样，
+        // 都是用户想打的英文原文。原样并进 buffer，整串不再匹配中文，
+        // 空格/回车时原样上屏（nihao 之后按 Shift+A 就是 nihaoA）
+        if composing
+            && let Some(ch) = char::from_u32(key.keysym)
+            && ch.is_ascii_uppercase()
+        {
+            self.buffer.push(ch);
+            self.consumed.push(key.keycode);
+            return self.changed();
+        }
+
+        // 已经在打英文原文了（buffer 里混进了大写）：后面敲的字母、数字、符号
+        // 也一起并进来 —— 不然它们会被当成"野生字符"插到预编辑前面，
+        // 数字更是会被当成选词直接吃掉。空格/回车才收尾
+        if self.literal()
+            && key.keysym != KEY_SPACE
+            && is_printable(key.keysym)
+            && let Some(ch) = char::from_u32(key.keysym)
         {
             self.buffer.push(ch);
             self.consumed.push(key.keycode);
@@ -494,7 +544,14 @@ impl Engine {
                 }
             }
 
-            // 其他按键（F1、PgUp……）都交给应用
+            // 组词当中敲了别的字符（/ ; ' [ ] 0 ! ? 之类，以及大写字母 A-Z；
+            // `,` `.` `-` `=` 被翻页占了）：先把选中的候选上屏，再把字符交给应用。
+            // 顺序反了的话，符号会插在还没上屏的拼音前面 —— nihao, 会变成 ",你好"
+            _ if composing && is_printable(key.keysym) => {
+                Action::CommitAndForward(self.take_word())
+            }
+
+            // 其他按键（F1、Home……）都交给应用
             _ => Action::Forward,
         }
     }
@@ -520,19 +577,33 @@ impl Engine {
 
     /// 上屏当前选中的候选
     fn commit_candidate(&mut self, keycode: u32) -> Action {
-        // 一个候选都没有（打的是词库里没有的东西，比如 `aaaa`）：原样上屏，
-        // 不能提交空串 —— 那样用户打的字就凭空消失了
+        let word = self.take_word();
+        self.consumed.push(keycode);
+        Action::Commit(word)
+    }
+
+    /// 结束这次组词，交出"该上屏的东西"：选中的候选；一个候选都没有
+    ///（打的是词库里没有的东西，比如 `aaaa`）就用原始拼音 —— 不能交空串，
+    /// 那样用户打的字就凭空消失了。挑中的词顺手记一笔词频
+    fn take_word(&mut self) -> String {
         let word = match self.pool.get(self.cursor).or_else(|| self.pool.first()) {
             Some(word) => word.clone(),
             None => std::mem::take(&mut self.buffer),
         };
-        self.consumed.push(keycode);
-        if !word.is_empty() {
-            self.pick(&word);
-        } else {
+        if word.is_empty() {
             self.clear_composing();
+        } else {
+            self.pick(&word);
         }
-        Action::Commit(word)
+        word
+    }
+
+    /// 放弃这次组词，但把"打了一半的原始字母"交出来（调用方负责上屏）。
+    /// 返回 None 表示刚才没在组词。切模式、失焦时用来救场
+    pub fn take_raw(&mut self) -> Option<String> {
+        let text = std::mem::take(&mut self.buffer);
+        self.clear_composing();
+        (!text.is_empty()).then_some(text)
     }
 
     /// 用户挑了一个词：记一笔，下次它排得更靠前。
@@ -839,21 +910,92 @@ mod tests {
     }
 
     #[test]
-    fn 大写字母也待在预编辑里() {
+    fn 大写字母是英文字符不进组词() {
+        // 回归：以前大写会被 to_ascii_lowercase() 之后拿去查库，
+        // 敲 NIHC 一路蹦出「你」「你好」，Caps Lock 打开跟没开一样
         let mut engine = engine();
-        type_letters(&mut engine, "aaa");
-        // Shift+A：keysym 是 'A'（0x41），协议层翻译时就带上了修饰键的影响
-        assert_eq!(text_of(engine.on_key(key(0x41))).unwrap(), "aaaA");
-        assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Commit("aaaA".into()));
+        for keysym in [0x4e, 0x49, 0x48, 0x43] {
+            // N I H C
+            assert_eq!(engine.on_key(key(keysym)), Action::Forward);
+            assert_eq!(engine.text(), "", "一个大写字母都不该进预编辑");
+            assert!(engine.preedit().candidates.is_empty(), "更不该出候选");
+        }
     }
 
     #[test]
-    fn caps_lock_的大写照样能转拼音() {
+    fn 组词中敲大写不上屏而是并进预编辑() {
+        // 回归：以前 `n` 之后按 Shift+N 会先上屏「你」再补个 N，变成"你N"。
+        // 那半截拼音跟这个 N 都是英文原文，该原样待在预编辑里
         let mut engine = engine();
-        // Caps Lock 打开：keysym 全是大写
-        assert_eq!(type_letters(&mut engine, "NIHAO").last().unwrap(), "NIHAO");
-        // 查表大小写不敏感
-        assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Commit("你好".into()));
+        assert_eq!(text_of(engine.on_key(key(0x6e))).unwrap(), "n");
+        let action = engine.on_key(key(0x4e)); // Shift 或 Caps Lock 打出来的 N
+        assert_eq!(
+            text_of(action).unwrap(),
+            "nN",
+            "大写并进预编辑，不当候选上屏"
+        );
+        assert!(
+            engine.preedit().candidates.is_empty(),
+            "掺了大写就是英文原文，一个候选都不许出"
+        );
+        // 空格把这串原样上屏，不做任何转换
+        assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Commit("nN".into()));
+        assert_eq!(engine.text(), "");
+    }
+
+    #[test]
+    fn 英文原文串里后面的字符也并进预编辑() {
+        let mut engine = engine();
+        for keysym in [0x6e, 0x4e, 0x32, 0x2f] {
+            // n N 2 /
+            engine.on_key(key(keysym));
+        }
+        assert_eq!(engine.text(), "nN2/");
+        assert!(engine.preedit().candidates.is_empty());
+        assert_eq!(
+            engine.on_key(key(KEY_SPACE)),
+            Action::Commit("nN2/".into()),
+            "数字和符号也得留在串里，不能被当成选词吃掉"
+        );
+    }
+
+    #[test]
+    fn 大写之后接着打小写也还是英文原文() {
+        let mut engine = engine();
+        for ch in "nNihao".chars() {
+            engine.on_key(key(ch as u32));
+        }
+        assert_eq!(engine.text(), "nNihao");
+        assert!(engine.preedit().candidates.is_empty(), "不再回头匹配中文");
+        assert_eq!(
+            engine.on_key(key(KEY_SPACE)),
+            Action::Commit("nNihao".into())
+        );
+    }
+
+    #[test]
+    fn 没在组词时大写照旧直接转发() {
+        // 没有半截拼音挂着，大写字母直接转给应用最省事（Caps Lock 打英文）
+        let mut engine = engine();
+        for ch in "NIHAO".chars() {
+            assert_eq!(engine.on_key(key(ch as u32)), Action::Forward);
+        }
+        assert_eq!(engine.text(), "", "不该起一个预编辑");
+        assert!(engine.preedit().candidates.is_empty());
+    }
+
+    #[test]
+    fn 大写字母的抬起不会被吃掉() {
+        // 没在组词 → 大写走转发；它的抬起也必须转发，不然应用那边按键状态错乱
+        let mut engine = engine();
+        assert_eq!(engine.on_key(key(0x4e)), Action::Forward);
+        assert_eq!(
+            engine.on_key(KeyInput {
+                pressed: false,
+                ..key(0x4e)
+            }),
+            Action::Forward
+        );
     }
 
     #[test]
@@ -1000,12 +1142,107 @@ mod tests {
     }
 
     #[test]
-    fn 切换的时候把正在组的词取消掉() {
+    fn 切换的时候正在组的词先上屏() {
+        // 回归：以前切中英文直接 clear_composing()，打了一半的 nihao 就凭空消失了
         let mut engine = engine();
         type_letters(&mut engine, "nihao");
-        engine.on_key(ctrl_space());
-        assert_eq!(engine.text(), "", "切到英文时预编辑要清干净");
+        assert_eq!(
+            engine.on_key(ctrl_space()),
+            Action::Commit("nihao".into()),
+            "打了一半的字母要先上屏（原始拼音，不做转换）"
+        );
+        assert_eq!(engine.mode(), Mode::English);
+        assert_eq!(engine.text(), "", "上屏之后预编辑要清干净");
         assert!(engine.preedit().candidates.is_empty());
+    }
+
+    #[test]
+    fn 轻按_shift_切换时半截拼音也上屏且_shift_抬起照旧转发() {
+        let settings = Settings {
+            toggle_keys: ToggleKeys::parse(&["shift".to_string()]).unwrap(),
+            ..Default::default()
+        };
+        let mut engine = engine_with(settings);
+        type_letters(&mut engine, "ni");
+        engine.on_key(key(0xffe1)); // Shift 按下
+        assert_eq!(
+            engine.on_key(KeyInput {
+                pressed: false,
+                ..key(0xffe1)
+            }),
+            Action::CommitAndForward("ni".into()),
+            "先上屏，再把 Shift 抬起转给应用"
+        );
+        assert_eq!(engine.mode(), Mode::English);
+        assert_eq!(engine.text(), "");
+    }
+
+    #[test]
+    fn 组词中敲符号先上屏再转发() {
+        // 回归：以前符号直接转发，屏幕上会变成 ",你好"
+        let mut engine = engine();
+        type_letters(&mut engine, "nihao");
+        assert_eq!(
+            engine.on_key(key(0x2f)), // '/'
+            Action::CommitAndForward("你好".into())
+        );
+        assert_eq!(engine.text(), "", "符号一来，这次组词就结束了");
+        assert!(engine.preedit().candidates.is_empty());
+
+        // 符号自己的抬起没有进账本 —— 按下抬起都要原样给应用，不然插不进字符
+        assert_eq!(
+            engine.on_key(KeyInput {
+                pressed: false,
+                ..key(0x2f)
+            }),
+            Action::Forward
+        );
+    }
+
+    #[test]
+    fn 组词中敲符号上屏的是选中的那个候选() {
+        let mut engine = engine();
+        type_letters(&mut engine, "nihao");
+        engine.on_key(key(KEY_DOWN)); // 换到第二个候选
+        let second = engine.preedit().candidates[1].clone();
+        assert_eq!(
+            engine.on_key(key(0x30)), // '0'：不选词，当符号
+            Action::CommitAndForward(second)
+        );
+    }
+
+    #[test]
+    fn 功能键不会把拼音提前上屏() {
+        // F1 / Home / Delete 这些键不产生字符，照旧原样转发，组词不受影响
+        let mut engine = engine();
+        type_letters(&mut engine, "ni");
+        for keysym in [0xffbe, 0xff50, 0xffff] {
+            assert_eq!(engine.on_key(key(keysym)), Action::Forward);
+            assert_eq!(engine.text(), "ni");
+        }
+    }
+
+    #[test]
+    fn 没在组词时符号照旧直接转发() {
+        let mut engine = engine();
+        assert_eq!(engine.on_key(key(0x2f)), Action::Forward);
+        assert_eq!(engine.on_key(key(0x30)), Action::Forward);
+    }
+
+    #[test]
+    fn 切模式时没在组词就悄悄吃掉切换键() {
+        let mut engine = engine();
+        assert_eq!(engine.on_key(ctrl_space()), Action::Swallow);
+        assert_eq!(engine.mode(), Mode::English);
+    }
+
+    #[test]
+    fn take_raw_交出半截拼音并清干净() {
+        let mut engine = engine();
+        type_letters(&mut engine, "nihao");
+        assert_eq!(engine.take_raw().as_deref(), Some("nihao"));
+        assert_eq!(engine.text(), "");
+        assert_eq!(engine.take_raw(), None, "没在组词时返回 None");
     }
 
     #[test]

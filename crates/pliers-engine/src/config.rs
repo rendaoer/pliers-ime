@@ -1,7 +1,8 @@
 //! 配置文件：输入法的"功能"都在这里定义，改行为不用改代码。
 //!
 //! 放在 `~/.config/pliers/config.toml`（也认 `$XDG_CONFIG_HOME` 和 `$PLIERS_CONFIG`），
-//! 没有这个文件就用默认值跑。完整示例见仓库根目录的 `pliers.example.toml`。
+//! 没有这个文件就用默认值跑。模板就是同目录的 `config.example.toml`
+//! （`pliers --init-config` 会把它写到那个路径）。
 //!
 //! ```toml
 //! [scheme]
@@ -12,6 +13,7 @@
 //! max_candidates = 9
 //! ```
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -67,11 +69,17 @@ pub enum SchemeConfig {
     /// 全拼：`nihao` + 空格 → 你好
     #[default]
     FullPinyin,
-    /// 双拼：两键一个音节，`layout` 选键位
+    /// 双拼：两键一个音节
     DoublePinyin {
-        /// `natural`(自然码) / `flypy`(小鹤) / `mspy`(微软双拼)
+        /// 预设键位：`natural`(自然码) / `flypy`(小鹤) / `mspy`(微软双拼) /
+        /// `none`（空表，全靠下面的 `keys` 自己填）
         #[serde(default = "default_layout")]
         layout: String,
+        /// 自定义键位。写在预设**之上**：改一个键就只写那一个；
+        /// `layout = "none"` 时这就是全部键位。
+        /// 键名 `zh`/`ch`/`sh` 是声母，别的都当韵母
+        #[serde(default)]
+        keys: BTreeMap<String, String>,
     },
     /// 码表方案：五笔、郑码、仓颉这类"键本身就是码"的
     Table {
@@ -142,11 +150,34 @@ impl Config {
         let syllables = dict.syllables();
         Ok(match &self.scheme {
             SchemeConfig::FullPinyin => Box::new(FullPinyin::new(syllables)),
-            SchemeConfig::DoublePinyin { layout } => {
-                let preset = Layout::preset(layout).ok_or_else(|| {
-                    format!("不认识的双拼键位 {layout:?}（可选 natural / flypy / mspy）")
-                })?;
-                Box::new(DoublePinyin::new(preset, syllables))
+            SchemeConfig::DoublePinyin { layout, keys } => {
+                let base = if layout == "none" {
+                    Layout::empty()
+                } else {
+                    Layout::preset(layout).ok_or_else(|| {
+                        format!("不认识的双拼键位 {layout:?}（可选 natural / flypy / mspy / none）")
+                    })?
+                };
+                let layout = base.with_keys(keys)?;
+                // 键位漏写一个韵母，表现是"有些字怎么打都打不出来"，特别难查 ——
+                // 所以在启动时就把编不出来的音节列出来
+                let missing = layout.missing_finals(syllables);
+                if !missing.is_empty() {
+                    // 只报"缺哪个韵母"，别把三百个音节甩出来
+                    let shown: Vec<&str> = missing.iter().take(12).map(String::as_str).collect();
+                    let more = if missing.len() > shown.len() {
+                        format!(" 等 {} 个", missing.len())
+                    } else {
+                        String::new()
+                    };
+                    return Err(format!(
+                        "这套双拼键位缺韵母：{}{more}（把它们补进 [scheme.keys]，比如 `{} = \"x\"`）",
+                        shown.join(" "),
+                        shown.first().copied().unwrap_or("ao")
+                    )
+                    .into());
+                }
+                Box::new(DoublePinyin::new(layout, syllables))
             }
             SchemeConfig::Table { name } => Box::new(Table::new(name)),
         })
@@ -160,30 +191,12 @@ impl Config {
     }
 }
 
-/// 一份带注释的配置模板（`pliers --init-config` 会写到配置文件路径）
-pub const EXAMPLE: &str = r#"# pliers 配置
-# 放在 ~/.config/pliers/config.toml 就会生效；删掉它就用默认值
-
-[scheme]
-# 用哪套输入方案：
-#   full-pinyin    全拼（nihao → 你好）
-#   double-pinyin  双拼（两键一个音节）
-#   table          码表方案（五笔这类，需要自己导入码表）
-kind = "full-pinyin"
-
-# 双拼键位，只在 kind = "double-pinyin" 时看：
-#   natural = 自然码   flypy = 小鹤双拼   mspy = 微软双拼
-# layout = "natural"
-
-# 码表方案的库内名字，只在 kind = "table" 时看：
-# name = "wubi"
-
-[dict]
-# 词库文件（cargo run -p pliers-dict --release -- --help 看怎么生成）
-# path = "~/.local/share/pliers/dict.db"
-# 候选框最多显示几个
-# max_candidates = 9
-"#;
+/// 一份带注释的配置模板。
+///
+/// 就是 `crates/pliers-engine/config.example.toml` 那个文件本身 ——
+/// 直接嵌进来，免得"代码里一份、仓库里一份"两边写着写着就不一样了。
+/// `pliers --init-config` 会把它写到 [`config_path`]。
+pub const EXAMPLE: &str = include_str!("../config.example.toml");
 
 #[cfg(test)]
 mod tests {
@@ -213,11 +226,103 @@ mod tests {
         )
         .unwrap();
         match &config.scheme {
-            SchemeConfig::DoublePinyin { layout } => assert_eq!(layout, "flypy"),
+            SchemeConfig::DoublePinyin { layout, .. } => assert_eq!(layout, "flypy"),
             other => panic!("{other:?}"),
         }
         assert_eq!(config.dict.max_candidates, 5);
         assert_eq!(config.dict_path(), Path::new("/tmp/x.db"));
+    }
+
+    #[test]
+    fn 双拼键位可以自己加() {
+        let dict = crate::dict::testing::sample_dict();
+        let config = Config::parse(
+            r#"
+            [scheme]
+            kind = "double-pinyin"
+            layout = "natural"
+
+            [scheme.keys]
+            ao = "c"
+            "#,
+        )
+        .unwrap();
+        match &config.scheme {
+            SchemeConfig::DoublePinyin { keys, .. } => assert_eq!(keys["ao"], "c"),
+            other => panic!("{other:?}"),
+        }
+        // 能建出来就说明键位是完整的（不完整会报错）
+        assert!(config.build_scheme(&dict).is_ok());
+    }
+
+    #[test]
+    fn 键位从零写也行() {
+        let dict = crate::dict::testing::sample_dict();
+        // 一套完整的自定义键位（这里直接抄自然码，证明"从零写"这条路是通的）
+        let mut keys = String::new();
+        for (finals, key) in [
+            ("zh", 'v'),
+            ("ch", 'i'),
+            ("sh", 'u'),
+            ("iang", 'd'),
+            ("uang", 'd'),
+            ("iong", 's'),
+            ("ing", 'y'),
+            ("uan", 'r'),
+            ("van", 'r'),
+            ("iao", 'c'),
+            ("ian", 'm'),
+            ("ang", 'h'),
+            ("eng", 'g'),
+            ("ong", 's'),
+            ("uai", 'y'),
+            ("iu", 'q'),
+            ("ia", 'w'),
+            ("ua", 'w'),
+            ("ve", 't'),
+            ("ue", 't'),
+            ("uo", 'o'),
+            ("un", 'p'),
+            ("vn", 'p'),
+            ("en", 'f'),
+            ("an", 'j'),
+            ("ao", 'k'),
+            ("ai", 'l'),
+            ("ei", 'z'),
+            ("ie", 'x'),
+            ("ui", 'v'),
+            ("ou", 'b'),
+            ("in", 'n'),
+        ] {
+            keys.push_str(&format!("{finals} = \"{key}\"\n"));
+        }
+        let config = Config::parse(&format!(
+            "[scheme]\nkind = \"double-pinyin\"\nlayout = \"none\"\n[scheme.keys]\n{keys}"
+        ))
+        .unwrap();
+        assert!(config.build_scheme(&dict).is_ok());
+    }
+
+    #[test]
+    fn 键位漏了韵母会在启动时说不清哪里错() {
+        let dict = crate::dict::testing::sample_dict();
+        let config = Config::parse(
+            "[scheme]\nkind = \"double-pinyin\"\nlayout = \"none\"\n[scheme.keys]\nzh = \"v\"\n",
+        )
+        .unwrap();
+        let message = match config.build_scheme(&dict) {
+            Ok(_) => panic!("键位不完整就该报错"),
+            Err(e) => e.to_string(),
+        };
+        assert!(message.contains("缺韵母"), "{message}");
+        assert!(
+            message.contains("scheme.keys"),
+            "错误信息要指出改哪儿：{message}"
+        );
+        assert!(
+            message.contains("ai") || message.contains("ao"),
+            "要说清缺哪个：{message}"
+        );
     }
 
     #[test]
@@ -245,14 +350,14 @@ mod tests {
         let config =
             Config::parse("[scheme]\nkind = \"double-pinyin\"\nlayout = \"zi Ran Ma\"\n").unwrap();
         match &config.scheme {
-            SchemeConfig::DoublePinyin { layout } => assert!(Layout::preset(layout).is_none()),
+            SchemeConfig::DoublePinyin { layout, .. } => assert!(Layout::preset(layout).is_none()),
             other => panic!("{other:?}"),
         }
     }
 
     #[test]
     fn 模板本身必须是合法配置() {
-        let config = Config::parse(EXAMPLE).expect("示例配置要能解析");
+        let config = Config::parse(EXAMPLE).expect("仓库里那份示例配置要能解析");
         assert!(matches!(config.scheme, SchemeConfig::FullPinyin));
     }
 }

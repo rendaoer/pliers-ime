@@ -3,13 +3,17 @@
 # 不需要真合成器，也不需要键盘 —— mock 假装自己有个输入框，把按键喂进来，
 # 然后检查客户端回给它的每一条请求。
 #
-#     ./tools/run_mock_tests.sh            # 全部场景
-#     MOCK_PNG=target/popup.png ./tools/run_mock_tests.sh   # 顺便存一张候选框的图
+#     ./tools/run_mock_tests.sh                        # 全部场景
+#     ./tools/run_mock_tests.sh --png target/popup.png # 顺便存一张候选框的图
+#     ./tools/run_mock_tests.sh --dict ~/.local/share/pliers/dict.db
 set -u
 cd "$(dirname "$0")/.."
 
 # 参数写法跟 shell 无关（${VAR=x cmd} 这种前缀在 zsh/bash/nushell 里写法不一样）：
-#   --dict <路径>   词库（默认 target/dict.db，也认 IME_AA_DICT/PLIERS_DICT）
+#   --dict <路径>   词库。不给就依次找 target/dict.db、~/.local/share/pliers/dict.db，
+#                   也认 PLIERS_DICT 环境变量。
+#                   注意测试里的选词会记进 user_word，不想污染自己的词频就指向一份副本：
+#                       cp ~/.local/share/pliers/dict.db target/dict-copy.db
 #   --png  <路径>   把 active 场景的候选框存成 PNG
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -24,11 +28,18 @@ cargo build -q || exit 1
 
 SOCK="/tmp/pliers-mock-$$.sock"
 # 词库：默认用仓库里导入好的那份（装到 ~/.local/share/pliers/ 之后就不用设了）
-DICT="${PLIERS_DICT:-$PWD/target/dict.db}"
-if [ ! -f "$DICT" ]; then
-    echo "找不到词库 $DICT，先跑：cargo run -p pliers-dict -- --freq target/jieba-dict.txt --out target/dict.db"
+DICT="${DICT_ARG:-${PLIERS_DICT:-}}"
+if [ -z "$DICT" ]; then
+    for candidate in "$PWD/target/dict.db" "$HOME/.local/share/pliers/dict.db"; do
+        if [ -f "$candidate" ]; then DICT="$candidate"; break; fi
+    done
+fi
+if [ -z "$DICT" ] || [ ! -f "$DICT" ]; then
+    echo "找不到词库（试过 target/dict.db 和 ~/.local/share/pliers/dict.db）"
+    echo "先导入：cargo run -p pliers-dict --release -- --freq jieba-dict.txt --out ~/.local/share/pliers/dict.db"
     exit 1
 fi
+echo "词库：$DICT"
 LOGS="$(mktemp -d)"
 pass=0
 fail=0

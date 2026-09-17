@@ -17,7 +17,7 @@
 //! 加新方案（比如郑码、仓颉、注音）就是实现这个 trait，别的都不用动 ——
 //! 词库那张表本来就有 `scheme` 字段，一套方案一个名字。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::dict::Dict;
 use crate::pinyin::Segmenter;
@@ -96,138 +96,214 @@ impl Scheme for FullPinyin {
 // ---- 双拼 -------------------------------------------------------------------
 
 /// 双拼键位。双拼各家的差别只在韵母摆在哪个键上，声母除了 zh/ch/sh 都还是自己
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout {
-    /// 韵母（按长度从长到短匹配）→ 键
-    pub finals: &'static [(&'static str, char)],
+    /// 韵母 → 键。按长度从长到短排好，匹配时取最长（`zhang` 要匹配 `ang` 不是 `ng`）
+    pub finals: Vec<(String, char)>,
     pub zh: char,
     pub ch: char,
     pub sh: char,
 }
 
-/// 自然码（也是搜狗、QQ 拼音的默认方案）
-pub const NATURAL: Layout = Layout {
-    finals: &[
-        ("iang", 'd'),
-        ("uang", 'd'),
-        ("iong", 's'),
-        ("ing", 'y'),
-        ("uan", 'r'),
-        ("van", 'r'),
-        ("iao", 'c'),
-        ("ian", 'm'),
-        ("ang", 'h'),
-        ("eng", 'g'),
-        ("ong", 's'),
-        ("uai", 'y'),
-        ("iu", 'q'),
-        ("ia", 'w'),
-        ("ua", 'w'),
-        ("ve", 't'),
-        ("ue", 't'),
-        ("uo", 'o'),
-        ("un", 'p'),
-        ("vn", 'p'),
-        ("en", 'f'),
-        ("an", 'j'),
-        ("ao", 'k'),
-        ("ai", 'l'),
-        ("ei", 'z'),
-        ("ie", 'x'),
-        ("ui", 'v'),
-        ("ou", 'b'),
-        ("in", 'n'),
-    ],
-    zh: 'v',
-    ch: 'i',
-    sh: 'u',
-};
+/// 双拼是"两键一音节"，这几个感叹词音节没有第二个键可打（`嗯` 一般打 `en`）。
+/// 校验自定义键位时要放过它们
+pub const UNENCODABLE: &[&str] = &["m", "n", "ng", "hm", "hng", "ê"];
 
-/// 小鹤双拼
-pub const FLYPY: Layout = Layout {
-    finals: &[
-        ("iang", 'l'),
-        ("uang", 'l'),
-        ("iong", 's'),
-        ("uai", 'k'),
-        ("ing", 'k'),
-        ("uan", 'r'),
-        ("iao", 'n'),
-        ("ian", 'm'),
-        ("ang", 'h'),
-        ("eng", 'g'),
-        ("ong", 's'),
-        ("iu", 'q'),
-        ("ei", 'w'),
-        ("ie", 'p'),
-        ("ue", 't'),
-        ("ve", 't'),
-        ("uo", 'o'),
-        ("un", 'y'),
-        ("en", 'f'),
-        ("an", 'j'),
-        ("ou", 'z'),
-        ("ia", 'x'),
-        ("ua", 'x'),
-        ("ao", 'c'),
-        ("ai", 'd'),
-        ("ui", 'v'),
-        ("in", 'b'),
-    ],
-    zh: 'v',
-    ch: 'i',
-    sh: 'u',
-};
+/// 自然码的韵母表（也是搜狗、QQ 拼音的默认方案）
+const NATURAL_FINALS: &[(&str, char)] = &[
+    ("iang", 'd'),
+    ("uang", 'd'),
+    ("iong", 's'),
+    ("ing", 'y'),
+    ("uan", 'r'),
+    ("van", 'r'),
+    ("iao", 'c'),
+    ("ian", 'm'),
+    ("ang", 'h'),
+    ("eng", 'g'),
+    ("ong", 's'),
+    ("uai", 'y'),
+    ("iu", 'q'),
+    ("ia", 'w'),
+    ("ua", 'w'),
+    ("ve", 't'),
+    ("ue", 't'),
+    ("uo", 'o'),
+    ("un", 'p'),
+    ("vn", 'p'),
+    ("en", 'f'),
+    ("an", 'j'),
+    ("ao", 'k'),
+    ("ai", 'l'),
+    ("ei", 'z'),
+    ("ie", 'x'),
+    ("ui", 'v'),
+    ("ou", 'b'),
+    ("in", 'n'),
+];
 
-/// 微软双拼（`ing` 在分号键上，所以它比别的方案多收一个键）
-pub const MSPY: Layout = Layout {
-    finals: &[
-        ("iang", 'd'),
-        ("uang", 'd'),
-        ("iong", 's'),
-        ("uai", 'y'),
-        ("uan", 'r'),
-        ("van", 'r'),
-        ("iao", 'c'),
-        ("ian", 'm'),
-        ("ang", 'h'),
-        ("eng", 'g'),
-        ("ong", 's'),
-        ("er", 'r'),
-        ("iu", 'q'),
-        ("ia", 'w'),
-        ("ua", 'w'),
-        ("ve", 't'),
-        ("ue", 't'),
-        ("uo", 'o'),
-        ("un", 'p'),
-        ("vn", 'p'),
-        ("en", 'f'),
-        ("an", 'j'),
-        ("ao", 'k'),
-        ("ai", 'l'),
-        ("ei", 'z'),
-        ("ie", 'x'),
-        ("ui", 'v'),
-        ("ou", 'b'),
-        ("in", 'n'),
-        ("ing", ';'),
-        ("v", 'y'),
-    ],
-    zh: 'v',
-    ch: 'i',
-    sh: 'u',
-};
+/// 小鹤双拼的韵母表
+const FLYPY_FINALS: &[(&str, char)] = &[
+    ("iang", 'l'),
+    ("uang", 'l'),
+    ("iong", 's'),
+    ("uai", 'k'),
+    ("ing", 'k'),
+    ("uan", 'r'),
+    ("iao", 'n'),
+    ("ian", 'm'),
+    ("ang", 'h'),
+    ("eng", 'g'),
+    ("ong", 's'),
+    ("iu", 'q'),
+    ("ei", 'w'),
+    ("ie", 'p'),
+    ("ue", 't'),
+    ("ve", 't'),
+    ("uo", 'o'),
+    ("un", 'y'),
+    ("en", 'f'),
+    ("an", 'j'),
+    ("ou", 'z'),
+    ("ia", 'x'),
+    ("ua", 'x'),
+    ("ao", 'c'),
+    ("ai", 'd'),
+    ("ui", 'v'),
+    ("in", 'b'),
+];
+
+/// 微软双拼的韵母表（`ing` 在分号键上，所以它比别的方案多收一个键）
+const MSPY_FINALS: &[(&str, char)] = &[
+    ("iang", 'd'),
+    ("uang", 'd'),
+    ("iong", 's'),
+    ("uai", 'y'),
+    ("uan", 'r'),
+    ("van", 'r'),
+    ("iao", 'c'),
+    ("ian", 'm'),
+    ("ang", 'h'),
+    ("eng", 'g'),
+    ("ong", 's'),
+    ("er", 'r'),
+    ("iu", 'q'),
+    ("ia", 'w'),
+    ("ua", 'w'),
+    ("ve", 't'),
+    ("ue", 't'),
+    ("uo", 'o'),
+    ("un", 'p'),
+    ("vn", 'p'),
+    ("en", 'f'),
+    ("an", 'j'),
+    ("ao", 'k'),
+    ("ai", 'l'),
+    ("ei", 'z'),
+    ("ie", 'x'),
+    ("ui", 'v'),
+    ("ou", 'b'),
+    ("in", 'n'),
+    ("ing", ';'),
+    ("v", 'y'),
+];
 
 impl Layout {
     /// 按名字取预设
     pub fn preset(name: &str) -> Option<Layout> {
-        match name {
-            "natural" | "自然码" => Some(NATURAL),
-            "flypy" | "小鹤" => Some(FLYPY),
-            "mspy" | "微软" => Some(MSPY),
-            _ => None,
+        let (finals, zh, ch, sh) = match name {
+            "natural" | "自然码" => (NATURAL_FINALS, 'v', 'i', 'u'),
+            "flypy" | "小鹤" => (FLYPY_FINALS, 'v', 'i', 'u'),
+            "mspy" | "微软" => (MSPY_FINALS, 'v', 'i', 'u'),
+            _ => return None,
+        };
+        Some(Layout::new(finals, zh, ch, sh))
+    }
+
+    /// 空键位表：配置文件里写 `layout = "none"`，全靠 `[scheme.keys]` 自己填。
+    /// 声母的默认值跟自然码一样（zh/ch/sh → v/i/u），一般也要自己写
+    pub fn empty() -> Layout {
+        Layout {
+            finals: Vec::new(),
+            zh: 'v',
+            ch: 'i',
+            sh: 'u',
         }
+    }
+
+    fn new(finals: &[(&str, char)], zh: char, ch: char, sh: char) -> Layout {
+        let mut layout = Layout {
+            finals: finals
+                .iter()
+                .map(|(finals, key)| ((*finals).to_string(), *key))
+                .collect(),
+            zh,
+            ch,
+            sh,
+        };
+        layout.sort_finals();
+        layout
+    }
+
+    /// 长的韵母排前面，匹配时才能"最长优先"
+    fn sort_finals(&mut self) {
+        self.finals
+            .sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.0.cmp(&b.0)));
+        self.finals.dedup_by(|a, b| a.0 == b.0);
+    }
+
+    /// 在现有键位上改几个键（配置文件里的 `[scheme.keys]`）。
+    /// 键名写 `zh`/`ch`/`sh` 就是改声母，别的都当韵母
+    pub fn with_keys(mut self, keys: &BTreeMap<String, String>) -> Result<Layout, String> {
+        for (name, value) in keys {
+            let mut chars = value.chars();
+            let (Some(key), None) = (chars.next(), chars.next()) else {
+                return Err(format!("键位表里 {name:?} = {value:?}：值必须正好一个字符"));
+            };
+            if !(key.is_ascii_lowercase() || key == ';') {
+                return Err(format!(
+                    "键位表里 {name:?} = {value:?}：键只能是 a-z 或分号"
+                ));
+            }
+            match name.as_str() {
+                "zh" => self.zh = key,
+                "ch" => self.ch = key,
+                "sh" => self.sh = key,
+                _ => {
+                    // 同名韵母以自定义的为准
+                    self.finals.retain(|(finals, _)| finals != name);
+                    self.finals.push((name.clone(), key));
+                }
+            }
+        }
+        self.sort_finals();
+        Ok(self)
+    }
+
+    /// 这套键位编不出两键的音节（`m`/`n`/`ng` 那几个感叹词不算）
+    pub fn unencodable(&self, syllables: &[String]) -> Vec<String> {
+        syllables
+            .iter()
+            .filter(|syllable| {
+                !UNENCODABLE.contains(&syllable.as_str()) && self.encode(syllable).is_none()
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// 编不出来的音节，缺的是哪些**韵母**。
+    ///
+    /// 直接把 300 个音节甩给用户没用，得告诉他"你少写了 ai、ang 这几个" ——
+    /// 所以把音节去掉声母，剩下的就是那个没定义的韵母（`bai` → `ai`，`zhuang` → `uang`）
+    pub fn missing_finals(&self, syllables: &[String]) -> Vec<String> {
+        let mut missing: Vec<String> = self
+            .unencodable(syllables)
+            .iter()
+            .map(|syllable| final_of(syllable).to_string())
+            .collect();
+        missing.sort();
+        missing.dedup();
+        missing
     }
 
     /// 一个完整音节 → 两个键。
@@ -264,12 +340,14 @@ impl Layout {
     /// 把韵母换成键，要求结果正好两键
     fn compress(&self, code: &str) -> Option<String> {
         // 最长的韵母优先：`zhang` 要匹配 `ang`，不能匹配成 `ng`
-        let mut best: Option<&(&str, char)> = None;
-        for entry in self.finals {
+        let mut best: Option<&(String, char)> = None;
+        for entry in &self.finals {
             let (finals, _) = entry;
             if code.len() > finals.len()
-                && code.ends_with(finals)
-                && best.is_none_or(|(best_finals, _)| finals.len() > best_finals.len())
+                && code.ends_with(finals.as_str())
+                && best
+                    .as_ref()
+                    .is_none_or(|(best_finals, _)| finals.len() > best_finals.len())
             {
                 best = Some(entry);
             }
@@ -279,6 +357,19 @@ impl Layout {
             None => code.to_string(),
         };
         (code.chars().count() == 2).then_some(code)
+    }
+}
+
+/// 从一个音节里切出韵母：`bai` → `ai`，`zhuang` → `uang`，`ai` → `ai`
+fn final_of(syllable: &str) -> &str {
+    for initial in ["zh", "ch", "sh"] {
+        if let Some(rest) = syllable.strip_prefix(initial) {
+            return rest;
+        }
+    }
+    match syllable.chars().next() {
+        Some(first) if !"aoe".contains(first) => &syllable[first.len_utf8()..],
+        _ => syllable,
     }
 }
 
@@ -438,7 +529,7 @@ mod tests {
 
     #[test]
     fn 自然码键位() {
-        let layout = NATURAL;
+        let layout = Layout::preset("natural").unwrap();
         // 零声母：抄首字母再压韵母
         for (syllable, want) in [
             ("ni", "ni"),
@@ -462,54 +553,132 @@ mod tests {
     #[test]
     fn 小鹤和微软的韵母键不一样() {
         // 小鹤：ao→c, ei→w, in→b；微软：ing 在分号上
-        assert_eq!(FLYPY.encode("hao").as_deref(), Some("hc"));
-        assert_eq!(FLYPY.encode("bei").as_deref(), Some("bw"));
-        assert_eq!(FLYPY.encode("xin").as_deref(), Some("xb"));
-        assert_eq!(MSPY.encode("xing").as_deref(), Some("x;"));
+        let flypy = Layout::preset("flypy").unwrap();
+        let mspy = Layout::preset("mspy").unwrap();
+        assert_eq!(flypy.encode("hao").as_deref(), Some("hc"));
+        assert_eq!(flypy.encode("bei").as_deref(), Some("bw"));
+        assert_eq!(flypy.encode("xin").as_deref(), Some("xb"));
+        assert_eq!(mspy.encode("xing").as_deref(), Some("x;"));
     }
 
     #[test]
     fn 每个音节都能编成两键() {
         // 双拼是"两键一音节"，`m`/`n`/`ng`（呣/嗯/唔）这种单键感叹词塞不进这个模型 ——
         // 词表里有，但双拼方案一般打 `en`（恩）。除了它们，别的音节都要能编出来
-        const EXPECTED_MISSING: &[&str] = &["m", "n", "ng", "hm", "hng", "ê"];
-        for layout in [NATURAL, FLYPY, MSPY] {
-            let mut missing = Vec::new();
+        for name in ["natural", "flypy", "mspy"] {
+            let layout = Layout::preset(name).unwrap();
             for syllable in syllables() {
-                match layout.encode(&syllable) {
-                    Some(code) => assert_eq!(code.chars().count(), 2, "{syllable} → {code}"),
-                    None => missing.push(syllable),
+                if let Some(code) = layout.encode(&syllable) {
+                    assert_eq!(code.chars().count(), 2, "{syllable} → {code}");
                 }
             }
-            missing.retain(|syllable| !EXPECTED_MISSING.contains(&syllable.as_str()));
-            assert!(missing.is_empty(), "{layout:?} 编不出这些音节：{missing:?}");
+            assert!(
+                layout.unencodable(&syllables()).is_empty(),
+                "{name} 漏了：{:?}",
+                layout.unencodable(&syllables())
+            );
         }
     }
 
     #[test]
     fn 双拼打你好() {
-        let double = DoublePinyin::new(NATURAL, &syllables());
+        let double = DoublePinyin::new(Layout::preset("natural").unwrap(), &syllables());
         // 自然码：ni = n+i，hao = h+k
         assert_eq!(double.lookup_codes("nihk"), ["ni hao"]);
         // 小鹤：hao = h+c
-        let flypy = DoublePinyin::new(FLYPY, &syllables());
+        let flypy = DoublePinyin::new(Layout::preset("flypy").unwrap(), &syllables());
         assert_eq!(flypy.lookup_codes("nihc"), ["ni hao"]);
     }
 
     #[test]
     fn 双拼的半截音节也补全() {
-        let double = DoublePinyin::new(NATURAL, &syllables());
+        let double = DoublePinyin::new(Layout::preset("natural").unwrap(), &syllables());
         // 只打了 h：所有 h 开头的音节都该试一遍，包括 hao
         let codes = double.lookup_codes("nih");
         assert!(codes.contains(&"ni hao".to_string()), "{codes:?}");
     }
 
     #[test]
+    fn 自定义键位能在预设上改() {
+        // 就用自然码，但把 ao 从 k 挪到 c（小鹤的位置）
+        let keys: BTreeMap<String, String> =
+            [("ao".to_string(), "c".to_string())].into_iter().collect();
+        let layout = Layout::preset("natural").unwrap().with_keys(&keys).unwrap();
+        assert_eq!(layout.encode("hao").as_deref(), Some("hc"));
+        // 没动过的键还按预设来
+        assert_eq!(layout.encode("ni").as_deref(), Some("ni"));
+        assert_eq!(layout.encode("zhang").as_deref(), Some("vh"));
+    }
+
+    #[test]
+    fn 键位表可以从零写() {
+        // layout = "none" + 自己填一套：这里只填几个，验证写法通了
+        let keys: BTreeMap<String, String> = [("zh", "u"), ("ao", "c"), ("ang", "h"), ("an", "j")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let layout = Layout::empty().with_keys(&keys).unwrap();
+        assert_eq!(layout.encode("zhang").as_deref(), Some("uh"));
+        assert_eq!(layout.encode("hao").as_deref(), Some("hc"));
+        // 没定义的韵母就编不出来：ai 没写，所以 bai 出不来 —— unencodable 会列出来
+        let missing = layout.unencodable(&syllables());
+        assert!(missing.contains(&"bai".to_string()), "{missing:?}");
+        // 单字母韵母不用定义：ni 就是 n + i
+        assert!(!missing.contains(&"ni".to_string()), "{missing:?}");
+    }
+
+    #[test]
+    fn 键位写错了要报错() {
+        // 值不是单个字符
+        let keys: BTreeMap<String, String> =
+            [("ao".to_string(), "kk".to_string())].into_iter().collect();
+        let err = Layout::preset("natural")
+            .unwrap()
+            .with_keys(&keys)
+            .unwrap_err();
+        assert!(err.contains("一个字符"), "{err}");
+
+        // 键不是字母
+        let keys: BTreeMap<String, String> =
+            [("ao".to_string(), "1".to_string())].into_iter().collect();
+        assert!(Layout::preset("natural").unwrap().with_keys(&keys).is_err());
+    }
+
+    #[test]
+    fn 报错要说缺的是哪个韵母() {
+        let mut keys: BTreeMap<String, String> = BTreeMap::new();
+        for (finals, key) in NATURAL_FINALS {
+            keys.insert((*finals).to_string(), key.to_string());
+        }
+        keys.remove("ang");
+        keys.remove("ai");
+        let layout = Layout::empty().with_keys(&keys).unwrap();
+        assert_eq!(layout.missing_finals(&syllables()), ["ai", "ang"]);
+    }
+
+    #[test]
+    fn 漏写韵母会被查出来() {
+        // 故意把自然码的 ang 删掉（拿一个不存在的键名去覆盖不会删掉原来的，
+        // 这里直接用空表 + 少一个韵母的写法）
+        let mut keys: BTreeMap<String, String> = BTreeMap::new();
+        for (finals, key) in NATURAL_FINALS {
+            keys.insert((*finals).to_string(), key.to_string());
+        }
+        keys.remove("ang");
+        let layout = Layout::empty().with_keys(&keys).unwrap();
+        let missing = layout.unencodable(&syllables());
+        assert!(missing.contains(&"ang".to_string()), "{missing:?}");
+        assert!(missing.contains(&"zhang".to_string()), "{missing:?}");
+        // 感叹词不算"漏"（双拼本来就没法打）
+        assert!(!missing.contains(&"ng".to_string()));
+    }
+
+    #[test]
     fn 微软双拼收分号() {
-        let mspy = DoublePinyin::new(MSPY, &syllables());
+        let mspy = DoublePinyin::new(Layout::preset("mspy").unwrap(), &syllables());
         assert!(mspy.accepts(';'));
         assert!(mspy.accepts('z'));
-        let natural = DoublePinyin::new(NATURAL, &syllables());
+        let natural = DoublePinyin::new(Layout::preset("natural").unwrap(), &syllables());
         assert!(!natural.accepts(';'));
     }
 }

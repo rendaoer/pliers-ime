@@ -104,9 +104,13 @@ sqlite3 ~/.local/share/pliers/dict.db "INSERT OR REPLACE INTO word (scheme, code
 # 想把用户词频清零（同样要先退出输入法）
 sqlite3 ~/.local/share/pliers/dict.db "DELETE FROM user_word;"
 
-# 只想看看数据（输入法开着也能读，因为读的是副本）
-cp ~/.local/share/pliers/dict.db /tmp/dict-copy.db
-sqlite3 /tmp/dict-copy.db "SELECT text, count FROM user_word ORDER BY count DESC LIMIT 10;"
+# 只想看看数据（输入法开着也能读，因为读的是副本）。
+# 一定要连 -wal 一起拷：最新的写入还在 WAL 里，只拷 .db 会看到旧数据
+mkdir -p /tmp/dbcopy
+cp ~/.local/share/pliers/dict.db     /tmp/dbcopy/
+cp ~/.local/share/pliers/dict.db-wal /tmp/dbcopy/    # 没有这个文件就是刚 checkpoint 过，跳过
+
+sqlite3 /tmp/dbcopy/dict.db "SELECT text, count, last_used FROM user_word ORDER BY last_used DESC LIMIT 10;"
 ```
 
 ## 运行与测试
@@ -140,6 +144,9 @@ PLIERS_DEBUG=1 cargo run
 `unavailable`（smithay 的 `InputMethodHandle::add_instance`），旧实例会打印
 「有另一个输入法接管了这个 seat」然后退出。所以别同时跑两个。
 
+（词库本身不会打架：turso 允许同一个库开多个连接，我试过两个连接一个写一个读都正常。
+真正冲突的只有 Wayland 那个 seat。）
+
 | 按键 | 行为 |
 | --- | --- |
 | `a`–`z` / `A`–`Z`（Shift、Caps Lock 打出来的大写也一样） | 攒进 buffer，用 `set_preedit_string` 显示为预编辑文本 —— 打字中途**不会**往应用里塞任何字符 |
@@ -157,7 +164,15 @@ PLIERS_DEBUG=1 cargo run
 
 ### 输入方案（配置文件）
 
-行为定义在 `~/.config/pliers/config.toml`（模板见仓库根目录 `pliers.example.toml`）：
+行为定义在 `~/.config/pliers/config.toml` —— 注意是 **config** 目录，词库在 `~/.local/share/pliers/`。
+没有这个文件就用内置默认值（全拼）。想要一份带注释的模板：
+
+```bash
+pliers --init-config        # 写到 ~/.config/pliers/config.toml，已存在就不覆盖（--force 强制）
+```
+
+模板本身也躺在仓库里：`crates/pliers-engine/config.example.toml`（`--init-config` 写的就是它，
+代码里是 `include_str!` 嵌进去的，不会两边漂移）。配置内容：
 
 ```toml
 [scheme]
@@ -168,17 +183,30 @@ kind = "full-pinyin"      # full-pinyin | double-pinyin | table
 # max_candidates = 9
 ```
 
-**双拼**已经能用，键位是照 Rime 的方案文件推的：
+**双拼**已经能用，三套预设 + 自己写键位：
 
 ```toml
 [scheme]
 kind = "double-pinyin"
-layout = "natural"        # natural(自然码) | flypy(小鹤) | mspy(微软双拼)
+layout = "natural"        # natural(自然码) | flypy(小鹤) | mspy(微软双拼) | none(空表)
+
+# 可选：在预设上改几个键（layout = "none" 时这里就是全部键位）
+[scheme.keys]
+ao = "c"                  # 把 ao 从 k 挪到 c
+zh = "v"                  # zh/ch/sh 是声母，别的名字都当韵母
 ```
 
-自然码下 `nihk` → 你好（`hao` 在 `k` 键上），小鹤是 `nihc`。多音字、零声母
-（`ang` → `ah`）这些规则都在 `crates/pliers-engine/src/scheme.rs` 的 `encode()` 里，
-一个音节两键，推不出两键的音节说明那套键位没设计它。
+自然码下 `nihk` → 你好（`hao` 在 `k` 键上），小鹤是 `nihc`。零声母（`ang` → `ah`）
+这类规则在 `crates/pliers-engine/src/scheme.rs` 的 `encode()` 里，一个音节两键。
+
+键位写错了会在**启动时**报错，而不是等你打字打不出来才发现 —— 它会反推出你漏了哪个韵母：
+
+```text
+Error: "这套双拼键位缺韵母：ai an ang ei en eng ia ian iang iao ie in 等 26 个
+        （把它们补进 [scheme.keys]，比如 `ai = \"x\"`）"
+```
+
+（单键的感叹词音节 `m`/`n`/`ng` 双拼本来就没法打，不算漏。）
 
 **五笔**（以及郑码、仓颉这类码表方案）走 `table`：
 
@@ -393,7 +421,13 @@ wl_compositor / wl_shm / zwp_input_method_v2 / zwp_virtual_keyboard_v1 的够用
 ./tools/run_mock_tests.sh --png target/popup.png      # 顺便存一张候选框实拍
 ```
 
-它默认用 `target/dict.db` 那份词库，也可以用 `PLIERS_DICT=/path/dict.db` 换。
+词库默认依次找 `target/dict.db`、`~/.local/share/pliers/dict.db`，也可以 `--dict <路径>` 指定。
+测试里的选词会写进 `user_word`，**不想污染自己的词频就指向一份副本**：
+
+```bash
+cp ~/.local/share/pliers/dict.db target/dict-copy.db
+./tools/run_mock_tests.sh --dict target/dict-copy.db
+```
 
 也可以单跑一个场景，第二、三个参数是「要喂的按键」和「期望提交的文本」：
 

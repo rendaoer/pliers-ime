@@ -12,7 +12,14 @@ kind = "full-pinyin"
 
 # 双拼键位，只在 kind = "double-pinyin" 时看：
 #   natural = 自然码（搜狗/QQ 拼音默认）   flypy = 小鹤   mspy = 微软双拼
+#   none    = 空表，键位全靠下面的 [scheme.keys] 自己写
 # layout = "natural"
+
+# 自定义键位。[scheme.keys] 写在预设**之上**：只改一个键就只写那一个；
+# layout = "none" 时它就是全部键位。名字写 zh/ch/sh 是声母，别的都当韵母。
+# [scheme.keys]
+# ao = "c"      # 把 ao 从 k 挪到 c（小鹤的位置）
+# zh = "v"
 
 # 码表在词库里的名字，只在 kind = "table" 时看。
 # 码表要用 pliers-dict 导进去：--table 码表.txt --table-scheme wubi

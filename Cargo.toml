@@ -7,12 +7,22 @@ default-members = ["crates/pliers-ime"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+# 发布到 crates.io 必填。代码是 MIT/Apache 双许可；**词库资产**是另一回事
+#（它是 GPL-3.0 语料 rime-frost 的衍生作品，见 docs/dictionary.md）
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rendaoer/pliers-ime"
+keywords = ["input-method", "wayland", "ime", "pinyin", "chinese"]
 
 [workspace.dependencies]
 wayland-client = "0.31"
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 xkbcommon = "0.7"
 
-pliers-engine = { path = "crates/pliers-engine" }
-pliers-popup = { path = "crates/pliers-popup" }
-pliers-wayland = { path = "crates/pliers-wayland" }
+# 内部依赖：path 是开发用的，version 是发布用的。**两个都得写** ——
+# 发布时 cargo 会把 path 去掉、只留 version，不然 `cargo publish` 直接报
+# "all dependencies must have a version requirement specified"。
+# 注意 `version.workspace = true` 在这里不支持（cargo 只认字面量），
+# 所以改版本号时 [workspace.package] 和这三行要一起改
+pliers-engine = { version = "0.1.0", path = "crates/pliers-engine" }
+pliers-popup = { version = "0.1.0", path = "crates/pliers-popup" }
+pliers-wayland = { version = "0.1.0", path = "crates/pliers-wayland" }

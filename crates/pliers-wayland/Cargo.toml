@@ -3,6 +3,8 @@ name = "pliers-wayland"
 description = "Wayland 协议层：以输入法身份注册、抓键盘、转发按键、贴候选框"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 wayland-client.workspace = true

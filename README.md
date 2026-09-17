@@ -1,7 +1,7 @@
 # pliers（钳子）
 
 最小可用的 Wayland 中文输入法：敲 `nihao` + 空格 → 输出「你好」，组词时输入框旁边弹出
-候选框，`↓`/`Tab` 或数字 `1`–`9` 挑，空格上屏选中的那个。
+候选框，`←`/`→` 挪选中的那个、`↑`/`↓` 整页翻，也可以直接按数字 `1`–`9`；空格上屏。
 
 * **全拼**是完整实现的：150 万词的词库、音节切分、**整句候选**、词频排序、用户调频
 * **双拼 / 五笔**留好了位置：双拼（自然码/小鹤/微软）已经能用，五笔是"码表方案"那条路
@@ -19,6 +19,8 @@
 cargo run -- --init      # 装一份能用的：写配置 + 下载词库（几十 MB）
 cargo run                # 跑起来
 ```
+
+（发到 crates.io 之后也可以直接装：`cargo install pliers-ime` —— 装出来的命令叫 `pliers`）
 
 然后把焦点放进输入框，敲 `n i h a o` 再按空格。能不能用取决于**应用自己有没有实现
 text-input 协议**：Firefox / GTK / Qt 应用都行，alacritty 0.17（基于 winit）实测也可以。
@@ -39,7 +41,7 @@ seat」然后退出，所以别同时跑两个。
 
 ```bash
 cargo test --workspace        # 162 个单测，不需要合成器、不需要词库
-./tools/run_mock_tests.sh     # mock 合成器跑 24 个场景 + 2 项在线改配置检查
+./tools/run_mock_tests.sh     # mock 合成器跑 25 个场景 + 2 项在线改配置检查
 ```
 
 ## 按键速查
@@ -48,7 +50,8 @@ cargo test --workspace        # 162 个单测，不需要合成器、不需要�
 | --- | --- |
 | `a`–`z`（小写） | 组词；**只有小写参与匹配**，大写一律当英文字符 |
 | 空格 | 上屏选中的候选（可能是"只匹配了前面一段"的分段候选） |
-| `←` `→` `↑` `↓` / `Tab` | 挪选中的候选，挪出这一页会自动翻页 |
+| `←` `→` / `Tab` / `Shift+Tab` | 挪选中的候选（挪出这一页会自动翻页） |
+| `↑` `↓` / `,` `.` / `-` `=` / `PageUp` `PageDown` | 整页翻，页内位置保持 |
 | `,` `.` / `-` `=` / `PageUp` `PageDown` | 整页翻 |
 | `1`–`9` | 选这一页的第几个 |
 | 其他符号 | **先把候选上屏、再把符号转给应用**（反了屏幕上就是 `,你好`） |
@@ -70,7 +73,7 @@ cargo test --workspace        # 162 个单测，不需要合成器、不需要�
 | [docs/dictionary.md](docs/dictionary.md) | 词库怎么装（`pliers --init`）、换成别的源、自己从语料构建、表结构与权重、用 SQL 加词、`lookup` 看候选 |
 | [docs/internals.md](docs/internals.md) | crate 划分、用了哪些 Wayland 协议、**为什么拼音查询不能交给 SQL**、整句候选、候选框是怎么画出来的 |
 | [docs/pitfalls.md](docs/pitfalls.md) | 10 条实测踩出来的坑（Ctrl+A 被吃掉、焦点一走拼音就没了……）+ 已知不足 |
-| [docs/testing.md](docs/testing.md) | 单测、跑起来、`PLIERS_DEBUG`、mock 合成器的 24 个场景都验了什么 |
+| [docs/testing.md](docs/testing.md) | 单测、跑起来、`PLIERS_DEBUG`、mock 合成器的 25 个场景都验了什么 |
 
 ## 代码结构
 
@@ -91,6 +94,14 @@ cargo test --workspace        # 162 个单测，不需要合成器、不需要�
 * 加词 / 调词频 → 用 SQL 改词库，或者重新跑一遍 `pliers-dict`
 * 换候选框长相（甚至换成 egui/Slint 画）→ `crates/pliers-popup`
 * 加协议功能（比如 `delete_surrounding_text`）→ `crates/pliers-wayland`
+
+## 许可
+
+* **代码**：[MIT](LICENSE-MIT) 或 [Apache-2.0](LICENSE-APACHE)，随你挑一个用
+* **词库资产**（Release 里的 `dict.db.zst`）：**GPL-3.0** —— 它是
+  [rime-frost](https://github.com/gaboolic/rime-frost) 那份 GPL-3.0 语料的衍生作品，
+  跟代码的许可是两回事。不想碰它就 `pliers dict build` 自己从上游构建（那只是下载语料，
+  不涉及再分发）—— 见 [docs/dictionary.md](docs/dictionary.md#许可)
 
 ## 名字
 

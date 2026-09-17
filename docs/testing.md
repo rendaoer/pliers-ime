@@ -55,7 +55,7 @@ wl_compositor / wl_shm / zwp_input_method_v2 / zwp_virtual_keyboard_v1 的够用
 `wl_buffer.release`：
 
 ```bash
-./tools/run_mock_tests.sh                             # 24 个场景 + 2 项在线改配置检查，全绿才算过
+./tools/run_mock_tests.sh                             # 25 个场景 + 2 项在线改配置检查，全绿才算过
 ./tools/run_mock_tests.sh --png target/popup.png      # 顺便存一张候选框实拍
 ```
 
@@ -79,8 +79,9 @@ cp ~/.local/share/pliers/dict.db target/dict-copy.db
 | `active` | `nihao ` | 提交「你好」，候选框宽度随候选变化、框里有字 |
 | `active_nomods` | 同上，但合成器一个 `modifiers` 事件都不发 | 修饰键状态自己算得出来 |
 | `pick` | `shijian2` | 数字选词直接上屏第 2 个候选（「事件」），按键连抬起都不转发 |
-| `nav` | `shijian` + `↓` + 空格 | 换候选不改预编辑串，提交第 2 个候选 |
-| `page` | `ni` + 9× `→` + 空格 | 挪过这一页会自动翻页，提交的不是第一页的「你」 |
+| `nav` | `shijian` + `→` + 空格 | 左右挪候选：不改预编辑串，提交第 2 个候选 |
+| `pagekey` | `ni` + `↓` + 空格 | 上下整页翻：一下就到第二页，提交的不是第一页的「你」 |
+| `page` | `ni` + 9× `→` + 空格 | 左右挪着挪着挪出这一页，会自动翻到下一页 |
 | `caps` | Caps Lock 打开后 `nihao ` | 大写不参与匹配：零提交、零候选框、14 个事件全转发 |
 | `enter` / `escape` | `nihao` + 回车 / Esc | 原样提交 / 取消，按键不给应用 |
 | `mixed` | `aaa` + `Shift+A` + 空格 | 大写并进预编辑（预编辑串到过 `aaaA`，候选框收起），空格整串原样上屏 |

@@ -696,27 +696,28 @@ impl Engine {
                 self.changed()
             }
 
-            // ←↓→↑ / Tab：挪选中的候选。组词当中方向键不该去动输入框里的光标。
-            // 挪出这一页会自动翻页（页是算出来的）
-            KEY_DOWN | KEY_RIGHT | KEY_TAB if composing => {
+            // 候选框是**横排**的，所以方向键按"沿着这一行"和"换一行"分：
+            //   ←→ 在候选之间挪（挪出这一页会自动翻页，页是算出来的）
+            //   ↑↓ 整页翻（跟 , . / - = / PgUp PgDn 一样）
+            // 组词当中方向键一律不去动输入框里的光标
+            KEY_RIGHT | KEY_TAB if composing => {
                 self.consumed.push(key.keycode);
                 self.step(1)
             }
 
-            // ← / ↑ / Shift+Tab：往回挪
-            KEY_LEFT | KEY_UP | KEY_ISO_LEFT_TAB if composing => {
+            KEY_LEFT | KEY_ISO_LEFT_TAB if composing => {
                 self.consumed.push(key.keycode);
                 self.step(-1)
             }
 
-            // , - / PageUp：上一页；. = / PageDown：下一页。
-            // 一页一页翻，页内位置保持（光标 +整页，取模绕圈）
-            KEY_COMMA | KEY_MINUS | KEY_PAGE_UP if composing => {
+            // ↑ / , / - / PageUp：上一页；↓ / . / = / PageDown：下一页。
+            // 一页一页翻，页内位置保持（光标 ±整页，取模绕圈）
+            KEY_UP | KEY_COMMA | KEY_MINUS | KEY_PAGE_UP if composing => {
                 self.consumed.push(key.keycode);
                 self.step(-(self.limit as i32))
             }
 
-            KEY_PERIOD | KEY_EQUAL | KEY_PAGE_DOWN if composing => {
+            KEY_DOWN | KEY_PERIOD | KEY_EQUAL | KEY_PAGE_DOWN if composing => {
                 self.consumed.push(key.keycode);
                 self.step(self.limit as i32)
             }
@@ -1340,18 +1341,40 @@ mod tests {
     }
 
     #[test]
-    fn 方向键换候选空格上屏选中的() {
+    fn 左右键换候选空格上屏选中的() {
         let mut engine = engine();
         type_letters(&mut engine, "ni");
         let second = engine.preedit().candidates[1].clone();
-        // ↓ 选中第二个
-        assert_eq!(text_of(engine.on_key(key(KEY_DOWN))).unwrap(), "ni");
+        // → 选中第二个（↑↓ 是整页翻，见另一个测试）
+        assert_eq!(text_of(engine.on_key(key(KEY_RIGHT))).unwrap(), "ni");
         assert_eq!(engine.preedit().selected, 1);
         assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Commit(second));
     }
 
     #[test]
-    fn tab_也能翻候选() {
+    fn 上下键整页翻() {
+        let mut engine = engine();
+        type_letters(&mut engine, "ni");
+        // 候选框是横排的：上下 = 换一行 = 整页翻，页内位置保持
+        assert_eq!(engine.preedit().candidates.len(), 9, "一页 9 个");
+        engine.on_key(key(KEY_DOWN));
+        let preedit = engine.preedit();
+        assert_eq!(preedit.page, 1, "↓ 直接到第 2 页");
+        assert_eq!(preedit.selected, 0, "页内位置保持");
+        engine.on_key(key(KEY_DOWN));
+        assert_eq!(
+            engine.preedit().page,
+            2,
+            "再 ↓ 到第 3 页（最后一页只剩 2 个）"
+        );
+        engine.on_key(key(KEY_DOWN));
+        assert_eq!(engine.preedit().page, 0, "翻到头绕回第 1 页");
+        engine.on_key(key(KEY_UP));
+        assert_eq!(engine.preedit().page, 2, "↑ 往回一页");
+    }
+
+    #[test]
+    fn tab_也能挪候选() {
         let mut engine = engine();
         type_letters(&mut engine, "ni");
         engine.on_key(key(KEY_TAB));
@@ -1359,9 +1382,9 @@ mod tests {
         assert_eq!(engine.preedit().selected, 2);
         engine.on_key(key(KEY_ISO_LEFT_TAB));
         assert_eq!(engine.preedit().selected, 1);
-        // ↑ 走到头会绕回最后一个
-        engine.on_key(key(KEY_UP));
-        engine.on_key(key(KEY_UP));
+        // ← 走到头会绕回最后一个（Tab 跟 ←→ 是一路，都是"挪一个"）
+        engine.on_key(key(KEY_LEFT));
+        engine.on_key(key(KEY_LEFT));
         assert_eq!(
             engine.preedit().selected,
             engine.preedit().candidates.len() - 1
@@ -1419,7 +1442,7 @@ mod tests {
         engine.on_key(key(KEY_COMMA));
         assert_eq!(engine.preedit().page, 0);
 
-        // 这几个键都是翻页：- = （微软拼音的习惯）、, . 、PgUp/PgDn。
+        // 这几个键都是翻页：↑↓、- = （微软拼音的习惯）、, . 、PgUp/PgDn。
         // 从第 0 页开始，一路按下来应该这么走
         for (pressed, want_page) in [
             (KEY_EQUAL, 1),
@@ -1428,6 +1451,8 @@ mod tests {
             (KEY_PAGE_UP, 0),
             (KEY_PERIOD, 1),
             (KEY_COMMA, 0),
+            (KEY_DOWN, 1),
+            (KEY_UP, 0),
         ] {
             engine.on_key(key(pressed));
             assert_eq!(
@@ -1453,17 +1478,23 @@ mod tests {
     }
 
     #[test]
-    fn 上下左右都能挪选中() {
+    fn 左右挪选中上下整页翻() {
         let mut engine = engine();
         type_letters(&mut engine, "ni");
-        engine.on_key(key(KEY_DOWN));
+        // ←→ 挪一个
+        engine.on_key(key(KEY_RIGHT));
         assert_eq!(engine.preedit().selected, 1);
         engine.on_key(key(KEY_RIGHT));
         assert_eq!(engine.preedit().selected, 2);
-        engine.on_key(key(KEY_UP));
-        assert_eq!(engine.preedit().selected, 1);
         engine.on_key(key(KEY_LEFT));
-        assert_eq!(engine.preedit().selected, 0);
+        assert_eq!(engine.preedit().selected, 1);
+        // ↑↓ 翻一页，页内位置保持（候选框是横排的，上下就是"换一行"）
+        engine.on_key(key(KEY_DOWN));
+        let preedit = engine.preedit();
+        assert_eq!((preedit.page, preedit.selected), (1, 1));
+        engine.on_key(key(KEY_UP));
+        let preedit = engine.preedit();
+        assert_eq!((preedit.page, preedit.selected), (0, 1));
     }
 
     #[test]
@@ -1508,7 +1539,7 @@ mod tests {
     fn 退格之后选中回到第一个() {
         let mut engine = engine();
         type_letters(&mut engine, "nihao");
-        engine.on_key(key(KEY_DOWN));
+        engine.on_key(key(KEY_RIGHT));
         assert_eq!(engine.preedit().selected, 1);
         engine.on_key(key(KEY_BACKSPACE));
         assert_eq!(engine.preedit().selected, 0);
@@ -1889,7 +1920,7 @@ mod tests {
     fn 组词中敲符号上屏的是选中的那个候选() {
         let mut engine = engine();
         type_letters(&mut engine, "nihao");
-        engine.on_key(key(KEY_DOWN)); // 换到第二个候选
+        engine.on_key(key(KEY_RIGHT)); // 换到第二个候选
         let second = engine.preedit().candidates[1].clone();
         assert_eq!(
             engine.on_key(key(0x30)), // '0'：不选词，当符号

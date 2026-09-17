@@ -1,8 +1,10 @@
 [package]
 name = "pliers-dict"
-description = "词库导入工具：拼音词表 + 词频表 → SQLite（带权重）"
+description = "词库导入工具：rime 词库（.dict.yaml）→ SQLite（带权重）"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 turso = { version = "0.7.2", default-features = false }

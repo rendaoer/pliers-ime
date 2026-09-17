@@ -474,12 +474,13 @@ def main():
 
                     for ch in KEYS:
                         tap(EVDEV[ch], 0.03)
-                    # ↓↓：整句候选占前两个，「你好」是第 3 个
+                    # →→：整句候选占前两个，「你好」是第 3 个（候选框是横排的，
+                    # 左右才是挪一个；上下是整页翻）
                     for _ in range(2):
-                        tap(EVDEV_DOWN, 0.03)
+                        tap(EVDEV_RIGHT, 0.03)
                     tap(EVDEV[" "], 0.06)  # 上屏「你好」，预编辑里剩 ma
                     time.sleep(0.1)
-                    tap(EVDEV_DOWN, 0.03)  # ma 的候选里挑第 2 个（是哪个字看词库）
+                    tap(EVDEV_RIGHT, 0.03)  # ma 的候选里挑第 2 个（是哪个字看词库）
                     tap(EVDEV[" "], 0.06)  # 上屏「马」
                     time.sleep(0.1)
                     for ch in KEYS:  # 再打一遍同一串键
@@ -524,11 +525,11 @@ def main():
 
                     for ch in KEYS:
                         tap(EVDEV[ch], 0.03)
-                    for _ in range(2):  # ↓↓ 挪到「你好」（前两个是整句候选）
-                        tap(EVDEV_DOWN, 0.03)
+                    for _ in range(2):  # →→ 挪到「你好」（前两个是整句候选）
+                        tap(EVDEV_RIGHT, 0.03)
                     tap(EVDEV[" "], 0.06)
                     time.sleep(0.1)
-                    tap(EVDEV_DOWN, 0.03)  # ma 的候选里「马」是第 2 个
+                    tap(EVDEV_RIGHT, 0.03)  # ma 的候选里第 2 个
                     tap(EVDEV[" "], 0.06)
                     time.sleep(0.1)
                     for ch in KEYS:  # 再打一遍：这时第一条是记住的那句
@@ -570,7 +571,8 @@ def main():
                             conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[ch], st))
                             time.sleep(0.03)
                 elif base_mode == "page":
-                    # 打 ni 之后一直按 →：挪出第一页该自动翻到第二页。
+                    # 打 ni 之后一直按 →：挪出第一页该自动翻到第二页（←→ 是挪一个，
+                    # 翻页是它的副作用；↓ 才是干脆利落地整页翻，见 pagekey）。
                     # 第 10 个候选具体是什么跟词库有关，所以只验"翻页确实生效"
                     for ch in KEYS:
                         for st in (1, 0):
@@ -583,15 +585,29 @@ def main():
                     for st in (1, 0):
                         conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[" "], st))
                         time.sleep(0.03)
-                elif base_mode == "nav":
-                    # 组词之后按 ↓（keycode 108）换候选，再空格上屏选中的那个。
-                    # ↓ 不该改动预编辑串，也不该漏给应用
+                elif base_mode == "pagekey":
+                    # ↓ 是**整页翻**（keycode 108）：打 ni 之后按一下就到第二页，
+                    # 空格上屏的该是第二页的第一个，而不是第一页的「你」
                     for ch in KEYS:
                         for st in (1, 0):
                             conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[ch], st))
                             time.sleep(0.03)
                     for st in (1, 0):
                         conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV_DOWN, st))
+                        time.sleep(0.03)
+                    for st in (1, 0):
+                        conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[" "], st))
+                        time.sleep(0.03)
+                elif base_mode == "nav":
+                    # 组词之后按 →（keycode 106）换候选，再空格上屏选中的那个。
+                    # 候选框是横排的，所以左右是"挪一个"、上下是"整页翻"（见 pagekey）。
+                    # → 不该改动预编辑串，也不该漏给应用
+                    for ch in KEYS:
+                        for st in (1, 0):
+                            conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[ch], st))
+                            time.sleep(0.03)
+                    for st in (1, 0):
+                        conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV_RIGHT, st))
                         time.sleep(0.03)
                     for st in (1, 0):
                         conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[" "], st))
@@ -773,6 +789,19 @@ def main():
     elif mode == "page":
         # 翻页：→ 挪了 9 次之后，空格上屏的应该是第二页的第一个，
         # 而不是第一页的第一个「你」；候选框也一路跟着重贴
+        ok = (
+            grab_id is not None
+            and committed not in ("", "你")
+            and len(shows) >= 2
+            and not forwards
+        )
+        print(
+            f"mock: {'PASS' if ok else 'FAIL'}: committed {committed!r} (期望不是第一页的「你」), "
+            f"贴框 {len(shows)} 次, forwarded {len(forwards)} keys",
+            flush=True,
+        )
+    elif mode == "pagekey":
+        # ↓ 一下就是一整页：空格上屏的该是第二页的第一个，而不是第一页的「你」
         ok = (
             grab_id is not None
             and committed not in ("", "你")

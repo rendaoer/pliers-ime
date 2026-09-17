@@ -232,6 +232,7 @@ run active_nomods  "nihao "  你好  active_nomods
 run pick           "shijian2" 事件 pick          # 数字选词（第 2 个候选；事件在两种词库下都是第 2 个）
 run nav            "shijian"  事件 nav           # ↓ 换候选再空格
 run page           "ni"      ""    page          # → 挪 9 次自动翻到第二页
+run pagekey        "ni"      ""    pagekey       # ↓ 一下整页翻到第二页
 run caps           "nihao "  ""    caps          # Caps Lock 打开 = 打大写英文，不进组词
 run enter          "nihao"   nihao enter         # 回车提交原文
 run escape         "nihao"   ""    escape        # Esc 取消

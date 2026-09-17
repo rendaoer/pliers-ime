@@ -652,7 +652,7 @@ impl Scheme for DoublePinyin {
 ///
 /// 注意：码表查询是**前缀**查询（打 `w` 要能出所有以 w 开头的字），
 /// 这是唯一会扫一大片的查询，码表很大时会慢。真要用起来得在导入时按前缀
-/// 预先算好 top-N —— 见 README 的"已知不足"
+/// 预先算好 top-N —— 见 docs/pitfalls.md 的"已知不足"
 pub struct Table {
     name: String,
 }

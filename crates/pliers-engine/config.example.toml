@@ -52,7 +52,7 @@ kind = "full-pinyin"
 
 # ---- 词库 -------------------------------------------------------------------
 [dict]
-# SQLite 词库文件（用 pliers-dict 生成，见 README）
+# SQLite 词库文件（用 pliers-dict 生成，见仓库里的 docs/dictionary.md）
 # path = "~/.local/share/pliers/dict.db"
 
 # 候选框一页显示几个（数字键 1-9 选的是这一页的第几个）

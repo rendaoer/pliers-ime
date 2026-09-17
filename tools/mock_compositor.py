@@ -344,13 +344,14 @@ def main():
             elif iface == "wl_surface" and opcode == 1:              # attach
                 buffer_id = args[0] if args[0] != 0 else None
                 if buffer_id is None:
-                    popup_events.append(("hide",))
+                    popup_events.append(("hide", time.monotonic()))
                     print("mock: popup hidden (attach NULL)", flush=True)
                 else:
                     offset, w, h, stride, fmt, pool = buffers.get(
                         buffer_id, (0, 0, 0, 0, 0, None)
                     )
-                    popup_events.append(("show", w, h, stride, fmt))
+                    # 最后一个字段是时刻：`notice` 场景要量"提示挂了多久才自己消失"
+                    popup_events.append(("show", w, h, stride, fmt, time.monotonic()))
                     print(f"mock: popup shown {w}x{h} stride={stride} format={fmt}", flush=True)
                     # 把这块 shm 读出来数一数字的像素：能验到"候选框里真有字"
                     if pool is not None:
@@ -445,6 +446,20 @@ def main():
                         for st in (1, 0):
                             conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[ch], st))
                             time.sleep(0.03)
+                elif base_mode == "notice":
+                    # 只按一次 Ctrl+空格（切到英文，弹一下「英」），之后**一个键都不按**：
+                    # 提示必须自己到点消失。以前是"等下一个按键才收"，
+                    # 切完模式不打字，那个小方块就一直挂在光标那儿
+                    ctrl = 29
+                    conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, ctrl, 1))
+                    if send_mods:
+                        conn.send(grab_id, 2, struct.pack("<IIIII", 0, 4, 0, 0, 0))
+                    for st in (1, 0):
+                        conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[" "], st))
+                        time.sleep(0.05)
+                    conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, ctrl, 0))
+                    if send_mods:
+                        conn.send(grab_id, 2, struct.pack("<IIIII", 0, 0, 0, 0, 0))
                 elif base_mode == "segment":
                     # 分段上屏：KEYS（nihcma）没有整词时，先挑「你好」把前一段上屏，
                     # 剩下的 ma 接着挑「马」—— 然后**再打一遍**，这次该直接出「你好马」
@@ -610,8 +625,11 @@ def main():
                             conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, code, state))
                             time.sleep(0.03)
                 # 按键发完了：再等一小会儿收客户端的提交，然后就可以收摊了
-                #（不用一直等到 20 秒的总超时）
-                time.sleep(0.5)
+                #（不用一直等到 20 秒的总超时）。
+                # `notice` 例外：它要量"提示挂了多久才自己消失"，喂完就得马上回事件循环 ——
+                # 睡这 0.5 秒的话，期间到达的事件会攒成一批，时间戳全挤在一个瞬间
+                if base_mode != "notice":
+                    time.sleep(0.5)
                 deadline = min(deadline, time.time() + 1.5)
             elif iface == "zwp_input_method_v2":
                 log.append((opcode, args))
@@ -651,7 +669,7 @@ def main():
     print(f"mock: popup surface   : {'yes' if popup_id is not None else 'NO'}", flush=True)
     print(f"mock: popup glyphs    : {glyph_pixels} 个笔画像素", flush=True)
     print(f"mock: buffer scale    : {buffer_scale}", flush=True)
-    print(f"mock: popup shown     : {[(w, h) for _, w, h, _, _ in shows]}", flush=True)
+    print(f"mock: popup shown     : {[(w, h) for _, w, h, _, _, _ in shows]}", flush=True)
     print(f"mock: popup hidden    : {len(hides)} times", flush=True)
 
     # 候选框的基本卫生：ARGB8888、stride 正确、高矮对、每次有拼音都贴一块、
@@ -660,7 +678,7 @@ def main():
         popup_id is not None
         and all(
             fmt == 0 and stride == w * 4 and h == POPUP_HEIGHT * buffer_scale
-            for _, w, h, stride, fmt in shows
+            for _, w, h, stride, fmt, _ in shows
         )
         and len(shows) == len(nonempty)
         and len(hides) == len(preedits) - len(nonempty)
@@ -856,6 +874,30 @@ def main():
         print(
             f"mock: {'PASS' if ok else 'FAIL'}: forwarded {len(forwards)}/{want} keys, "
             f"commits {commits}, 非空预编辑 {nonempty}, 提示弹了 {len(shows)} 次",
+            flush=True,
+        )
+    elif mode == "notice":
+        # 提示要自己消失：切换之后**一个键都不再按**，所以最后一条候选框事件必须是 hide，
+        # 而且是 show 之后挂了一小会儿才收 —— 既不是被切换键自己的抬起立刻收掉，
+        # 也不是一直挂在那儿等下一个按键
+        shown = [e for e in popup_events if e[0] == "show"]
+        last = popup_events[-1] if popup_events else None
+        held = (last[1] - shown[-1][5]) if (shown and last and last[0] == "hide") else None
+        ok = (
+            grab_id is not None
+            and not commits
+            and not nonempty
+            and held is not None
+            and 0.15 < held < 1.5
+        )
+        print(
+            f"mock: {'PASS' if ok else 'FAIL'}: "
+            + (
+                f"提示挂了 {held:.2f}s 后自己收掉"
+                if held is not None
+                else f"提示没收掉（候选框事件 {[e[0] for e in popup_events]}）"
+            )
+            + f", commits {commits}, 非空预编辑 {nonempty}",
             flush=True,
         )
     elif mode == "pick":

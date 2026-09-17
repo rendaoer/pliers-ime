@@ -154,13 +154,16 @@ fn run_loop(
                 Some(control) => vec![wayland, control.fd()],
                 None => vec![wayland],
             };
-            let ready = poll::readable(&fds, Some(WATCH_INTERVAL))?;
+            let ready = poll::readable(&fds, Some(state.poll_timeout()))?;
             if ready[0] {
                 guard.read()?;
             } else {
                 drop(guard); // 是命令来了（或者只是超时）：取消这次读，下一轮再派发
             }
         }
+        // 提示到点了就自己收掉，别等下一个按键（切完中英文不打字的话，
+        // 等按键就等于一直挂在那儿）
+        state.expire_notice();
         state.serve_control();
         state.reload_if_config_changed();
     }
@@ -170,6 +173,12 @@ fn run_loop(
 /// 多久看一眼配置文件有没有被改。人保存文件到生效最多等这么久；
 /// 1 秒的 stat 一次，代价可以忽略
 const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(700);
+
+/// 模式提示（「中」/「英」、删词那句）在屏幕上停留多久。
+///
+/// 以前是"等下一个按键才收"：切完中英文不打字，那个小方块就一直挂在光标那儿。
+/// 现在到点自己收 —— 600ms 够看清一个字，又不至于挡着看
+const NOTICE_DURATION: std::time::Duration = std::time::Duration::from_millis(600);
 
 #[derive(Default)]
 struct State {
@@ -206,8 +215,10 @@ struct State {
     shortcut_mods: bool,
     /// 具体是 Ctrl 按着吗（认 Ctrl+空格切中英文用）
     ctrl_held: bool,
-    /// 屏幕上现在挂的是不是那个模式提示（下一个键一来就收掉）
+    /// 屏幕上现在挂的是不是那个模式提示（下一个键一来就收掉，或者到点自己收掉）
     notice: bool,
+    /// 模式提示该在什么时候自己消失（`None` = 现在没在提示）
+    notice_until: Option<std::time::Instant>,
     /// Shift / Caps Lock 按着吗（只用于调试日志，大小写已经在 keysym 里了）
     shift_held: bool,
     caps_lock: bool,
@@ -492,9 +503,10 @@ impl State {
         } else if let Some(text) = notice {
             self.show_notice(&text);
         } else if pressed && self.notice {
-            // 提示要等**下一次按下**才收 —— 不能看"下一个事件"：
+            // 按键一来就把提示收掉 —— 但不能看"下一个事件"：
             // 触发提示那个键自己的抬起紧跟其后，会把刚弹出来的提示直接收掉
-            //（表现就是"按了 Del 之后候选框没了"，切中英文的「中」/「英」也一闪而过）
+            //（表现就是"按了 Del 之后候选框没了"，切中英文的「中」/「英」也一闪而过）。
+            // 没人接着按键的场合交给 expire_notice() 到点收（NOTICE_DURATION）
             self.hide_notice();
         }
     }
@@ -502,6 +514,7 @@ impl State {
     /// 在光标处弹一个小方块说句话（切模式的「中」/「英」、删词的「删掉了…」都走它）
     fn show_notice(&mut self, text: &str) {
         self.notice = false;
+        self.notice_until = None;
         if !self.engine().indicator() {
             return;
         }
@@ -516,12 +529,51 @@ impl State {
         };
         popup.show_notice(painter, text, scale);
         self.notice = true;
+        self.notice_until = Some(std::time::Instant::now() + NOTICE_DURATION);
     }
 
     fn hide_notice(&mut self) {
+        if self.debug && self.notice {
+            eprintln!("pliers:   → 提示按下一次键就收掉");
+        }
         self.notice = false;
+        self.notice_until = None;
         if let Some(popup) = &mut self.popup {
             popup.hide();
+        }
+    }
+
+    /// 提示到点了没（到点就该收掉，不用等下一个按键）
+    fn notice_expired(&self) -> bool {
+        self.notice
+            && self
+                .notice_until
+                .is_some_and(|until| std::time::Instant::now() >= until)
+    }
+
+    /// 提示到点就收掉，并把候选框贴回**引擎的当前状态**。
+    ///
+    /// 不是简单收掉：删词提示消失之后，候选列表该接着显示
+    ///（引擎里那些候选还在，预编辑也还在），跟着一起没就说不通了
+    fn expire_notice(&mut self) {
+        if !self.notice_expired() {
+            return;
+        }
+        if self.debug {
+            eprintln!("pliers:   → 提示到点，自己收掉");
+        }
+        let preedit = self.engine().preedit();
+        self.sync_popup(&preedit);
+    }
+
+    /// 这一轮 `poll(2)` 最多睡多久：既要定期看一眼配置文件，
+    /// 也要赶在提示到点之前醒过来（不然它得等到下一次按键或下一轮超时才消失）
+    fn poll_timeout(&self) -> std::time::Duration {
+        match self.notice_until {
+            Some(until) => {
+                WATCH_INTERVAL.min(until.saturating_duration_since(std::time::Instant::now()))
+            }
+            None => WATCH_INTERVAL,
         }
     }
 
@@ -569,6 +621,7 @@ impl State {
         // 候选框贴的是真状态，那个「中」/「英」提示就不算数了 ——
         // 不然下一个按键会把正在显示的候选一起收掉
         self.notice = false;
+        self.notice_until = None;
         let scale = self.scale();
         // 分开借 State 里的两个字段：一个要改，一个只读
         let State {
@@ -914,4 +967,46 @@ fn config_stamp() -> Option<(std::time::SystemTime, u64)> {
     let meta = std::fs::metadata(pliers_engine::config::config_path()).ok()?;
     let mtime = meta.modified().ok()?;
     Some((mtime, meta.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 提示到点才算过期() {
+        // 没在提示：什么时候都不算到点（不然会把候选框一起收掉）
+        let mut state = State {
+            notice_until: Some(std::time::Instant::now() - NOTICE_DURATION),
+            ..State::default()
+        };
+        assert!(!state.notice_expired());
+
+        // 在提示、但时间还没到
+        state.notice = true;
+        state.notice_until = Some(std::time::Instant::now() + NOTICE_DURATION);
+        assert!(!state.notice_expired());
+
+        // 到点了
+        state.notice_until = Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
+        assert!(state.notice_expired());
+    }
+
+    #[test]
+    fn 提示没到点时_poll_提前醒() {
+        // 平时只为"自动重读配置文件"醒一次
+        let state = State::default();
+        assert_eq!(state.poll_timeout(), WATCH_INTERVAL);
+
+        // 有提示在倒计时：得在它到点之前醒过来（不然提示要等到下一次按键才消失）
+        let left = std::time::Duration::from_millis(80);
+        let state = State {
+            notice: true,
+            notice_until: Some(std::time::Instant::now() + left),
+            ..State::default()
+        };
+        let timeout = state.poll_timeout();
+        assert!(timeout <= left, "poll 睡太久了：{timeout:?} > {left:?}");
+        assert!(timeout > std::time::Duration::ZERO);
+    }
 }

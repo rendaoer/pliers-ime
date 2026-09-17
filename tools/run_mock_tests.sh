@@ -230,6 +230,7 @@ run shift          "a"       ""    shift         # 纯 Shift+A：4 个事件全�
 echo "== 中英文切换 =="
 run english        "hello "   ""    english       # Ctrl+空格 切英文后打英文
 run switch         "nihao"   nihao switch        # 组词中切英文：半截拼音先上屏
+run notice         ""        ""    notice        # 切完一个键都不按：「英」提示自己到点消失
 
 echo "== 组词中敲符号 =="
 run symbol         "nihao"   你好  symbol        # 符号必须排在文字后面

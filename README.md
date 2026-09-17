@@ -38,8 +38,8 @@ seat」然后退出，所以别同时跑两个。
 想确认自己没跑歪：
 
 ```bash
-cargo test --workspace        # 160 个单测，不需要合成器、不需要词库
-./tools/run_mock_tests.sh     # mock 合成器跑 23 个场景 + 2 项在线改配置检查
+cargo test --workspace        # 162 个单测，不需要合成器、不需要词库
+./tools/run_mock_tests.sh     # mock 合成器跑 24 个场景 + 2 项在线改配置检查
 ```
 
 ## 按键速查
@@ -70,7 +70,7 @@ cargo test --workspace        # 160 个单测，不需要合成器、不需要�
 | [docs/dictionary.md](docs/dictionary.md) | 词库怎么导入、多音字收哪些（7% 门槛）、表结构与权重、用 SQL 加词/清零、`lookup` 看候选 |
 | [docs/internals.md](docs/internals.md) | crate 划分、用了哪些 Wayland 协议、**为什么拼音查询不能交给 SQL**、整句候选、候选框是怎么画出来的 |
 | [docs/pitfalls.md](docs/pitfalls.md) | 10 条实测踩出来的坑（Ctrl+A 被吃掉、焦点一走拼音就没了……）+ 已知不足 |
-| [docs/testing.md](docs/testing.md) | 单测、跑起来、`PLIERS_DEBUG`、mock 合成器的 23 个场景都验了什么 |
+| [docs/testing.md](docs/testing.md) | 单测、跑起来、`PLIERS_DEBUG`、mock 合成器的 24 个场景都验了什么 |
 
 ## 代码结构
 

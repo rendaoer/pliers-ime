@@ -4,5 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-env_logger = "0.11.11"
-imekit = "0.2.3"
+# 跟合成器直接说协议所需的三件套：连接/协议绑定、input-method 协议、键盘布局
+wayland-client = "0.31"
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+xkbcommon = "0.7"

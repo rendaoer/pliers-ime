@@ -52,7 +52,11 @@ if [ -z "$DICT" ] || [ ! -f "$DICT" ]; then
     echo "先导入：cargo run -p pliers-dict --release -- --freq jieba-dict.txt --out ~/.local/share/pliers/dict.db"
     exit 1
 fi
-echo "词库：$DICT"
+# 测试用自己的一份词库副本：选词/记整句都会写进库里，别污染真库
+TEST_DICT="$(mktemp -d)/dict.db"
+cp "$DICT" "$TEST_DICT"
+DICT="$TEST_DICT"
+echo "词库：$DICT（测试用的副本）"
 LOGS="$(mktemp -d)"
 pass=0
 fail=0
@@ -91,15 +95,16 @@ run_control() {
     say "双拼（小鹤）" status
 
     # 交互模式（真终端才有上下选；这里用 script 开个 pty）
-    # ↓↓↓↓↓ 到第 6 项「一页候选数」→ 回车 →（值列表里）按 2 选第二个值 → 回车 → q
+    # ↓↓↓↓↓ 到第 6 项「一页候选数」→ 回车 → ↓ 选到第二个值 → 回车 → q
+    # （值列表的光标先停在"现在这个值"上，所以从 9 往上/下挪一格就够）
     if command -v script >/dev/null 2>&1; then
-        out=$(printf '\033[B\033[B\033[B\033[B\033[B\r2\rq' |
+        out=$(printf '\033[B\033[B\033[B\033[B\033[B\r\033[B\rq' |
             timeout 15 script -qec "PLIERS_SOCKET=$ctl ./target/debug/pliers set" /dev/null 2>&1)
         case "$out" in
             *"❯"*) echo "        \$ pliers set（上下选）→ 列表带选中箭头 ✓" ;;
             *) echo "        \$ pliers set（上下选）→ 没看到列表"; bad=1 ;;
         esac
-        say "一页 2 个" status
+        say "一页 1 个" status   # 9 往下挪一格 = 回到 1（值列表是绕圈的）
     fi
 
     # 管道（没终端）时退回行式：输编号、再输值
@@ -222,6 +227,9 @@ run switch         "nihao"   nihao switch        # 组词中切英文：半截�
 
 echo "== 组词中敲符号 =="
 run symbol         "nihao"   你好  symbol        # 符号必须排在文字后面
+
+echo "== 分段上屏 + 记忆 =="
+run segment        "nihaoma" ""    segment       # 挑两段拼出「你好马」，再打一遍直接出
 
 echo "== 高分屏 =="
 run hidpi          "nihao "  你好  hidpi  "PLIERS_SCALE=2"

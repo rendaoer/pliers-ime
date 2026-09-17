@@ -452,16 +452,26 @@ impl State {
                     preedit.selected + 1
                 ),
                 Action::Commit(text) => eprintln!("pliers:   → 提交文本 {text:?}"),
+                Action::CommitAndContinue(text, rest) => {
+                    eprintln!("pliers:   → 分段上屏 {text:?}，剩下 {:?} 接着选", rest.text)
+                }
                 Action::CommitAndForward(text) => {
                     eprintln!("pliers:   → 提交文本 {text:?}，再把这个键原样交给应用")
                 }
+                Action::Notice(text) => eprintln!("pliers:   → 提示 {text:?}"),
                 Action::Forward => {}
                 Action::Swallow => eprintln!("pliers:   → 吃掉这个抬起"),
             }
         }
+        // 要弹的话留到最后：模式提示优先，其次是这条
+        let mut notice: Option<String> = None;
         match action {
             Action::UpdatePreedit(preedit) => self.set_preedit(&preedit),
             Action::Commit(text) => self.commit_text(&text),
+            // 弹一句话，预编辑不动（引擎那边已经把候选列表改好了）
+            Action::Notice(text) => notice = Some(text),
+            // 分段上屏：「提交这段 + 剩下的预编辑」放进**同一批**发出去
+            Action::CommitAndContinue(text, rest) => self.commit_and_continue(&text, &rest),
             // 顺序要紧：先把文字提交给应用，再把这个键转过去，
             // 应用才会把符号插在文字后面（不然就是 ",你好"）
             Action::CommitAndForward(text) => {
@@ -478,14 +488,16 @@ impl State {
         let mode_now = self.engine().mode();
         if mode_now != mode_before {
             self.set_preedit(&Preedit::default());
-            self.show_notice(mode_now);
+            self.show_notice(mode_now.label());
+        } else if let Some(text) = notice {
+            self.show_notice(&text);
         } else if self.notice {
             self.hide_notice();
         }
     }
 
-    /// 在光标处弹一个小方块显示「中」/「英」（复用候选框：就一个候选，不带序号）
-    fn show_notice(&mut self, mode: Mode) {
+    /// 在光标处弹一个小方块说句话（切模式的「中」/「英」、删词的「删掉了…」都走它）
+    fn show_notice(&mut self, text: &str) {
         self.notice = false;
         if !self.engine().indicator() {
             return;
@@ -499,7 +511,7 @@ impl State {
         else {
             return;
         };
-        popup.show_notice(painter, mode.label(), scale);
+        popup.show_notice(painter, text, scale);
         self.notice = true;
     }
 
@@ -531,6 +543,22 @@ impl State {
             im.commit(self.serial);
         }
         self.sync_popup(&Preedit::default());
+    }
+
+    /// 分段上屏：一批里同时给"上屏的文字"和"剩下的预编辑"。
+    ///
+    /// 为什么要一批：应用是按 `done` 一次应用一批状态的（GTK 的顺序是
+    /// 先 commit 再 preedit），一次给全它就"落字 + 接着显示剩下的"。
+    /// 分两批发的话，有的应用会把第二批的预编辑吃掉 —— 表现就是
+    /// 「前面的 nihc 变成你好，后面的 an 输入框里没提示」
+    fn commit_and_continue(&mut self, text: &str, rest: &Preedit) {
+        if let Some(im) = &self.im {
+            let cursor = rest.text.len() as i32;
+            im.set_preedit_string(rest.text.clone(), cursor, cursor);
+            im.commit_string(text.to_string());
+            im.commit(self.serial);
+        }
+        self.sync_popup(rest);
     }
 
     /// 候选框跟着组词状态走：有候选就贴一帧，没有就收起来

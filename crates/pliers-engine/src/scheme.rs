@@ -19,6 +19,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use crate::Candidate;
 use crate::dict::Dict;
 use crate::pinyin::Segmenter;
 use crate::sentence;
@@ -34,8 +35,11 @@ pub trait Scheme {
     }
 
     /// 输入 → 候选词，按权重从高到低。
-    /// 返回空表示"这不是个有效的输入"，输入法会把预编辑晾在那儿
-    fn candidates(&self, dict: &Dict, input: &str, limit: usize) -> Vec<String>;
+    ///
+    /// 每个候选都带 `consumed`：**整串匹配**的是全部输入，
+    /// **只匹配前面一段**的（`nihaoma` → 「你好」）只吃前面几个字符，
+    /// 剩下的留给下一轮 —— 这就是分段上屏
+    fn candidates(&self, dict: &Dict, input: &str, limit: usize) -> Vec<Candidate>;
 }
 
 /// 把好几个码的查询结果并起来：按分数排序、去重。
@@ -64,6 +68,14 @@ fn merge(dict: &Dict, scheme: &str, codes: &[String], limit: usize) -> Vec<Strin
     out
 }
 
+/// 整串匹配的那批候选
+fn whole(input: &str, words: Vec<String>) -> Vec<Candidate> {
+    words
+        .into_iter()
+        .map(|text| Candidate::whole(text, input))
+        .collect()
+}
+
 /// 把整句候选接到精确候选后面（去重、不超 `limit`）。
 ///
 /// 顺序是有意的：整词命中永远排在拼出来的句子前面 ——「你好」这种库里真有的词
@@ -84,6 +96,34 @@ fn push_sentences(
         }
     }
 }
+
+/// 分段匹配：把输入按音节边界切成"前面一段 + 剩下的一截"，
+/// 前面那段照常查词（整词 + 整句），候选只吃前面那几个字符。
+///
+/// 从最长的前缀往短了试，**第一段有候选就收手** —— 这跟老式输入法一个思路：
+/// `nihaoma` 先给「你好」相关的候选，选完 `ma` 接着来。前缀最多试 [`MAX_PREFIX_TRIES`] 个，
+/// 免得长句子把查询数炸掉
+fn prefix_candidates(
+    dict: &Dict,
+    scheme: &str,
+    prefix_codes: &[(String, usize)],
+    limit: usize,
+) -> Vec<Candidate> {
+    let per_prefix = limit.max(4);
+    for (code, consumed) in prefix_codes.iter().take(MAX_PREFIX_TRIES) {
+        let words = merge(dict, scheme, std::slice::from_ref(code), per_prefix);
+        if !words.is_empty() {
+            return words
+                .into_iter()
+                .map(|text| Candidate::partial(text, *consumed))
+                .collect();
+        }
+    }
+    Vec::new()
+}
+
+/// 分段匹配最多试几个前缀
+const MAX_PREFIX_TRIES: usize = 3;
 
 // ---- 全拼 -------------------------------------------------------------------
 
@@ -108,8 +148,8 @@ impl Scheme for FullPinyin {
         "pinyin"
     }
 
-    fn candidates(&self, dict: &Dict, input: &str, limit: usize) -> Vec<String> {
-        let mut out = merge(
+    fn candidates(&self, dict: &Dict, input: &str, limit: usize) -> Vec<Candidate> {
+        let mut words = merge(
             dict,
             self.name(),
             &self.segmenter.lookup_codes(input),
@@ -118,8 +158,18 @@ impl Scheme for FullPinyin {
         if self.sentence
             && let Some(syllables) = self.segmenter.complete_segmentations(input).first()
         {
-            push_sentences(&mut out, dict, self.name(), syllables, limit);
+            push_sentences(&mut words, dict, self.name(), syllables, limit);
         }
+
+        let mut out = whole(input, words);
+        // 整串没匹配上（或者匹配得少）时，给"只吃前面一段"的候选
+        out.extend(prefix_candidates(
+            dict,
+            self.name(),
+            &self.segmenter.prefix_codes(input),
+            limit,
+        ));
+        out.truncate(limit);
         out
     }
 }
@@ -139,6 +189,10 @@ pub struct Layout {
 /// 双拼是"两键一音节"，这几个感叹词音节没有第二个键可打（`嗯` 一般打 `en`）。
 /// 校验自定义键位时要放过它们
 pub const UNENCODABLE: &[&str] = &["m", "n", "ng", "hm", "hng", "ê"];
+
+/// 零声母音节里"全拼正好两个字母"的那些：除了本方案自己的规则（安 = `aj`），
+/// 也认全拼（安 = `an`）—— 见 [`DoublePinyin::new`] 里的说明
+const ZERO_INITIAL_FULL: &[&str] = &["ai", "an", "ao", "ei", "en", "er", "ou"];
 
 /// 自然码的韵母表（也是搜狗、QQ 拼音的默认方案）
 const NATURAL_FINALS: &[(&str, char)] = &[
@@ -438,6 +492,20 @@ impl DoublePinyin {
                 .push(syllable.clone());
             by_code.insert(code, syllable.clone());
         }
+        // 零声母音节：本方案自家规则是"首字母 + 韵母键"（安 = `aj`），
+        // 但 Rime / fcitx5 / 搜狗那几家**同时**认全拼（安 = `an`）。
+        // 两种都收 —— 按全拼打的人不用先学规则。两字母的这些不可能跟谁撞车
+        //（首字母是 a/o/e，这几个不是声母），真撞了就跳过，让原来那个优先
+        for syllable in ZERO_INITIAL_FULL {
+            if !syllables.iter().any(|known| known == syllable) || by_code.contains_key(*syllable) {
+                continue;
+            }
+            by_code.insert((*syllable).to_string(), (*syllable).to_string());
+            by_first
+                .entry(syllable.chars().next().unwrap())
+                .or_default()
+                .push((*syllable).to_string());
+        }
         for list in by_first.values_mut() {
             list.sort();
             list.dedup();
@@ -472,6 +540,24 @@ impl DoublePinyin {
             index += 2;
         }
         Some((complete, chars.get(index).copied()))
+    }
+
+    /// 分段上屏用的前缀码：双拼两键一个音节，所以前缀只切在偶数长度上。
+    /// 返回 `(码, 吃了几个字符)`，长的在前
+    fn prefix_codes(&self, input: &str) -> Vec<(String, usize)> {
+        let mut out = Vec::new();
+        let chars = input.chars().count();
+        let mut cut = chars.saturating_sub(1);
+        while cut >= 4 {
+            let head: String = input.chars().take(cut).collect();
+            if let Some((syllables, None)) = self.decode_pairs(&head)
+                && syllables.len() >= 2
+            {
+                out.push((syllables.join(" "), cut));
+            }
+            cut -= 1;
+        }
+        out
     }
 
     /// 输入 → 要查的拼音码
@@ -510,15 +596,25 @@ impl Scheme for DoublePinyin {
         ch.is_ascii_lowercase() || (self.semicolon && ch == ';')
     }
 
-    fn candidates(&self, dict: &Dict, input: &str, limit: usize) -> Vec<String> {
-        let mut out = merge(dict, self.name(), &self.lookup_codes(input), limit);
+    fn candidates(&self, dict: &Dict, input: &str, limit: usize) -> Vec<Candidate> {
+        let mut words = merge(dict, self.name(), &self.lookup_codes(input), limit);
         // 整句候选：键正好两两解完（一组一个音节）时才有得拼
         if self.sentence
             && let Some((syllables, None)) = self.decode_pairs(input)
             && syllables.len() >= 2
         {
-            push_sentences(&mut out, dict, self.name(), &syllables, limit);
+            push_sentences(&mut words, dict, self.name(), &syllables, limit);
         }
+
+        let mut out = whole(input, words);
+        // 分段匹配：双拼两键一个音节，所以前缀只切在偶数位置上
+        out.extend(prefix_candidates(
+            dict,
+            self.name(),
+            &self.prefix_codes(input),
+            limit,
+        ));
+        out.truncate(limit);
         out
     }
 }
@@ -550,7 +646,7 @@ impl Scheme for Table {
         &self.name
     }
 
-    fn candidates(&self, dict: &Dict, input: &str, limit: usize) -> Vec<String> {
+    fn candidates(&self, dict: &Dict, input: &str, limit: usize) -> Vec<Candidate> {
         // 先精确后前缀：正好打完一个码的时候，它得排在最前面
         let mut out: Vec<String> = Vec::new();
         for (text, _) in dict.exact(&self.name, input, limit) {
@@ -564,7 +660,8 @@ impl Scheme for Table {
                 }
             }
         }
-        out
+        // 码表方案没有"分段"这回事：码就是码，一次打完
+        whole(input, out)
     }
 }
 
@@ -641,6 +738,33 @@ mod tests {
         // 小鹤：hao = h+c
         let flypy = DoublePinyin::new(Layout::preset("flypy").unwrap(), &syllables(), true);
         assert_eq!(flypy.lookup_codes("nihc"), ["ni hao"]);
+    }
+
+    #[test]
+    fn 零声母音节的全拼也认() {
+        // 小鹤自家的规则是「安 = aj」，但大家都习惯按全拼打 —— 两种都得认
+        let flypy = DoublePinyin::new(Layout::preset("flypy").unwrap(), &syllables(), true);
+        // 小鹤自家的码：安 = a+(an→j) = `aj`，爱 = a+(ai→d) = `ad`；
+        // 全拼的 `an` / `ai` 现在也认（欧/恩/儿本来就是全拼，重复插入会被跳过）
+        for (code, want) in [
+            ("aj", "an"),
+            ("an", "an"),
+            ("ad", "ai"),
+            ("ai", "ai"),
+            ("ou", "ou"),
+            ("en", "en"),
+            ("er", "er"),
+        ] {
+            assert_eq!(
+                flypy.decode_syllable(code),
+                Some(want),
+                "{code} 该解成 {want}"
+            );
+        }
+        // 声母+韵母的老码一个都不能坏
+        assert_eq!(flypy.decode_syllable("ni"), Some("ni"));
+        assert_eq!(flypy.decode_syllable("hc"), Some("hao"));
+        assert_eq!(flypy.decode_syllable("bung"), None, "这是四键，不是一组");
     }
 
     #[test]

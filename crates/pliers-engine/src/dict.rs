@@ -43,6 +43,15 @@ pub const SCHEMA: &[&str] = &[
         count INTEGER NOT NULL DEFAULT 0,
         last_used INTEGER NOT NULL DEFAULT 0
     )",
+    // 用户用"分段上屏"自己拼出来的句子：键是**他敲的那串原文**，
+    // 下次敲同一串就直接把这句话给他。跟 user_word 分开是因为这里要带拼音（键）
+    "CREATE TABLE IF NOT EXISTS user_phrase (
+        code      TEXT NOT NULL,
+        text      TEXT NOT NULL,
+        count     INTEGER NOT NULL DEFAULT 0,
+        last_used INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (code, text)
+    )",
     "CREATE TABLE IF NOT EXISTS syllable (syl TEXT PRIMARY KEY)",
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
 ];
@@ -97,6 +106,9 @@ impl Dict {
         }
         let db = pollster::block_on(Builder::new_local(&path.to_string_lossy()).build())?;
         let conn = db.connect()?;
+        // 顺手补一下表结构：全是 CREATE TABLE IF NOT EXISTS，成本可以忽略，
+        // 但老词库（用户表、整句表）就不用重新导入了 —— 加新表时省事
+        create_schema(&conn)?;
         let mut dict = Self {
             conn,
             syllables: Vec::new(),
@@ -202,6 +214,49 @@ impl Dict {
         Ok(out)
     }
 
+    /// 这个键（用户敲的原文）上，他自己拼过的句子。按用得多的排前面
+    pub fn phrases(&self, code: &str, limit: usize) -> Vec<String> {
+        self.query(
+            "SELECT text, count FROM user_phrase WHERE code = ?1
+             ORDER BY count DESC, last_used DESC LIMIT ?2",
+            &[code.into(), (limit as i64).into()],
+        )
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect()
+    }
+
+    /// 记一句"用户自己分段拼出来的话"：同一个键 + 同一句话再拼一次就加一笔
+    pub fn note_phrase(&self, code: &str, text: &str) -> Result<()> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+        pollster::block_on(self.conn.execute(
+            "INSERT INTO user_phrase (code, text, count, last_used) VALUES (?1, ?2, 1, ?3)
+             ON CONFLICT(code, text) DO UPDATE SET count = count + 1, last_used = ?3",
+            turso::params![code, text, now],
+        ))?;
+        Ok(())
+    }
+
+    /// 把某个键上的一句"用户自己拼的话"删掉（候选框里按 Del）。
+    /// 返回是否真的删掉了一行 —— 词库（`word` 表）里的词条不动，那是导入出来的
+    pub fn forget_phrase(&self, code: &str, text: &str) -> Result<bool> {
+        let changed = pollster::block_on(self.conn.execute(
+            "DELETE FROM user_phrase WHERE code = ?1 AND text = ?2",
+            turso::params![code, text],
+        ))?;
+        Ok(changed > 0)
+    }
+
+    /// 清掉"我用过这个词"的偏好（`user_word` 里那笔）。词条本身留着 ——
+    /// 词库里真有的词不该因为一次误操作就消失
+    pub fn forget_boost(&self, text: &str) -> Result<bool> {
+        let changed = pollster::block_on(
+            self.conn
+                .execute("DELETE FROM user_word WHERE text = ?1", turso::params![text]),
+        )?;
+        Ok(changed > 0)
+    }
+
     /// 用户选了某个词：次数 +1。下次它就会排得更靠前
     pub fn note_used(&self, text: &str) -> Result<()> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
@@ -272,6 +327,36 @@ mod tests {
             dict.note_used("泥").unwrap();
         }
         assert_eq!(words(dict.exact("pinyin", "ni", 3))[0], "泥");
+    }
+
+    #[test]
+    fn 分段拼出来的句子记得住() {
+        let dict = sample_dict();
+        assert!(dict.phrases("nihaoma", 9).is_empty(), "还没拼过呢");
+        dict.note_phrase("nihaoma", "你好吗").unwrap();
+        dict.note_phrase("nihaoma", "你号码").unwrap();
+        dict.note_phrase("nihaoma", "你好吗").unwrap();
+        // 同一个键下按用的次数排：拼过两次的「你好吗」在前
+        assert_eq!(dict.phrases("nihaoma", 9), ["你好吗", "你号码"]);
+        // 换个键就查不到（键是用户敲的原样那串）
+        assert!(dict.phrases("nihao", 9).is_empty());
+    }
+
+    #[test]
+    fn 能把拼过的句子和偏好忘掉() {
+        let dict = sample_dict();
+        dict.note_phrase("nihaoma", "你好马").unwrap();
+        assert_eq!(dict.phrases("nihaoma", 9), ["你好马"]);
+        assert!(dict.forget_phrase("nihaoma", "你好马").unwrap());
+        assert!(dict.phrases("nihaoma", 9).is_empty(), "删掉就该查不到了");
+        // 再删一次：没这行，返回 false
+        assert!(!dict.forget_phrase("nihaoma", "你好马").unwrap());
+
+        // 偏好（user_word）也是：清了之后词还在，只是不再被顶到前面
+        dict.note_used("泥").unwrap();
+        assert!(dict.forget_boost("泥").unwrap());
+        assert!(!dict.forget_boost("泥").unwrap(), "第二次就没得清了");
+        assert_eq!(words(dict.exact("pinyin", "ni", 3)), ["你", "尼", "泥"]);
     }
 
     #[test]

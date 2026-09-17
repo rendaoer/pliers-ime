@@ -274,7 +274,7 @@ impl Picker {
             style(&self.title, "1")
         )];
         lines.extend((0..self.items.len()).map(|index| self.render(index)));
-        lines.push(style("  ↑↓ 选择 · Enter 确认 · 数字键直达 · q 退出", "2"));
+        lines.push(style("  ↑↓ 选择 · Enter 确认 · q 退出", "2"));
         lines
     }
 
@@ -321,13 +321,6 @@ impl Picker {
                 Key::Down | Key::Char('j') => {
                     self.step(1);
                     self.draw()?;
-                }
-                Key::Char(digit) if digit.is_ascii_digit() && digit != '0' => {
-                    let index = digit as usize - '1' as usize;
-                    if index < self.items.len() {
-                        self.cursor = index;
-                        self.draw()?;
-                    }
                 }
                 Key::Enter => {
                     let chosen = self.cursor;

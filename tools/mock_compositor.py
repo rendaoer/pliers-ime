@@ -30,7 +30,8 @@ Usage: mock_compositor.py <socket-path> [keys] [expected-committed-text] [mode]
 Modes: active | inactive | shortcut | shift | mixed | enter | escape | caps |
        pick (数字选词) | nav (方向键换候选) | page (翻页) | symbol (组词中敲符号) |
        switch (组词中切中英文) | control (先等一会儿再打字，留给 `pliers set` 用) |
-       watch (等 6 秒，留给"改配置文件看它自动重读"用),
+       watch (等 6 秒，留给"改配置文件看它自动重读"用) |
+       segment (分段上屏 + 记住拼出来的句子),
        each optionally with a _nomods suffix.
 """
 import array
@@ -432,6 +433,32 @@ def main():
                         for st in (1, 0):
                             conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[ch], st))
                             time.sleep(0.03)
+                elif base_mode == "segment":
+                    # 分段上屏：KEYS（nihcma）没有整词时，先挑「你好」把前一段上屏，
+                    # 剩下的 ma 接着挑「马」—— 然后**再打一遍**，这次该直接出「你好马」
+                    #（这句是用户自己拼的，词库/整句都不会给，只有记住了才有）
+                    def send(code, state):
+                        conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, code, state))
+
+                    def tap(code, pause=0.04):
+                        for state in (1, 0):
+                            send(code, state)
+                            time.sleep(pause)
+
+                    for ch in KEYS:
+                        tap(EVDEV[ch], 0.03)
+                    # ↓↓：整句候选占前两个，「你好」是第 3 个
+                    for _ in range(2):
+                        tap(EVDEV_DOWN, 0.03)
+                    tap(EVDEV[" "], 0.06)  # 上屏「你好」，预编辑里剩 ma
+                    time.sleep(0.1)
+                    tap(EVDEV_DOWN, 0.03)  # ma 的候选里「马」是第 2 个
+                    tap(EVDEV[" "], 0.06)  # 上屏「马」
+                    time.sleep(0.1)
+                    for ch in KEYS:  # 再打一遍同一串键
+                        tap(EVDEV[ch], 0.03)
+                    time.sleep(0.1)
+                    tap(EVDEV[" "], 0.06)  # 这次该直接上屏「你好马」
                 elif base_mode == "symbol":
                     # 组词当中敲符号（/）：应该先把选中的候选上屏，再把符号转过来。
                     # 顺序反了的话，应用里会先冒出符号、文字跟在后面（",你好"）
@@ -676,6 +703,19 @@ def main():
             f"贴框 {len(shows)} 次, forwarded {len(forwards)} keys",
             flush=True,
         )
+    elif mode == "segment":
+        # 前两次提交是分段挑的，第三次是"记住的那句"—— 一次提交三个字
+        ok = (
+            grab_id is not None
+            and commits == ["你好", "马", "你好马"]
+            and "ma" in nonempty  # 中间预编辑里真的剩了 ma
+            and not forwards
+        )
+        print(
+            f"mock: {'PASS' if ok else 'FAIL'}: commits {commits} "
+            f"(期望 ['你好', '马', '你好马']), 预编辑 {nonempty}, forwarded {len(forwards)} keys",
+            flush=True,
+        )
     elif mode == "symbol":
         # 敲符号那一瞬间的顺序：提交候选必须在转发符号**之前**。
         # log 是按到达顺序记的，比下标就行
@@ -796,6 +836,14 @@ def main():
             f"mock: {'PASS' if ok else 'FAIL'}: commits {commits} (期望空), "
             f"预编辑 {preedits} (期望空), forwarded {len(forwards)}/{want} keys, "
             f"贴框 {len(shows)} 次 (期望 0)",
+            flush=True,
+        )
+    elif mode in ("control", "watch"):
+        # 这两种场景中途会改配置：重建引擎会多发几次"清空预编辑 + 收框"，
+        # 所以只验"键最终还是照新配置解的"，候选框的计数就不比了
+        ok = grab_id is not None and committed == EXPECT
+        print(
+            f"mock: {'PASS' if ok else 'FAIL'}: committed {committed!r}, expected {EXPECT!r}",
             flush=True,
         )
     else:

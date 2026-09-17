@@ -30,6 +30,9 @@ const MAX_SEGMENTATIONS: usize = 4;
 /// 一个半截音节最多补全成几个音节
 const MAX_COMPLETIONS: usize = 24;
 
+/// 这些"感叹词音节"很少落在分段点上（`nihaom` 不该切成 `ni hao m`）
+const NOT_A_SEGMENT_TAIL: &[&str] = &["m", "n", "ng", "hm", "hng"];
+
 /// 标准普通话音节表（412 个）。运行时是从词库里读的（`syllable` 表），
 /// 这份只是给测试和文档用的参考
 #[cfg(test)]
@@ -138,6 +141,45 @@ impl Segmenter {
     /// 整句候选要用它拿到"音节序列"，不是拼好的码
     pub fn complete_segmentations(&self, input: &str) -> Vec<Vec<String>> {
         self.segmentations(input, MAX_SEGMENTATIONS)
+    }
+
+    /// 分段上屏用的前缀码：把输入按音节边界切成"前一段 + 剩下的一截"，
+    /// 返回 `(前一段的码, 它吃了几个字符)`，**长的前缀排在前面**。
+    ///
+    /// `nihaoma` → `[("ni hao", 5), ("ni", 2)]`：先试「你好」，不行再看「你」，
+    /// 选中的候选上屏之后 `ma` 接着组 —— 不用一次性把整串匹配完
+    pub fn prefix_codes(&self, input: &str) -> Vec<(String, usize)> {
+        let mut out = Vec::new();
+        if input.chars().count() < 2 {
+            return out; // 一个字母没什么好"分段"的
+        }
+        // 每个字符位置都当一次切点，但只有切出来能完整成音节的才算
+        for cut in (1..input.len()).rev() {
+            if !input.is_char_boundary(cut) {
+                continue;
+            }
+            let (head, _tail) = input.split_at(cut);
+            let Some(syllables) = self.segmentations(head, 1).into_iter().next() else {
+                continue;
+            };
+            if syllables.len() < 2 {
+                continue; // 只切出一个音节的分段没意义（打 ni 不该出「你」当分段候选）
+            }
+            // 尾巴是"感叹词音节"（呣 m、嗯 ng）的不算分段点：
+            // 不然 `nihaom` 会切出 `ni hao m`，白白占掉一个前缀名额
+            if syllables
+                .last()
+                .is_some_and(|syllable| NOT_A_SEGMENT_TAIL.contains(&syllable.as_str()))
+            {
+                continue;
+            }
+            let consumed = head.chars().count();
+            let code = syllables.join(" ");
+            if !out.iter().any(|(old, _)| *old == code) {
+                out.push((code, consumed));
+            }
+        }
+        out
     }
 
     /// 所有能把整串切完的切法（最多 `max` 种），音节数少的排前面
@@ -282,6 +324,38 @@ mod tests {
         assert!(codes.contains(&"na".to_string()), "{codes:?}");
         assert!(codes.contains(&"nuo".to_string()), "{codes:?}");
         assert!(codes.len() <= MAX_CODES);
+    }
+
+    #[test]
+    fn 前缀码从长到短() {
+        // nihaoma 的分段前缀：先「ni hao」(吃 5 个字符)，再「ni」(吃 2 个)
+        let codes = segmenter().prefix_codes("nihaoma");
+        // 先「ni hao」(吃 5 个字符)，再「ni ha」(吃 4 个)
+        assert_eq!(codes[0], ("ni hao".to_string(), 5), "{codes:?}");
+        assert!(codes.contains(&("ni ha".to_string(), 4)), "{codes:?}");
+        // 单个音节不算分段点：打 ni 不该把「你」当"分段候选"塞进来
+        assert!(codes.iter().all(|(code, _)| code != "ni"), "{codes:?}");
+        // 整串本身不算"前缀"
+        assert!(
+            codes.iter().all(|(code, _)| code != "ni hao ma"),
+            "{codes:?}"
+        );
+        // 尾巴是感叹词音节的也不切（`nihaom` 不该切出 `ni hao m`）
+        assert!(
+            segmenter()
+                .prefix_codes("nihaom")
+                .iter()
+                .all(|(code, _)| !code.ends_with('m')),
+            "{:?}",
+            segmenter().prefix_codes("nihaom")
+        );
+    }
+
+    #[test]
+    fn 切不出两个音节就没有前缀() {
+        // nih 的尾巴 h 切不动，只有「ni」这一个音节 → 不给分段候选
+        assert!(segmenter().prefix_codes("nih").is_empty());
+        assert!(segmenter().prefix_codes("n").is_empty());
     }
 
     #[test]

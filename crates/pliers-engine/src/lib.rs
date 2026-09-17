@@ -54,6 +54,9 @@ pub const KEY_PERIOD: u32 = 0x2e;
 pub const KEY_MINUS: u32 = 0x2d;
 pub const KEY_EQUAL: u32 = 0x3d;
 
+/// Del：把选中的候选"忘掉"（用户自己拼的句子能删，词库里的词只能清偏好）
+pub const KEY_DELETE: u32 = 0xffff;
+
 /// 数字 1..9：直接选第几个候选上屏（keysym 就是 ASCII '1'..'9'）
 const KEY_1: u32 = 0x31;
 const KEY_9: u32 = 0x39;
@@ -212,6 +215,56 @@ impl Preedit {
     }
 }
 
+/// 一个候选：要上屏的文字 + 它**吃掉输入里的几个字符**。
+///
+/// `consumed` 是"分段上屏"的关键：`nihaoma` 里「你好」只吃前 5 个字符，
+/// 上屏之后 `ma` 还留在预编辑里接着选 —— 不用一次性把整串匹配完
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub text: String,
+    /// 吃掉的字符数（按 `char` 数，不是字节）
+    pub consumed: usize,
+    /// 这是"用户自己拼过的话"（`user_phrase` 里的），不是词库里的词 —— 按 Del 能删
+    pub learned: bool,
+}
+
+impl Candidate {
+    /// 把整串输入都吃掉（整词、整句都是这种）
+    pub fn whole(text: impl Into<String>, input: &str) -> Self {
+        Self {
+            text: text.into(),
+            consumed: input.chars().count(),
+            learned: false,
+        }
+    }
+
+    /// 只吃掉前 `consumed` 个字符，剩下的留给下一轮
+    pub fn partial(text: impl Into<String>, consumed: usize) -> Self {
+        Self {
+            text: text.into(),
+            consumed,
+            learned: false,
+        }
+    }
+
+    /// 用户自己拼出来的整句（按 Del 能删掉）
+    pub fn learned(mut self) -> Self {
+        self.learned = true;
+        self
+    }
+}
+
+/// 挑一个候选的结果：整串都吃掉了，还是只吃了一段
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Picked {
+    Whole(String),
+    /// 上屏 `text`，剩下的拼音接着组（`rest` 是新的预编辑快照）
+    Part {
+        text: String,
+        rest: Preedit,
+    },
+}
+
 /// 引擎的决定，协议层照着执行
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -220,9 +273,13 @@ pub enum Action {
     UpdatePreedit(Preedit),
     /// 把这段文本提交给应用
     Commit(String),
+    /// 先把这段文本上屏，再接着显示剩下的预编辑（分段上屏：选了「你好」还剩 `ma`）
+    CommitAndContinue(String, Preedit),
     /// 先把这段文本提交给应用，再把这个按键原样转发（敲符号时用）。
     /// 顺序不能反：符号得排在上屏的文字后面，不然屏幕上会变成 ",你好"
     CommitAndForward(String),
+    /// 在候选框那儿弹一句话（"删掉了「你好马」"之类），预编辑不动
+    Notice(String),
     /// 原样转发给应用（走虚拟键盘）
     Forward,
     /// 吃掉，什么都不做（它的抬起事件也会被吃掉）
@@ -240,7 +297,7 @@ pub struct Engine {
     /// 一次准备多少个候选（翻页用）
     pool_size: usize,
     /// 候选池：一次多取一些，"翻页"就是在这个池子里挪游标，不用重新查库
-    pool: Vec<String>,
+    pool: Vec<Candidate>,
     /// 现在中文还是英文
     mode: Mode,
     /// 切换键
@@ -257,6 +314,13 @@ pub struct Engine {
     /// 被我们吃掉的按键：它们的抬起事件也得吃掉，
     /// 否则应用会收到"没按下就直接抬起"，修饰键状态可能错乱
     consumed: Vec<u32>,
+
+    /// 这次输入里用户已经挑过的部分（键 + 文字）：整句拼完之后存进词库，
+    /// 下次敲同一串键就直接给这个句子
+    picked_keys: String,
+    picked_text: String,
+    /// 挑过几段（挑过 2 段以上才算"他自己拼的句子"，值得记）
+    picked_parts: usize,
 }
 
 impl Engine {
@@ -267,6 +331,9 @@ impl Engine {
             limit: settings.limit.max(1),
             pool_size: settings.pool.max(settings.limit.max(1)),
             pool: Vec::new(),
+            picked_keys: String::new(),
+            picked_text: String::new(),
+            picked_parts: 0,
             mode: settings.start_mode,
             toggle: settings.toggle_keys,
             indicator: settings.indicator,
@@ -326,7 +393,10 @@ impl Engine {
         let end = (start + self.limit).min(self.pool.len());
         Preedit {
             text: self.buffer.clone(),
-            candidates: self.pool[start..end].to_vec(),
+            candidates: self.pool[start..end]
+                .iter()
+                .map(|candidate| candidate.text.clone())
+                .collect(),
             selected: self.cursor.saturating_sub(start),
             page,
             // 池子是空的就算 0 页，候选框那边看到 candidates 为空就会收起来
@@ -354,20 +424,35 @@ impl Engine {
     /// 查一次库，把候选池灌满（只在输入变了的时候调 ——
     /// 翻页/换选中都只是挪游标，不重新查）
     fn refresh_pool(&mut self) {
-        self.pool = if self.buffer.is_empty() || self.literal() {
+        if self.buffer.is_empty() || self.literal() {
             // 空串没什么好查的；带大写的串是英文原文（`nN`、`NIHAO`），
             // 更不能拿去匹配拼音 —— "打 NIHC 也蹦出词"就是这么来的
-            Vec::new()
-        } else {
-            self.scheme
-                .candidates(&self.dict, &self.buffer, self.pool_size)
-        };
+            self.pool.clear();
+            return;
+        }
+        // 1) 用户自己拼过的整串（分段挑出来的句子）：这是他自己的选择，排最前
+        self.pool = self
+            .dict
+            .phrases(&self.buffer, self.limit)
+            .into_iter()
+            .map(|text| Candidate::whole(text, &self.buffer).learned())
+            .collect();
+        // 2) 方案给的：整词、整句、以及"只匹配前面一段"的候选（带 consumed）
+        for candidate in self
+            .scheme
+            .candidates(&self.dict, &self.buffer, self.pool_size)
+        {
+            if !self.pool.iter().any(|old| old.text == candidate.text) {
+                self.pool.push(candidate);
+            }
+        }
+        self.pool.truncate(self.pool_size);
     }
 
     /// 输入框失焦：按住没放的键不会再有抬起事件了，账本一起清掉。
     /// 注意**不动 mode** —— 切到英文之后换个窗口，还是英文
     pub fn reset(&mut self) {
-        self.clear_composing();
+        self.abandon();
         self.consumed.clear();
         self.shift_tap = false;
     }
@@ -377,6 +462,13 @@ impl Engine {
     fn switch_mode(&mut self) -> Option<String> {
         self.mode = self.mode.toggle();
         self.take_raw()
+    }
+
+    /// 放弃这次组词（Esc、切模式、失焦）：连"已经挑了几段"一起忘掉 ——
+    /// 用户不要这句话了，没有道理再记进词库
+    fn abandon(&mut self) {
+        self.clear_composing();
+        self.forget_picks();
     }
 
     /// 组词结束（上屏 / 取消）：只清组词状态，按键账本留着 ——
@@ -502,16 +594,22 @@ impl Engine {
             KEY_RETURN | KEY_KP_ENTER if composing => {
                 self.consumed.push(key.keycode);
                 let text = std::mem::take(&mut self.buffer);
-                self.cursor = 0;
-                self.pool.clear();
+                self.abandon();
                 Action::Commit(text) // 账本不动：回车自己的抬起还得吃掉
             }
 
             // Esc：取消这次组词，这个键谁也不给（否则会顺手退出全屏、关掉弹窗）
             KEY_ESCAPE if composing => {
                 self.consumed.push(key.keycode);
-                self.clear_composing();
+                self.abandon();
                 Action::UpdatePreedit(Preedit::default())
+            }
+
+            // Del：把选中的候选"忘掉" —— 用户自己拼出来的整句能删掉；
+            // 词库里真有的词只能清掉"我用过它"的偏好（词条是导入的，不该被删）
+            KEY_DELETE if composing => {
+                self.consumed.push(key.keycode);
+                self.forget()
             }
 
             // 退格：删掉一个字符（候选列表跟着重算，选中回到第一个）
@@ -551,13 +649,12 @@ impl Engine {
                 let index = (key.keysym - KEY_1) as usize;
                 self.consumed.push(key.keycode);
                 // 数字选的是**这一页**的第几个（不是池子里的第几个）
-                match self.pool.get(self.page_start() + index).cloned() {
-                    Some(word) => {
-                        self.pick(&word);
-                        Action::Commit(word)
-                    }
+                if self.pool.get(self.page_start() + index).is_some() {
+                    self.cursor = self.page_start() + index;
+                    self.commit_candidate(key.keycode)
+                } else {
                     // 候选没那么多却按了这个数字：当没按过（但也不把数字塞进拼音）
-                    None => Action::Swallow,
+                    Action::Swallow
                 }
             }
 
@@ -565,7 +662,7 @@ impl Engine {
             // `,` `.` `-` `=` 被翻页占了）：先把选中的候选上屏，再把字符交给应用。
             // 顺序反了的话，符号会插在还没上屏的拼音前面 —— nihao, 会变成 ",你好"
             _ if composing && is_printable(key.keysym) => {
-                Action::CommitAndForward(self.take_word())
+                Action::CommitAndForward(self.take_whole())
             }
 
             // 其他按键（F1、Home……）都交给应用
@@ -577,6 +674,10 @@ impl Engine {
     /// 打字过程中新出现的候选才是你要的，停在旧的行上没意义
     fn changed(&mut self) -> Action {
         self.cursor = 0;
+        if self.buffer.is_empty() {
+            // 删光了：这次输入不算数了
+            self.forget_picks();
+        }
         self.refresh_pool();
         Action::UpdatePreedit(self.preedit())
     }
@@ -592,44 +693,158 @@ impl Engine {
         Action::UpdatePreedit(self.preedit())
     }
 
-    /// 上屏当前选中的候选
+    /// 上屏当前选中的候选（可能只吃掉前面一段：`nihaoma` 选「你好」还剩 `ma`）
     fn commit_candidate(&mut self, keycode: u32) -> Action {
-        let word = self.take_word();
         self.consumed.push(keycode);
-        Action::Commit(word)
+        let picked = self.take_word();
+        match picked {
+            // 整串都吃掉了：这次组词结束
+            Picked::Whole(text) => Action::Commit(text),
+            // 只吃了一部分：上屏之后接着显示剩下的拼音和候选
+            Picked::Part { text, rest } => Action::CommitAndContinue(text, rest),
+        }
     }
 
     /// 结束这次组词，交出"该上屏的东西"：选中的候选；一个候选都没有
     ///（打的是词库里没有的东西，比如 `aaaa`）就用原始拼音 —— 不能交空串，
     /// 那样用户打的字就凭空消失了。挑中的词顺手记一笔词频
-    fn take_word(&mut self) -> String {
-        let word = match self.pool.get(self.cursor).or_else(|| self.pool.first()) {
-            Some(word) => word.clone(),
-            None => std::mem::take(&mut self.buffer),
-        };
-        if word.is_empty() {
+    fn take_word(&mut self) -> Picked {
+        let Some(candidate) = self
+            .pool
+            .get(self.cursor)
+            .or_else(|| self.pool.first())
+            .cloned()
+        else {
+            // 一个候选都没有：原始拼音整串上屏
+            let raw = std::mem::take(&mut self.buffer);
             self.clear_composing();
+            return Picked::Whole(raw);
+        };
+
+        let consumed = candidate.consumed.min(self.buffer.chars().count());
+        let rest: String = self.buffer.chars().skip(consumed).collect();
+        let eaten: String = self.buffer.chars().take(consumed).collect();
+
+        self.record_pick(&eaten, &candidate.text);
+        self.note_pick(&candidate.text);
+
+        if rest.is_empty() {
+            self.clear_composing();
+            self.remember_phrase();
+            Picked::Whole(candidate.text)
         } else {
-            self.pick(&word);
+            // 剩下的接着组词：候选按剩下的那截重新查
+            self.buffer = rest;
+            self.cursor = 0;
+            self.refresh_pool();
+            Picked::Part {
+                text: candidate.text,
+                rest: self.preedit(),
+            }
         }
-        word
+    }
+
+    /// Del：忘掉选中的候选（用户自己拼的整句直接删；词库里的词只清偏好）
+    fn forget(&mut self) -> Action {
+        let Some(candidate) = self.pool.get(self.cursor).cloned() else {
+            return Action::Forward; // 没候选的时候 Del 照旧给应用（删它自己的字）
+        };
+        let text = candidate.text.clone();
+        let result = if candidate.learned {
+            self.dict.forget_phrase(&self.buffer, &text)
+        } else {
+            self.dict.forget_boost(&text)
+        };
+        let removed = match result {
+            Ok(removed) => removed,
+            Err(e) => {
+                eprintln!("pliers: 删词失败：{e}");
+                false
+            }
+        };
+
+        // 列表照着新的库重排，光标尽量停在原地
+        let cursor = self.cursor;
+        self.refresh_pool();
+        self.cursor = cursor.min(self.pool.len().saturating_sub(1));
+        Action::Notice(if !removed {
+            format!("「{text}」不是自己加的，删不了")
+        } else if candidate.learned {
+            format!("删掉了「{text}」")
+        } else {
+            format!("「{text}」回到默认排序")
+        })
+    }
+
+    /// 把**整串**收掉再上屏：符号、大写字母走这条路时不能留半截拼音在预编辑里
+    ///（那个符号已经先发给应用了）。选中的候选要是只吃了一段，就退而求其次挑
+    /// 池子里第一个"整串候选"，一个都没有就原样上屏
+    fn take_whole(&mut self) -> String {
+        let chars = self.buffer.chars().count();
+        let picked = self
+            .pool
+            .get(self.cursor)
+            .filter(|candidate| candidate.consumed >= chars)
+            .or_else(|| {
+                self.pool
+                    .iter()
+                    .find(|candidate| candidate.consumed >= chars)
+            })
+            .cloned();
+        match picked {
+            Some(candidate) => {
+                self.note_pick(&candidate.text);
+                self.abandon();
+                candidate.text
+            }
+            None => {
+                let raw = std::mem::take(&mut self.buffer);
+                self.abandon();
+                raw
+            }
+        }
+    }
+
+    /// 记住"用户在这串键上挑过哪些段"：整串拼完（候选都上屏了）就存进词库，
+    /// 下次敲同一串键直接把这句话给他
+    fn record_pick(&mut self, eaten: &str, text: &str) {
+        self.picked_keys.push_str(eaten);
+        self.picked_text.push_str(text);
+        self.picked_parts += 1;
+    }
+
+    /// 这次输入结束了：段数够多就记下来（只挑了一段的话词库里本来就有，记了也是噪音）
+    fn remember_phrase(&mut self) {
+        if self.picked_parts >= 2
+            && !self.picked_keys.is_empty()
+            && !self.picked_text.is_empty()
+            && let Err(e) = self.dict.note_phrase(&self.picked_keys, &self.picked_text)
+        {
+            eprintln!("pliers: 记整句失败：{e}");
+        }
+        self.forget_picks();
+    }
+
+    fn forget_picks(&mut self) {
+        self.picked_keys.clear();
+        self.picked_text.clear();
+        self.picked_parts = 0;
     }
 
     /// 放弃这次组词，但把"打了一半的原始字母"交出来（调用方负责上屏）。
     /// 返回 None 表示刚才没在组词。切模式、失焦时用来救场
     pub fn take_raw(&mut self) -> Option<String> {
         let text = std::mem::take(&mut self.buffer);
-        self.clear_composing();
+        self.abandon();
         (!text.is_empty()).then_some(text)
     }
 
     /// 用户挑了一个词：记一笔，下次它排得更靠前。
     /// 这就是"用户使用频率权重"那半边，存在库里的 `user_word` 表
-    fn pick(&mut self, word: &str) {
+    fn note_pick(&self, word: &str) {
         if let Err(e) = self.dict.note_used(word) {
             eprintln!("pliers: 记用户词频失败：{e}");
         }
-        self.clear_composing();
     }
 }
 
@@ -737,6 +952,148 @@ mod tests {
         assert_eq!(preedit.current(), Some("你好"));
     }
 
+    /// 在候选里挑某个词（按下它对应的数字键）
+    fn pick(engine: &mut Engine, text: &str) -> Action {
+        let index = engine
+            .preedit()
+            .candidates
+            .iter()
+            .position(|candidate| candidate == text)
+            .unwrap_or_else(|| panic!("候选里没有 {text:?}：{:?}", engine.preedit().candidates));
+        engine.on_key(key(0x31 + index as u32))
+    }
+
+    #[test]
+    fn 分段上屏_先选前面一段再接着选() {
+        // nihaoma：词库里没有「你好吗」，但「你好」匹配了前 5 个字符 ——
+        // 选它之后 ma 还留在预编辑里，接着选「吗」
+        let mut engine = engine();
+        type_letters(&mut engine, "nihaoma");
+        let candidates = engine.preedit().candidates.clone();
+        assert_eq!(candidates[0], "你好吗", "整句候选排前面：{candidates:?}");
+        assert!(candidates.contains(&"你好".to_string()), "{candidates:?}");
+
+        // 挑「你好」：上屏 + 剩下的接着组词
+        let Action::CommitAndContinue(text, rest) = pick(&mut engine, "你好") else {
+            panic!("该是分段上屏");
+        };
+        assert_eq!(text, "你好");
+        assert_eq!(rest.text, "ma", "剩下的该是 ma");
+        assert_eq!(engine.text(), "ma");
+        assert!(!engine.preedit().candidates.is_empty(), "剩下的也得有候选");
+
+        // 剩下的接着选：吗
+        assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Commit("吗".into()));
+        assert_eq!(engine.text(), "");
+    }
+
+    #[test]
+    fn 分段拼出来的句子记进词库() {
+        let mut engine = engine();
+        type_letters(&mut engine, "nihaoma");
+        assert!(matches!(
+            pick(&mut engine, "你好"),
+            Action::CommitAndContinue(..)
+        ));
+        assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Commit("吗".into()));
+
+        // 记下来了：键就是他敲的那串
+        assert_eq!(engine.dict.phrases("nihaoma", 9), ["你好吗"]);
+
+        // 再敲同一串键，这句直接排第一
+        engine.set_text("nihaoma");
+        assert_eq!(engine.preedit().candidates[0], "你好吗");
+    }
+
+    #[test]
+    fn 按_del_删掉自己拼的句子() {
+        let mut engine = engine();
+        // 先拼出「你好马」（挑两段），它会记进 user_phrase
+        type_letters(&mut engine, "nihaoma");
+        assert!(matches!(pick(&mut engine, "你好"), Action::CommitAndContinue(..)));
+        assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Commit("吗".into()));
+        assert_eq!(engine.dict.phrases("nihaoma", 9), ["你好吗"]);
+
+        // 再打一遍：第一条就是它，按 Del 删掉
+        engine.set_text("nihaoma");
+        assert_eq!(engine.preedit().candidates[0], "你好吗");
+        let Action::Notice(message) = engine.on_key(key(KEY_DELETE)) else {
+            panic!("该回一句提示");
+        };
+        assert!(message.contains("删掉了"), "{message}");
+        assert!(engine.dict.phrases("nihaoma", 9).is_empty(), "库里该没了");
+        assert!(
+            !engine.preedit().candidates.contains(&"你好吗".to_string()),
+            "候选里也该没了：{:?}",
+            engine.preedit().candidates
+        );
+        assert_eq!(engine.text(), "nihaoma", "预编辑不受影响");
+    }
+
+    #[test]
+    fn 按_del_删不掉词库里的词只清偏好() {
+        let mut engine = engine();
+        type_letters(&mut engine, "nihao");
+        // 没选过它：Del 只回一句"删不了"，候选还在
+        let Action::Notice(message) = engine.on_key(key(KEY_DELETE)) else {
+            panic!("该回一句提示");
+        };
+        assert!(message.contains("删不了"), "{message}");
+        assert_eq!(engine.preedit().candidates[0], "你好");
+
+        // 选过一次（有了偏好）→ Del 清掉偏好，词本身留着
+        assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Commit("你好".into()));
+        engine.set_text("nihao");
+        let Action::Notice(message) = engine.on_key(key(KEY_DELETE)) else {
+            panic!("该回一句提示");
+        };
+        assert!(message.contains("默认排序"), "{message}");
+        assert_eq!(engine.preedit().candidates[0], "你好", "词库里的词不能删");
+    }
+
+    #[test]
+    fn 没候选时_del_照旧转发() {
+        let mut engine = engine();
+        // 没在组词：Del 是应用的键（删它自己的字）
+        assert_eq!(engine.on_key(key(KEY_DELETE)), Action::Forward);
+        // 在组词但一个候选都没有（`qqq`）：也没得删，转发
+        type_letters(&mut engine, "qqq");
+        assert_eq!(engine.on_key(key(KEY_DELETE)), Action::Forward);
+    }
+
+    #[test]
+    fn 只挑一段不记整句() {
+        // 只挑了一次（整串命中）没什么好记的：词库里本来就有
+        let mut engine = engine();
+        type_letters(&mut engine, "nihao");
+        assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Commit("你好".into()));
+        assert!(engine.dict.phrases("nihao", 9).is_empty());
+    }
+
+    #[test]
+    fn 放弃组词就不记了() {
+        // 挑了一段之后按 Esc：这段不该被记成"用户拼的句子"
+        let mut typed = engine();
+        type_letters(&mut typed, "nihaoma");
+        assert!(matches!(
+            pick(&mut typed, "你好"),
+            Action::CommitAndContinue(..)
+        ));
+        typed.on_key(key(KEY_ESCAPE));
+        assert!(typed.dict.phrases("nihaoma", 9).is_empty());
+
+        // 删光也同理
+        let mut erased = engine();
+        type_letters(&mut erased, "nihaoma");
+        assert!(matches!(
+            pick(&mut erased, "你好"),
+            Action::CommitAndContinue(..)
+        ));
+        erased.on_key(key(KEY_BACKSPACE));
+        erased.on_key(key(KEY_BACKSPACE));
+        assert!(erased.dict.phrases("nihaoma", 9).is_empty());
+    }
+
     #[test]
     fn 整句候选_库里的词拼出长句() {
         // nihaoma：词库里没有「你好吗」这个词，靠「你好」+「吗」拼出来
@@ -768,13 +1125,20 @@ mod tests {
         let config = Config::parse("[scheme]\nkind = \"full-pinyin\"\nsentence = false\n").unwrap();
         let dict = dict::testing::sample_dict();
         let scheme = config.build_scheme(&dict).unwrap();
-        let got = scheme.candidates(&dict, "nihaoma", 9);
+        let texts = |scheme: &Box<dyn Scheme>| -> Vec<String> {
+            scheme
+                .candidates(&dict, "nihaoma", 9)
+                .into_iter()
+                .map(|candidate| candidate.text)
+                .collect()
+        };
+        let got = texts(&scheme);
         assert!(!got.contains(&"你好吗".to_string()), "{got:?}");
 
         // 开着的时候有（对照，免得哪天默默失效）
         let config = Config::parse("[scheme]\nkind = \"full-pinyin\"\n").unwrap();
         let scheme = config.build_scheme(&dict).unwrap();
-        let got = scheme.candidates(&dict, "nihaoma", 9);
+        let got = texts(&scheme);
         assert!(got.contains(&"你好吗".to_string()), "{got:?}");
     }
 
@@ -1271,10 +1635,11 @@ mod tests {
 
     #[test]
     fn 功能键不会把拼音提前上屏() {
-        // F1 / Home / Delete 这些键不产生字符，照旧原样转发，组词不受影响
+        // F1 / Home / Insert 这些键不产生字符，照旧原样转发，组词不受影响
+        //（Del 有自己的活儿：删自己拼的词，见下面那个测试）
         let mut engine = engine();
         type_letters(&mut engine, "ni");
-        for keysym in [0xffbe, 0xff50, 0xffff] {
+        for keysym in [0xffbe, 0xff50, 0xff63] {
             assert_eq!(engine.on_key(key(keysym)), Action::Forward);
             assert_eq!(engine.text(), "ni");
         }

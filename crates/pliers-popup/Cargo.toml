@@ -3,6 +3,8 @@ name = "pliers-popup"
 description = "候选框：找字体、排版、画像素、共享内存（不碰 Wayland）"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 # 画字用：ab_glyph 只做"字符 → 轮廓 → 灰度图"，不带排版和字体发现

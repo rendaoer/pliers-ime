@@ -3,6 +3,8 @@ name = "pliers-engine"
 description = "引擎：按键状态机 + 输入方案（全拼/双拼/码表）+ SQLite 词库"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 pollster = "1.0.1"

@@ -3,6 +3,8 @@ name = "pliers-ime"
 description = "pliers：一个从零手写的 Wayland 中文输入法（全拼/双拼，SQLite 词库，TOML 配置）"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [[bin]]
 # 包名要避让 crates.io 上的 pliers（已被占），但命令还是短的

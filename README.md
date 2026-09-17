@@ -20,6 +20,8 @@ cargo run -- --init      # 装一份能用的：写配置 + 下载词库（几�
 cargo run                # 跑起来
 ```
 
+（发到 crates.io 之后也可以直接装：`cargo install pliers-ime` —— 装出来的命令叫 `pliers`）
+
 然后把焦点放进输入框，敲 `n i h a o` 再按空格。能不能用取决于**应用自己有没有实现
 text-input 协议**：Firefox / GTK / Qt 应用都行，alacritty 0.17（基于 winit）实测也可以。
 
@@ -91,6 +93,14 @@ cargo test --workspace        # 162 个单测，不需要合成器、不需要�
 * 加词 / 调词频 → 用 SQL 改词库，或者重新跑一遍 `pliers-dict`
 * 换候选框长相（甚至换成 egui/Slint 画）→ `crates/pliers-popup`
 * 加协议功能（比如 `delete_surrounding_text`）→ `crates/pliers-wayland`
+
+## 许可
+
+* **代码**：[MIT](LICENSE-MIT) 或 [Apache-2.0](LICENSE-APACHE)，随你挑一个用
+* **词库资产**（Release 里的 `dict.db.zst`）：**GPL-3.0** —— 它是
+  [rime-frost](https://github.com/gaboolic/rime-frost) 那份 GPL-3.0 语料的衍生作品，
+  跟代码的许可是两回事。不想碰它就 `pliers dict build` 自己从上游构建（那只是下载语料，
+  不涉及再分发）—— 见 [docs/dictionary.md](docs/dictionary.md#许可)
 
 ## 名字
 

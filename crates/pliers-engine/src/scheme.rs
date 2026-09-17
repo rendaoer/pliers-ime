@@ -403,10 +403,15 @@ impl Layout {
     /// 直接把 300 个音节甩给用户没用，得告诉他"你少写了 ai、ang 这几个" ——
     /// 所以把音节去掉声母，剩下的就是那个没定义的韵母（`bai` → `ai`，`zhuang` → `uang`）
     pub fn missing_finals(&self, syllables: &[String]) -> Vec<String> {
+        let known = known_finals();
         let mut missing: Vec<String> = self
             .unencodable(syllables)
             .iter()
             .map(|syllable| final_of(syllable).to_string())
+            // 只报**真实存在**的韵母：音节表里混进脏数据时（rime 词库里 `均订` 的码
+            // 写成了 `junding`），去掉声母会算出 `unding` 这种根本不存在的韵母，
+            // 报出来只会让人一头雾水，还以为自己键位配错了
+            .filter(|final_| known.contains(&final_.as_str()))
             .collect();
         missing.sort();
         missing.dedup();
@@ -478,6 +483,22 @@ fn final_of(syllable: &str) -> &str {
         Some(first) if !"aoe".contains(first) => &syllable[first.len_utf8()..],
         _ => syllable,
     }
+}
+
+/// 三套预设键位里出现过的所有韵母 —— 用来判断"这个韵母是不是真实存在"。
+///
+/// `final_of` 是纯字符串操作，给它一个不是音节的字符串（`junding`）它也会照切
+/// （`unding`）。所以报"缺哪些韵母"之前先拿这份表对一下
+fn known_finals() -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = NATURAL_FINALS
+        .iter()
+        .chain(FLYPY_FINALS)
+        .chain(MSPY_FINALS)
+        .map(|(final_, _)| *final_)
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// 双拼：输入是一串两键一组的东西，每组解成一个音节，解出来就变成全拼
@@ -902,6 +923,28 @@ mod tests {
         keys.remove("ai");
         let layout = Layout::empty().with_keys(&keys).unwrap();
         assert_eq!(layout.missing_finals(&syllables()), ["ai", "ang"]);
+    }
+
+    #[test]
+    fn 音节表里的脏数据不会被当成缺韵母() {
+        // rime 词库里 `均订` 的码写成了 `junding`（本该是 `jun ding`），
+        // 这个词库会把 `junding` 当成一个"音节"塞进音节表。
+        // 去掉声母会算出 `unding` —— 那不是韵母，不能报给用户
+        let mut keys: BTreeMap<String, String> = BTreeMap::new();
+        for (finals, key) in NATURAL_FINALS {
+            keys.insert((*finals).to_string(), key.to_string());
+        }
+        let layout = Layout::empty().with_keys(&keys).unwrap();
+        assert!(
+            layout.missing_finals(&["junding".to_string()]).is_empty(),
+            "脏音节不该报成缺韵母"
+        );
+        // 真实存在但没配键位的韵母照样要报
+        keys.remove("ang");
+        let layout = Layout::empty().with_keys(&keys).unwrap();
+        let mut words = syllables();
+        words.push("junding".to_string());
+        assert_eq!(layout.missing_finals(&words), ["ang"]);
     }
 
     #[test]

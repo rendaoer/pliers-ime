@@ -72,22 +72,11 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
 }
 
 /// 用户每选一次词，加多少分。
-/// 词频权重最大到 8000 万（jieba 词频 ×10），所以这个值让"用过十次"的词能压过
-/// 绝大多数常用词 —— 但也压不过「的」「你」这种顶级高频词，避免一次误选就再也翻不了身
+/// 词频权重最大到 8000 万（导入时统一缩放到这个上限），所以这个值让"用过十次"的词
+/// 能压过绝大多数常用词 —— 但也压不过「的」「你」这种顶级高频词，避免一次误选就再也翻不了身
 pub const USER_BOOST: i64 = 1_000_000;
 /// 用户词频最多算多少次（防止某一个词被刷到天上去）
 pub const USER_BOOST_CAP: i64 = 50;
-
-/// 没有词频数据的词，按长度给一点权重。
-/// 词频表里的词最低也有 20 分，所以"查不到词频"的一律排在后面，短的优先
-pub fn synthetic_weight(len: usize) -> i64 {
-    match len {
-        0 | 1 => 4,
-        2 => 3,
-        3 => 2,
-        _ => 1,
-    }
-}
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -105,9 +94,9 @@ impl Dict {
     pub fn open(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Err(format!(
-                "词库不存在：{}\n先导入一份：\n  cargo run -p pliers-dict --release -- --source ~/Downloads/CustomPinyinDictionary_IBus.txt --out {}",
+                "词库不存在：{}\n装一份（写配置 + 下载词库）：\n  pliers --init\n\
+                 也可以用你自己的词表构建：pliers dict build（或 pliers-dict --help）",
                 path.display(),
-                path.display()
             )
             .into());
         }
@@ -306,6 +295,59 @@ impl Dict {
             _ => None,
         }
     }
+
+    /// 数一下这个库里有多少东西 —— 刚下载完 / 刚导入完拿它验一验，
+    /// `pliers dict status` 也用它报数
+    pub fn stats(&self) -> Result<Stats> {
+        let count = |sql: &str| -> Result<i64> {
+            let mut stmt = pollster::block_on(self.conn.prepare(sql))?;
+            let mut rows = pollster::block_on(stmt.query(()))?;
+            let row = pollster::block_on(rows.next())?.ok_or("查不到")?;
+            row.get_value(0)?
+                .as_integer()
+                .copied()
+                .ok_or_else(|| "不是数字".into())
+        };
+        let mut schemes = Vec::new();
+        {
+            let mut stmt = pollster::block_on(self.conn.prepare(
+                "SELECT scheme, count(*) FROM word GROUP BY scheme ORDER BY count(*) DESC",
+            ))?;
+            let mut rows = pollster::block_on(stmt.query(()))?;
+            while let Some(row) = pollster::block_on(rows.next())? {
+                if let (turso::Value::Text(scheme), turso::Value::Integer(n)) =
+                    (row.get_value(0)?, row.get_value(1)?)
+                {
+                    schemes.push((scheme, n));
+                }
+            }
+        }
+        Ok(Stats {
+            words: count("SELECT count(*) FROM word")?,
+            singles: count("SELECT count(*) FROM word WHERE length(text) = 1")?,
+            phrasal: count("SELECT count(*) FROM word WHERE length(text) > 1")?,
+            user_words: count("SELECT count(*) FROM user_word")?,
+            user_phrases: count("SELECT count(*) FROM user_phrase")?,
+            schemes,
+        })
+    }
+}
+
+/// `Dict::stats` 的结果
+#[derive(Debug, Clone)]
+pub struct Stats {
+    /// word 表里的行数（多音字、多音词各算一行）
+    pub words: i64,
+    /// 其中单字行
+    pub singles: i64,
+    /// 其中词/词组行
+    pub phrasal: i64,
+    /// 用户选过多少次（user_word）
+    pub user_words: i64,
+    /// 用户自己拼出来的句子（user_phrase）
+    pub user_phrases: i64,
+    /// 每种方案各多少行：`[("pinyin", 1234), ("wubi", 56)]`
+    pub schemes: Vec<(String, i64)>,
 }
 
 #[cfg(test)]
@@ -439,8 +481,8 @@ mod tests {
 
 /// 测试用的小词库。
 ///
-/// 真库有 150 万行，测试里当然不能去开它 —— 这里现造一个几十行的，
-/// 权重照着真实词频的量级写（jieba 词频 ×10），排出来的顺序才跟真机一致
+/// 真库有上百万行，测试里当然不能去开它 —— 这里现造一个几十行的，
+/// 权重照着真库的量级写（导入时最大权重缩放到 8000 万），排出来的顺序才跟真机一致
 #[cfg(test)]
 pub(crate) mod testing {
     use std::cell::RefCell;

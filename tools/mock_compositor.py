@@ -461,9 +461,9 @@ def main():
                     if send_mods:
                         conn.send(grab_id, 2, struct.pack("<IIIII", 0, 0, 0, 0, 0))
                 elif base_mode == "segment":
-                    # 分段上屏：KEYS（nihcma）没有整词时，先挑「你好」把前一段上屏，
-                    # 剩下的 ma 接着挑「马」—— 然后**再打一遍**，这次该直接出「你好马」
-                    #（这句是用户自己拼的，词库/整句都不会给，只有记住了才有）
+                    # 分段上屏：KEYS（nihaoma）先挑「你好」把前一段上屏，剩下的 ma 再挑一个字
+                    # —— 然后**再打一遍**，这次该一次上屏整句（词库/整句都给不出来，
+                    # 只有"记性"能）
                     def send(code, state):
                         conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, code, state))
 
@@ -479,7 +479,7 @@ def main():
                         tap(EVDEV_DOWN, 0.03)
                     tap(EVDEV[" "], 0.06)  # 上屏「你好」，预编辑里剩 ma
                     time.sleep(0.1)
-                    tap(EVDEV_DOWN, 0.03)  # ma 的候选里「马」是第 2 个
+                    tap(EVDEV_DOWN, 0.03)  # ma 的候选里挑第 2 个（是哪个字看词库）
                     tap(EVDEV[" "], 0.06)  # 上屏「马」
                     time.sleep(0.1)
                     for ch in KEYS:  # 再打一遍同一串键
@@ -515,8 +515,8 @@ def main():
                             for ch in name:
                                 tap(EVDEV[ch], 0.03)
                 elif base_mode == "forget":
-                    # 和 segment 一样先拼出「你好马」并让它记住，
-                    # 但第二遍按的是 Del + 空格：删掉之后该回到「你好吗」
+                    # 和 segment 一样先分段拼一句并让它记住，
+                    # 但第三遍按的是 Del + 空格：删掉之后该回到词库自己给的第一候选
                     def tap(code, pause=0.04):
                         for state in (1, 0):
                             conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, code, state))
@@ -524,14 +524,14 @@ def main():
 
                     for ch in KEYS:
                         tap(EVDEV[ch], 0.03)
-                    for _ in range(2):  # ↓↓ 到「你好」
+                    for _ in range(2):  # ↓↓ 挪到「你好」（前两个是整句候选）
                         tap(EVDEV_DOWN, 0.03)
                     tap(EVDEV[" "], 0.06)
                     time.sleep(0.1)
                     tap(EVDEV_DOWN, 0.03)  # ma 的候选里「马」是第 2 个
                     tap(EVDEV[" "], 0.06)
                     time.sleep(0.1)
-                    for ch in KEYS:  # 再打一遍：这时第一条是记住的「你好马」
+                    for ch in KEYS:  # 再打一遍：这时第一条是记住的那句
                         tap(EVDEV[ch], 0.03)
                     time.sleep(0.1)
                     tap(EVDEV_DELETE, 0.06)  # Del：删掉它
@@ -785,16 +785,22 @@ def main():
             flush=True,
         )
     elif mode == "segment":
-        # 前两次提交是分段挑的，第三次是"记住的那句"—— 一次提交三个字
+        # 分段挑两次拼成一句话，第三遍再打同一串键 —— 这次是**记住的句子**一次上屏。
+        # 具体挑到哪两个字不写死（词库不同、候选就不同），断言的是机制：
+        # 第三次提交 == 前两次拼起来的那句，而这只有"记性"能做到
         ok = (
             grab_id is not None
-            and commits == ["你好", "马", "你好马"]
+            and len(commits) == 3
+            and commits[0] == "你好"  # 第一段是词库里真有的词
+            and len(commits[1]) == 1  # 第二段就一个字（分段能细到单字）
+            and commits[2] == commits[0] + commits[1]
             and "ma" in nonempty  # 中间预编辑里真的剩了 ma
             and not forwards
         )
         print(
             f"mock: {'PASS' if ok else 'FAIL'}: commits {commits} "
-            f"(期望 ['你好', '马', '你好马']), 预编辑 {nonempty}, forwarded {len(forwards)} keys",
+            f"(期望 挑两段 → 第三遍一次上屏「两段拼起来的那句」), 预编辑 {nonempty}, "
+            f"forwarded {len(forwards)} keys",
             flush=True,
         )
     elif mode == "script":
@@ -805,19 +811,23 @@ def main():
             flush=True,
         )
     elif mode == "forget":
-        # 前两次提交是分段挑的，第三次是"记住的那句"上屏前被 Del 删掉 → 退回「你好吗」。
+        # 前两次是分段挑的，第三遍按 Del 把"记住的那句"删掉 → 退回词库自己给的第一候选。
+        # 「你好吗」在 IBus 词库和 rime 词库下都是 nihaoma 的第一候选，所以这个断言稳。
         # 另外：Del 之后弹的那句提示不能被"Del 自己的抬起"收掉（不然候选框就没了），
         # 所以最后两次候选框事件必须是 show → hide
         tail_ok = len(popup_events) >= 2 and popup_events[-1][0] == "hide" and popup_events[-2][0] == "show"
         ok = (
             grab_id is not None
-            and commits == ["你好", "马", "你好吗"]
+            and len(commits) == 3
+            and commits[0] == "你好"
+            and commits[2] == "你好吗"
+            and commits[2] != commits[0] + commits[1]  # 记住的那句真的被删掉了
             and not forwards
             and tail_ok
         )
         print(
             f"mock: {'PASS' if ok else 'FAIL'}: commits {commits} "
-            f"(期望 ['你好', '马', '你好吗']), forwarded {len(forwards)} keys, "
+            f"(期望 分段挑的那句被 Del 删掉 → 退回「你好吗」), forwarded {len(forwards)} keys, "
             f"候选框最后两次 {[e[0] for e in popup_events[-2:]]}（期望 show → hide）",
             flush=True,
         )

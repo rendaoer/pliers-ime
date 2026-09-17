@@ -12,7 +12,7 @@
 | `crates/pliers-popup` | 候选框长什么样：找字体、排版、画像素、共享内存文件 | ab_glyph / fontdb |
 | `crates/pliers-wayland` | 跟合成器说协议：注册、抓键盘、转发按键、贴候选框 | wayland-client / xkbcommon |
 | `crates/pliers-ime` | `main()`：读配置、把上面几个拼起来（包名是 `pliers-ime`，命令是 `pliers`） | pliers-engine + pliers-wayland |
-| `crates/pliers-dict` | 导入工具：词表 + 词频表 → SQLite 词库 | turso |
+| `crates/pliers-dict` | 导入工具：rime 词库（`.dict.yaml`）→ SQLite 词库 | turso |
 
 ```
 pliers-engine  ←──┬──  pliers-popup  ──┐
@@ -31,6 +31,7 @@ pliers-engine  ←──┬──  pliers-popup  ──┐
 | `sentence.rs` | 整句候选：音节序列上的最短路径（Viterbi） |
 | `dict.rs` | SQLite 词库：建表、查词、记用户词频 |
 | `config.rs` | 读 TOML 配置 |
+| `fetch.rs` | 下载 + 解压（`pliers --init` / `pliers dict ...` 装词库用） |
 
 这么切的好处：**输入方案、词库、候选框长相都能脱离合成器跑测试**（162 个单测），
 协议层里剩下的全是"Wayland 要求这么做"的东西。想改哪块就只动哪块：
@@ -75,7 +76,7 @@ SELECT text FROM word WHERE code LIKE 'ni%' ORDER BY weight DESC LIMIT 9
 | `code = 'ni hao'` | **64 µs** | 精确匹配，走索引，随便打 |
 | `code LIKE 'ni ha%'` | 46 µs | 范围很窄，还行 |
 | `code LIKE 'ni%'` | **280 ms** | 扫出几万行再排序 —— 打一个字母卡半秒 |
-| 建索引（20 万行） | 40 s | 所以导入是分钟级的 |
+| 建索引（20 万行） | 40 s | 只跟「重新导入」有关，日常用不到 |
 
 `ni%` 这种宽前缀是致命的：**输入法每敲一个键都要查一次**。所以正确的分工是：
 

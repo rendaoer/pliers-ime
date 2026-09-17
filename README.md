@@ -16,18 +16,18 @@
 ## 快速开始
 
 ```bash
-cargo run                     # 编译并跑起来（workspace 默认就跑 pliers）
-```
-
-词库不在仓库里（150 万词，上百 MB），先自己生成一次：
-
-```bash
-curl -o jieba-dict.txt https://raw.githubusercontent.com/fxsjy/jieba/master/jieba/dict.txt
-cargo run -p pliers-dict --release -- --source ~/Downloads/CustomPinyinDictionary_IBus.txt --freq jieba-dict.txt --out ~/.local/share/pliers/dict.db
+cargo run -- --init      # 装一份能用的：写配置 + 下载词库（几十 MB）
+cargo run                # 跑起来
 ```
 
 然后把焦点放进输入框，敲 `n i h a o` 再按空格。能不能用取决于**应用自己有没有实现
 text-input 协议**：Firefox / GTK / Qt 应用都行，alacritty 0.17（基于 winit）实测也可以。
+
+词库默认用[白霜拼音 rime-frost](https://github.com/gaboolic/rime-frost)（约 100 万条，自带字频词频，
+多音字一行一个读音；资产 27 MB）。不想下载现成的、想自己从语料构建：`pliers dict build`；
+换源或离线装：`PLIERS_DICT_URL=... pliers dict fetch --url file:///...`；
+看现在装的是哪份：`pliers dict status` —— 见 [docs/dictionary.md](docs/dictionary.md)。
+发布出来的词库资产按 GPL-3.0 分发（语料是 GPL-3.0 的），代码本身不受影响。
 
 配置默认是全拼，不用写任何文件；要一份带注释的模板就 `pliers --init-config`。
 跑着的时候另开一个终端 `pliers status` 看现状、`pliers set` 上下选着改 —— 不用重启。
@@ -67,7 +67,7 @@ cargo test --workspace        # 162 个单测，不需要合成器、不需要�
 | --- | --- |
 | [docs/usage.md](docs/usage.md) | 按键全表、大写字母为什么不参与匹配、中英文切换、中文标点、分段上屏 + 记性、`Del` 的语义 |
 | [docs/config.md](docs/config.md) | `config.toml` 每一项（全拼/双拼/码表/engine）、`pliers set` vs `pliers config set`、自动重读、交互模式、Nushell 写法 |
-| [docs/dictionary.md](docs/dictionary.md) | 词库怎么导入、多音字收哪些（7% 门槛）、表结构与权重、用 SQL 加词/清零、`lookup` 看候选 |
+| [docs/dictionary.md](docs/dictionary.md) | 词库怎么装（`pliers --init`）、换成别的源、自己从语料构建、表结构与权重、用 SQL 加词、`lookup` 看候选 |
 | [docs/internals.md](docs/internals.md) | crate 划分、用了哪些 Wayland 协议、**为什么拼音查询不能交给 SQL**、整句候选、候选框是怎么画出来的 |
 | [docs/pitfalls.md](docs/pitfalls.md) | 10 条实测踩出来的坑（Ctrl+A 被吃掉、焦点一走拼音就没了……）+ 已知不足 |
 | [docs/testing.md](docs/testing.md) | 单测、跑起来、`PLIERS_DEBUG`、mock 合成器的 24 个场景都验了什么 |
@@ -82,7 +82,7 @@ cargo test --workspace        # 162 个单测，不需要合成器、不需要�
 | `crates/pliers-popup` | 候选框长什么样：找字体、排版、画像素、共享内存文件 |
 | `crates/pliers-wayland` | 跟合成器说协议：注册、抓键盘、转发按键、贴候选框 |
 | `crates/pliers-ime` | `main()`：读配置、把上面几个拼起来（命令是 `pliers`） |
-| `crates/pliers-dict` | 导入工具：词表 + 词频表 → SQLite 词库 |
+| `crates/pliers-dict` | 导入工具：rime 词库（`.dict.yaml`）→ SQLite 词库 |
 
 这么切是为了**输入方案、词库、候选框长相都能脱离合成器跑测试**，协议层里只剩下
 "Wayland 要求这么做"的东西：

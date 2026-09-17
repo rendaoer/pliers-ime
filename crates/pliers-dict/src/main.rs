@@ -1,47 +1,57 @@
-//! 把拼音词表导成 pliers 用的 SQLite 词库。
+//! 把 rime 词库导成 pliers 用的 SQLite 词库。
 //!
 //! ```text
 //! cargo run -p pliers-dict --release -- \
-//!     --source ~/Downloads/CustomPinyinDictionary_IBus.txt \
-//!     --freq   ~/Downloads/jieba-dict.txt \
-//!     --out    ~/.local/share/pliers/dict.db
+//!     --rime ~/.cache/pliers/rime-frost \
+//!     --out  ~/.local/share/pliers/dict.db
 //! ```
 //!
-//! 手上有三份数据，各管一件事：
+//! rime 词库（[白霜拼音](https://github.com/gaboolic/rime-frost) /
+//! [雾凇拼音](https://github.com/iDvel/rime-ice) 那种 `.dict.yaml`）每行是
+//! `词<TAB>拼音<TAB>权重`，拼音用空格分音节 —— 跟 `word.code` 存的格式**一模一样**，
+//! 所以除了跳过 YAML 文件头，几乎不用转换。三个白送的好处：
 //!
-//! | 来源 | 提供 | 说明 |
-//! | --- | --- | --- |
-//! | IBus 词表 | **词 + 拼音**（150 万条） | `词 拼音`，音节用 `'` 分隔，没有词频 |
-//! | jieba 词频表 | **权重** | `词 频次 词性`，MIT 许可；没有它的词只能拿一个很小的兜底权重 |
-//! | IBus 词表自己 | **单字** | 表里全是 2 字以上的词，单字靠"字↔音节"对齐推出来 |
+//! * **多音字不用猜**：`长` 就是两行（`chang` 一行、`zhang` 一行），各自带权重
+//! * **不用另挂词频表**：权重是语料统计出来的
+//! * **单字是现成的**：字表本身就是 `8105.dict.yaml` 这种文件，不用从双字词里反推
 //!
-//! 为什么要费劲推单字：用户打 `ni` 想要的第一个候选是「你」，而词表里根本没有单字条目。
-//! 好在词表里每一行的**字数都等于音节数**（我验过 150 万行，零例外），
-//! 所以从 `你好 ni'hao` 就能得到 你=ni、好=hao；同一个字在不同词里出现几百次，
-//! 取出现最多的那个读音，就是它的主读音（的→de 602 次，di 只有 31 次 ✓）。
+//! 权重会等比缩放到 [`RIME_MAX_WEIGHT`]（跟"用户调频 +100 万/次"同一个量纲）。
+//!
+//! `pliers dict build` 会自动下语料再调这个程序，平时不用手敲上面的命令。
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use pliers_engine::dict::{create_schema, synthetic_weight};
+use pliers_engine::Layout;
+use pliers_engine::dict::create_schema;
 use turso::{Builder, Connection};
 
 /// 每多少行提交一次（一次性开一个大事务会把内存吃光）
 const BATCH: usize = 50_000;
 
-/// 词频表里的次数乘个系数，让它跟"没词频的兜底权重"（个位数）拉开档次
-const FREQ_SCALE: i64 = 10;
+/// 权重缩放后的上限。
+///
+/// rime 词库的权重是语料统计的原始频次，量纲和"用户调频"（`user_word` 那
+/// 选一次 +100 万）不一定对得上。不缩放的话可能两个方向都出问题：太小则选过一次的词
+/// 永远第一、连「的」「你」都翻不了身，太大则调频等于没调。
+/// 8000 万是照 jieba 那套（词频 ×10，最大的「的」约 8000 万）定的，
+/// 于是"选过十次的词能压过绝大多数常用词，但压不过顶级高频词"这条手感保持不变。
+const RIME_MAX_WEIGHT: f64 = 80_000_000.0;
 
-/// 次要读音要占这个字**条目数**的多少才收（见下面单字那段的说明）
-const SECONDARY_MIN_SHARE: f64 = 0.07;
+/// 一行 rime 词条：`(词, 拼音, 权重)`。`Err` 是读文件本身出的错
+type RimeRow = Result<(String, String, i64), String>;
 
-/// 次要读音的权重再打个折（除以几）：它毕竟不是这个读音的"本家"，
-/// 但也不能打太狠 —— 打 `hang` 第一个候选就该是「行」（它是这个音最常见的字），
-/// 除以 2 的话会被「杭」压住
-const SECONDARY_DISCOUNT: f64 = 1.5;
+/// 导入结果：词条数、单字数、音节表
+struct Imported {
+    words: usize,
+    singles: usize,
+    syllables: HashSet<String>,
+    weight_source: String,
+    source: String,
+}
 
 fn main() {
     if let Err(e) = run() {
@@ -54,16 +64,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse()?;
     let started = Instant::now();
 
-    println!("词表  : {}", args.source.display());
     println!(
-        "词频表: {}",
-        args.freq
-            .as_ref()
-            .map_or("（无，全部用兜底权重）".into(), |p| p
-                .display()
-                .to_string())
+        "rime 词库：{}",
+        args.rime
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join("、")
     );
-    println!("输出  : {}", args.out.display());
+    println!("输出     ：{}", args.out.display());
     println!();
 
     // 每次重新导入都从零开始：词库是可以随时重建的派生物，用户数据在 user_word 表里，
@@ -73,6 +82,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::rename(&args.out, &backup)?;
         println!("旧词库已备份到 {}", backup.display());
     }
+    // 备份完还留着旧库的 WAL 的话，新库会被它污染
+    for extra in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(PathBuf::from(format!("{}{extra}", args.out.display())));
+    }
     if let Some(dir) = args.out.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -81,161 +94,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let conn = db.connect()?;
     create_schema(&conn)?;
 
-    let freq = match &args.freq {
-        Some(path) => load_freq(path)?,
-        None => HashMap::new(),
-    };
-    println!(
-        "词频表载入 {} 条（{:.1}s）",
-        freq.len(),
-        started.elapsed().as_secs_f32()
-    );
-
-    // 单字读音：字 → (音节 → 出现次数)，以及字 → (音节 → 这些词的词频之和)
-    let mut readings: HashMap<char, HashMap<String, u32>> = HashMap::new();
-    let mut reading_weight: HashMap<char, HashMap<String, i64>> = HashMap::new();
-    let mut syllables: HashMap<String, ()> = HashMap::new();
-    let mut words = 0usize;
-    let mut with_freq = 0usize;
-
-    let mut stmt = pollster::block_on(conn.prepare(
-        "INSERT OR IGNORE INTO word (scheme, code, text, weight) VALUES (?1, ?2, ?3, ?4)",
-    ))?;
-    pollster::block_on(conn.execute("BEGIN", ()))?;
-
-    let file = BufReader::with_capacity(1 << 20, File::open(&args.source)?);
-    for line in file.lines() {
-        let line = line?;
-        // 每行是「词 拼音」，中间一个空格
-        let Some((word, pinyin)) = line.split_once(' ') else {
-            continue;
-        };
-        let word = word.trim();
-        let code = pinyin.trim().replace('\'', " ");
-        if word.is_empty() || code.is_empty() {
-            continue;
-        }
-
-        for syl in code.split(' ') {
-            syllables.insert(syl.to_string(), ());
-        }
-        let weight = match freq.get(word) {
-            Some(&count) => {
-                with_freq += 1;
-                count * FREQ_SCALE
-            }
-            None => synthetic_weight(word.chars().count()),
-        };
-        // 顺手记下"字 → 读音"：只用双字词，对齐最干净。
-        // 次数用来算"这个读音在字典里有多少条目"，词频之和用来算"实际用量"——
-        // 两个都得看：字典里条目多的读音未必常用（的=de 602 条 / di 只有 31 条），
-        // 而条目少的也可能很常用（长=chang 只有 273 条，可「长期」「长度」天天用）
-        let chars: Vec<char> = word.chars().collect();
-        let syls: Vec<&str> = code.split(' ').collect();
-        if chars.len() == 2 && syls.len() == 2 {
-            for (ch, syl) in chars.into_iter().zip(syls) {
-                *readings
-                    .entry(ch)
-                    .or_default()
-                    .entry(syl.to_string())
-                    .or_default() += 1;
-                *reading_weight
-                    .entry(ch)
-                    .or_default()
-                    .entry(syl.to_string())
-                    .or_default() += weight;
-            }
-        }
-
-        // code 到这儿才 move（上面还要借它）
-        pollster::block_on(stmt.execute(turso::params!["pinyin", code, word, weight]))?;
-        words += 1;
-
-        if words.is_multiple_of(BATCH) {
-            pollster::block_on(conn.execute("COMMIT", ()))?;
-            pollster::block_on(conn.execute("BEGIN", ()))?;
-            println!(
-                "  {words} 词（{:.0}s，{:.0} 词/秒）",
-                started.elapsed().as_secs_f32(),
-                words as f32 / started.elapsed().as_secs_f32()
-            );
-        }
-    }
-    drop(stmt);
-    pollster::block_on(conn.execute("COMMIT", ()))?;
-    println!(
-        "词表导入完成：{words} 词，其中 {with_freq} 个有真实词频（{:.0}s）",
-        started.elapsed().as_secs_f32()
-    );
-
-    // ---- 单字 ----
-    //
-    // 主读音给全权重（跟以前一样），**常用**的次要读音也收进来，权重按实际用量打折。
-    // 为什么非要收次要读音：只留主读音的话，长=zhang（77% 条目）被留下、chang 被扔掉，
-    // 打 chang 就永远出不来「长」。
-    //
-    // 门槛（**条目占比 ≥ 7%**）是拿真数据校准出来的，两头都要卡住：
-    //
-    // * 该收的：长=chang 23%、行=hang 9%、重=chong 11%、还=huan 12%、乐=yue 8%
-    //   —— 都是"打这个音也该出这个字"的常用读音
-    // * 不该收的：的=di 5%、了=liao 5%、着=zhao 6%、给=ji 5%
-    //   —— 收了打 di 第一个候选就是「的」（错的）
-    //
-    // 光看用量占比分不开这两类：的=di 的用量占比有 35%（「目的」「的确」都是高频词），
-    // 比行=hang 的 10% 还高 —— 因为「的」当助词的用量根本不在词表里。
-    // 条目占比反而干净：的=di 只有 31 条，行=hang 有 88 条
-    let mut stmt = pollster::block_on(conn.prepare(
-        "INSERT OR IGNORE INTO word (scheme, code, text, weight) VALUES (?1, ?2, ?3, ?4)",
-    ))?;
-    pollster::block_on(conn.execute("BEGIN", ()))?;
-    let mut singles = 0usize;
-    let mut secondaries = 0usize;
-    for (ch, counts) in &readings {
-        // 出现最多的读音就是主读音；打平取字典序小的，保证结果稳定
-        let Some((primary, _)) = counts.iter().max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
-        else {
-            continue;
-        };
-        let text = ch.to_string();
-        let base = match freq.get(&text) {
-            Some(&count) => count * FREQ_SCALE,
-            None => synthetic_weight(1),
-        };
-        let total_count: u32 = counts.values().sum();
-        let empty = HashMap::new();
-        let weights = reading_weight.get(ch).unwrap_or(&empty);
-        let total_weight: i64 = weights.values().sum();
-
-        for (syl, count) in counts {
-            let weight = if syl == primary {
-                base
-            } else {
-                let entry_share = f64::from(*count) / f64::from(total_count.max(1));
-                let usage_share = if total_weight > 0 {
-                    *weights.get(syl).unwrap_or(&0) as f64 / total_weight as f64
-                } else {
-                    0.0
-                };
-                if entry_share < SECONDARY_MIN_SHARE {
-                    continue; // 不常用的读音不收：收了会把别的字挤下去
-                }
-                (base as f64 * usage_share / SECONDARY_DISCOUNT) as i64
-            };
-            pollster::block_on(stmt.execute(turso::params![
-                "pinyin",
-                syl.as_str(),
-                text.as_str(),
-                weight.max(1)
-            ]))?;
-            singles += 1;
-            if syl != primary {
-                secondaries += 1;
-            }
-        }
-    }
-    drop(stmt);
-    pollster::block_on(conn.execute("COMMIT", ()))?;
-    println!("单字补充：{singles} 个（从双字词的读音推出来的，其中 {secondaries} 个是次要读音）");
+    let imported = import_rime(&conn, &args.rime, started)?;
 
     // ---- 码表（五笔之类）：`词<TAB>码[<TAB>权重]` ----
     if let (Some(path), Some(scheme)) = (&args.table, &args.table_scheme) {
@@ -244,11 +103,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // ---- 音节表 + meta ----
+    let mut sorted: Vec<&String> = imported.syllables.iter().collect();
+    sorted.sort();
     let mut stmt =
         pollster::block_on(conn.prepare("INSERT OR IGNORE INTO syllable (syl) VALUES (?1)"))?;
     pollster::block_on(conn.execute("BEGIN", ()))?;
-    let mut sorted: Vec<&String> = syllables.keys().collect();
-    sorted.sort();
     for syl in &sorted {
         pollster::block_on(stmt.execute(turso::params![syl.as_str()]))?;
     }
@@ -256,13 +115,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     pollster::block_on(conn.execute("COMMIT", ()))?;
 
     for (key, value) in [
-        ("source", args.source.display().to_string()),
-        (
-            "freq",
-            args.freq
-                .as_ref()
-                .map_or("无".into(), |p| p.display().to_string()),
-        ),
+        ("source", imported.source.clone()),
+        ("freq", imported.weight_source.clone()),
         (
             "imported_at",
             format!(
@@ -272,8 +126,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .as_secs()
             ),
         ),
-        ("words", words.to_string()),
-        ("singles", singles.to_string()),
+        ("words", imported.words.to_string()),
+        ("singles", imported.singles.to_string()),
     ] {
         pollster::block_on(conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
@@ -289,8 +143,224 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         size / 1024 / 1024,
         started.elapsed().as_secs_f32()
     );
+
+    // 把 WAL 收进主库，让 .db 成为**自包含**的一个文件。
+    //
+    // 这一步不能省：词库是要被拷来拷去的（发布成 Release 资产、mock 测试拷副本、
+    // 手动 scp 到别的机器），只拷 .db 而落下 -wal 的话，拿到的是一个不完整的库 ——
+    // 最典型的是"音节表是空的"（音节是最后写的，全在 WAL 里），输入法直接起不来。
+    // 注意这条 PRAGMA 会回一行结果，得用 query 把它读掉（execute 会报 unexpected row）
+    {
+        let mut stmt = pollster::block_on(conn.prepare("PRAGMA wal_checkpoint(TRUNCATE)"))?;
+        let mut rows = pollster::block_on(stmt.query(()))?;
+        while pollster::block_on(rows.next())?.is_some() {}
+    }
+    let wal = PathBuf::from(format!("{}-wal", args.out.display()));
+    match std::fs::metadata(&wal) {
+        Ok(meta) if meta.len() > 0 => println!(
+            "注意：{} 还有 {} 字节没并回主库（拷词库时记得连它一起拷）",
+            wal.display(),
+            meta.len()
+        ),
+        _ => {}
+    }
+
     println!("搞定：{}", args.out.display());
     Ok(())
+}
+
+/// 导入一批 rime 词库文件（也可以是装着它们的目录）
+fn import_rime(
+    conn: &Connection,
+    paths: &[PathBuf],
+    started: Instant,
+) -> Result<Imported, Box<dyn std::error::Error>> {
+    let files = rime_files(paths)?;
+    for path in &files {
+        println!("  读 {}", path.display());
+    }
+
+    // 第一遍：量出最大权重（要等比缩放），顺手收音节
+    let mut max_weight = 0i64;
+    let mut syllables = HashSet::new();
+    let mut lines = 0usize;
+    let mut exotic = 0usize;
+    for path in &files {
+        for row in rime_rows(path)? {
+            let (_, code, weight) = row?;
+            max_weight = max_weight.max(weight);
+            for syl in code.split(' ') {
+                if usable_syllable(syl) {
+                    syllables.insert(syl.to_string());
+                } else {
+                    exotic += 1;
+                }
+            }
+            lines += 1;
+        }
+    }
+    if lines == 0 || max_weight == 0 {
+        return Err("这几个 .dict.yaml 里一行词条都没读到（格式不对？）".into());
+    }
+    let scale = RIME_MAX_WEIGHT / max_weight as f64;
+    println!("  读到 {lines} 行，最大权重 {max_weight}，等比缩放 ×{scale:.2}");
+    if exotic > 0 {
+        println!("  筛掉 {exotic} 个偏门音节（三套双拼键位都打不出来的，比如 `lvan`）");
+    }
+
+    // 第二遍：写库
+    let mut stmt = pollster::block_on(conn.prepare(
+        "INSERT OR IGNORE INTO word (scheme, code, text, weight) VALUES (?1, ?2, ?3, ?4)",
+    ))?;
+    pollster::block_on(conn.execute("BEGIN", ()))?;
+    let mut words = 0usize;
+    let mut singles = 0usize;
+    for path in &files {
+        for row in rime_rows(path)? {
+            let (text, code, weight) = row?;
+            let weight = ((weight as f64 * scale).round() as i64).max(1);
+            if text.chars().count() == 1 {
+                singles += 1;
+            }
+            pollster::block_on(stmt.execute(turso::params!["pinyin", code, text, weight]))?;
+            words += 1;
+            if words.is_multiple_of(BATCH) {
+                pollster::block_on(conn.execute("COMMIT", ()))?;
+                pollster::block_on(conn.execute("BEGIN", ()))?;
+                println!(
+                    "  {words} 词（{:.0}s，{:.0} 词/秒）",
+                    started.elapsed().as_secs_f32(),
+                    words as f32 / started.elapsed().as_secs_f32()
+                );
+            }
+        }
+    }
+    drop(stmt);
+    pollster::block_on(conn.execute("COMMIT", ()))?;
+    println!(
+        "  词条导入完成：{words} 个（其中单字 {singles} 个）（{:.0}s）",
+        started.elapsed().as_secs_f32()
+    );
+
+    Ok(Imported {
+        words,
+        singles,
+        syllables,
+        weight_source: format!("rime 词库自带权重（等比缩放到上限 {RIME_MAX_WEIGHT:.0}）"),
+        source: paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join("、"),
+    })
+}
+
+/// 把 `--rime` 给的路径摊平成文件列表：目录就取里面的 `.dict.yaml`
+fn rime_files(paths: &[PathBuf]) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let mut files = Vec::new();
+    for path in paths {
+        if path.is_dir() {
+            let mut found: Vec<PathBuf> = std::fs::read_dir(path)?
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .filter(|file| has_ext(file, ".dict.yaml"))
+                // corrections 是"纠错表"（错词 → 正词），不是候选词库，混进来会出怪候选
+                .filter(|file| {
+                    !file
+                        .file_name()
+                        .is_some_and(|name| name.to_string_lossy().starts_with("corrections"))
+                })
+                .collect();
+            found.sort();
+            files.extend(found);
+        } else if path.exists() {
+            files.push(path.clone());
+        } else {
+            return Err(format!("{} 不存在", path.display()).into());
+        }
+    }
+    if files.is_empty() {
+        return Err("没找到 .dict.yaml（--rime 给目录或文件都行）".into());
+    }
+    Ok(files)
+}
+
+fn has_ext(path: &Path, ext: &str) -> bool {
+    path.file_name()
+        .is_some_and(|name| name.to_string_lossy().ends_with(ext))
+}
+
+/// 一行一行吐 rime 词条：`(词, 拼音, 权重)`
+///
+/// 跳过空行、`#` 注释，以及 `---` 到 `...` 之间的 YAML 元信息。
+/// 码里带大写、数字、符号的行直接跳过（英文缩写、表情那些）
+fn rime_rows(path: &Path) -> Result<impl Iterator<Item = RimeRow>, Box<dyn std::error::Error>> {
+    let file = BufReader::with_capacity(1 << 20, File::open(path)?);
+    let path = path.to_path_buf();
+    let mut in_header = false;
+    let rows = file.lines().filter_map(move |line| {
+        let line = match line {
+            Ok(line) => line,
+            Err(e) => return Some(Err(format!("读 {} 出错：{e}", path.display()))),
+        };
+        let line = line.trim_end();
+        if line == "---" {
+            in_header = true;
+            return None;
+        }
+        if line == "..." {
+            in_header = false;
+            return None;
+        }
+        if in_header || line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+        let mut parts = line.split('\t');
+        let text = parts.next().unwrap_or("").trim();
+        let code = parts.next().unwrap_or("").trim();
+        let weight: i64 = parts
+            .next()
+            .and_then(|w| w.trim().parse().ok())
+            .unwrap_or(1);
+        if text.is_empty() || !is_pinyin_code(code) {
+            return None;
+        }
+        Some(Ok((text.to_string(), code.to_string(), weight)))
+    });
+    Ok(rows)
+}
+
+/// 普通话音节最长 6 个字母（`chuang` / `shuang` / `zhuang`），更长的必然是脏数据
+///
+/// 这道卡是给 rime-frost 里的一条脏数据准备的：`均订` 的码写成了 `junding`
+/// （本该是 `jun ding`）。这种"音节"进了音节表会把双拼的键位校验带沟里 ——
+/// 它去掉声母算出 `unding` 这么个不存在的韵母，于是报
+/// 「这套双拼键位缺韵母：unding」，输入法直接起不来
+const MAX_SYLLABLE_LEN: usize = 6;
+
+/// 是不是"纯拼音码"：小写字母 + 空格分隔的音节，每个音节不超过 [`MAX_SYLLABLE_LEN`]
+fn is_pinyin_code(code: &str) -> bool {
+    !code.is_empty()
+        && !code.starts_with(' ')
+        && code.split(' ').all(|syllable| {
+            !syllable.is_empty()
+                && syllable.len() <= MAX_SYLLABLE_LEN
+                && syllable.chars().all(|c| c.is_ascii_lowercase())
+        })
+}
+
+/// 这个音节进不进音节表：三套双拼预设**都**得打得出来。
+///
+/// 不筛的话，rime 词库里那些偏门码能卡住输入法启动：`lvan`（孪/娈 那一串的怪读音，
+/// 标准读音是 luan）去掉声母是 `van`，而小鹤的键位表里没有这个韵母 ——
+/// 双拼的启动自检会报「这套双拼键位缺韵母：van」，可用户什么都没配错。
+/// 这些词在词库里另有常规读音（`luan`）能打，筛掉不影响使用。
+///
+/// 音节表是**给切词用的**（`Segmenter`），所以标准就是"方案能不能打出来"，
+/// 而不是"拼音学上存不存在"
+fn usable_syllable(syllable: &str) -> bool {
+    ["natural", "flypy", "mspy"]
+        .iter()
+        .all(|name| Layout::preset(name).is_some_and(|layout| layout.encode(syllable).is_some()))
 }
 
 /// 导入码表：每行 `词<TAB>码[<TAB>权重]`（rime 那种 .txt 码表就是这格式）
@@ -326,26 +396,10 @@ fn import_table(
     Ok(rows)
 }
 
-/// 载入 jieba 词频表：`词 频次 词性`
-fn load_freq(path: &Path) -> Result<HashMap<String, i64>, Box<dyn std::error::Error>> {
-    let mut map = HashMap::with_capacity(400_000);
-    for line in BufReader::with_capacity(1 << 20, File::open(path)?).lines() {
-        let line = line?;
-        let mut parts = line.split(' ');
-        if let (Some(word), Some(count)) = (parts.next(), parts.next())
-            && let Ok(count) = count.parse::<i64>()
-        {
-            map.insert(word.to_string(), count);
-        }
-    }
-    Ok(map)
-}
-
 /// 命令行参数
 struct Args {
-    source: PathBuf,
-    freq: Option<PathBuf>,
     out: PathBuf,
+    rime: Vec<PathBuf>,
     table: Option<PathBuf>,
     table_scheme: Option<String>,
 }
@@ -354,9 +408,8 @@ impl Args {
     fn parse() -> Result<Self, Box<dyn std::error::Error>> {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
         let mut args = Self {
-            source: PathBuf::from(format!("{home}/Downloads/CustomPinyinDictionary_IBus.txt")),
-            freq: None,
             out: PathBuf::from(format!("{home}/.local/share/pliers/dict.db")),
+            rime: Vec::new(),
             table: None,
             table_scheme: None,
         };
@@ -367,22 +420,158 @@ impl Args {
                     .ok_or_else(|| format!("{flag} 后面要跟一个路径"))
             };
             match flag.as_str() {
-                "--source" => args.source = PathBuf::from(value()?),
-                "--freq" => args.freq = Some(PathBuf::from(value()?)),
                 "--out" => args.out = PathBuf::from(value()?),
+                "--rime" => args.rime.push(PathBuf::from(value()?)),
                 "--table" => args.table = Some(PathBuf::from(value()?)),
                 "--table-scheme" => args.table_scheme = Some(value()?),
                 "--help" | "-h" => {
                     println!(
-                        "用法：import-dict [--source 词表] [--freq 词频表] [--out 词库] \
-                         [--table 码表 --table-scheme wubi]"
+                        "用法：pliers-dict --rime <词库.yaml|目录> [--rime ...] [--out 词库]\n\
+                         \x20     pliers-dict --table <码表> --table-scheme wubi [--out 词库]\n\
+                         \n\
+                         --rime    rime 词库（.dict.yaml）。语料从哪来、怎么构建，见 docs/dictionary.md\n\
+                         --out     输出的 SQLite 词库（默认 ~/.local/share/pliers/dict.db）\n\
+                         --table   码表方案（五笔/郑码/仓颉）：每行 `词<TAB>码[<TAB>权重]`"
                     );
                     std::process::exit(0);
                 }
                 other => return Err(format!("不认识的参数 {other}").into()),
             }
         }
+        if args.rime.is_empty() && args.table.is_none() {
+            return Err(
+                "要给 --rime <词库>（推荐：pliers dict build 会自动下语料）\n\
+                        或者 --table <码表> --table-scheme wubi"
+                    .into(),
+            );
+        }
         let _ = std::io::stdout().flush();
         Ok(args)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 一份最小的 rime 词库：YAML 头、注释、多音字、要跳过的行都在里面
+    const FIXTURE: &str = "\
+# Rime dictionary
+# encoding: utf-8
+---
+name: test
+version: \"2026-01-01\"
+sort: by_weight
+...
+##### 常用
+长\tchang\t900
+长\tzhang\t100
+行\thang\t800
+行\txing\t200
+你好\tni hao\t500
+你好吗\tni hao ma\t50
+# 注释行不该进库
+QQ\tQQ\t10
+没有拼音\t\t99
+";
+
+    fn 建一份测试词库(name: &str) -> (PathBuf, Connection) {
+        let dir = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("test.dict.yaml"), FIXTURE).unwrap();
+        let out = dir.join("dict.db");
+        let db = pollster::block_on(Builder::new_local(&out.to_string_lossy()).build()).unwrap();
+        let conn = db.connect().unwrap();
+        create_schema(&conn).unwrap();
+        let imported = import_rime(&conn, std::slice::from_ref(&dir), Instant::now()).unwrap();
+        // 6 行词条：注释、YAML 头、`QQ QQ`（码不是纯小写）、空码那行都不算
+        assert_eq!(imported.words, 6, "词条数不对");
+        assert_eq!(imported.singles, 4, "单字数不对");
+        (dir, conn)
+    }
+
+    fn 查(conn: &Connection, code: &str) -> Vec<(String, i64)> {
+        let mut stmt = pollster::block_on(conn.prepare(
+            "SELECT text, weight FROM word WHERE scheme = 'pinyin' AND code = ?1 ORDER BY weight DESC",
+        ))
+        .unwrap();
+        let mut rows = pollster::block_on(stmt.query(turso::params![code])).unwrap();
+        let mut out = Vec::new();
+        while let Some(row) = pollster::block_on(rows.next()).unwrap() {
+            if let (turso::Value::Text(text), turso::Value::Integer(weight)) =
+                (row.get_value(0).unwrap(), row.get_value(1).unwrap())
+            {
+                out.push((text, weight));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn rime_多音字一行一个读音的导进来() {
+        let (dir, conn) = 建一份测试词库("pliers-rime-import");
+        // 多音字不用猜：两边都收着，而且各自带自己的权重
+        assert_eq!(查(&conn, "chang")[0].0, "长");
+        assert_eq!(查(&conn, "zhang")[0].0, "长");
+        assert_eq!(查(&conn, "hang")[0].0, "行");
+        assert_eq!(查(&conn, "xing")[0].0, "行");
+        // 词条原样带音节空格
+        assert_eq!(查(&conn, "ni hao")[0].0, "你好");
+        assert_eq!(查(&conn, "ni hao ma")[0].0, "你好吗");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rime_权重等比缩放到同一个上限() {
+        let (dir, conn) = 建一份测试词库("pliers-rime-weight");
+        // 最大权重（900）缩到 RIME_MAX_WEIGHT，其余按同样的比例
+        let chang = 查(&conn, "chang")[0].1;
+        let zhang = 查(&conn, "zhang")[0].1;
+        assert_eq!(chang, RIME_MAX_WEIGHT as i64);
+        // 900 : 100 = 9 : 1，缩放后还得是这个比例（四舍五入允许差 1）
+        let ratio = chang as f64 / zhang as f64;
+        assert!((ratio - 9.0).abs() < 0.01, "比例变了：{ratio}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 不是拼音码的行跳过() {
+        assert!(is_pinyin_code("ni hao"));
+        assert!(is_pinyin_code("chang"));
+        assert!(
+            is_pinyin_code("zhuang"),
+            "6 个字母是合法音节（chuang/shuang 那种）"
+        );
+        assert!(!is_pinyin_code(""));
+        assert!(!is_pinyin_code("QQ"), "大写不是拼音");
+        assert!(!is_pinyin_code("ni2 hao"), "带数字不是拼音");
+        assert!(!is_pinyin_code(" ni hao"), "开头的空格是脏数据");
+        assert!(!is_pinyin_code("ni  hao"), "两个空格中间夹了个空音节");
+        assert!(!is_pinyin_code("ni\thao"), "tab 不该出现在码里");
+        // rime-frost 里真的有一条：`均订` 的码是 `junding`（本该是 `jun ding`），
+        // 放进去会让双拼的键位校验报出"缺韵母 unding"
+        assert!(!is_pinyin_code("junding"), "7 个字母的音节不存在");
+        assert!(
+            !is_pinyin_code("jun junding"),
+            "整行里有一个坏音节就整行不要"
+        );
+    }
+
+    #[test]
+    fn 目录里读_yaml_但不要纠错表() {
+        let dir = std::env::temp_dir().join("pliers-rime-files");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["base.dict.yaml", "corrections.dict.yaml", "readme.md"] {
+            std::fs::write(dir.join(name), "").unwrap();
+        }
+        let files = rime_files(std::slice::from_ref(&dir)).unwrap();
+        let names: Vec<String> = files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["base.dict.yaml"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

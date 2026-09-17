@@ -67,14 +67,19 @@ cp ~/.local/share/pliers/dict.db target/dict-copy.db
 ./tools/run_mock_tests.sh --dict target/dict-copy.db
 ```
 
+脚本自己也会拷两份：所有场景共用一份（随便写），而断言跟"第几个候选"有关的
+`pick` / `nav` / `segment` / `forget` 各自从**原始词库**再拷一份 —— 不然前一个场景
+选过的词会加 100 万权重，把后一个场景的候选顺序顶乱（真踩过：`pick` 选完「事件」，
+`nav` 里「事件」就跑到第一位了）。
+
 ### 场景
 
 | 场景 | 喂什么 | 验什么 |
 | --- | --- | --- |
 | `active` | `nihao ` | 提交「你好」，候选框宽度随候选变化、框里有字 |
 | `active_nomods` | 同上，但合成器一个 `modifiers` 事件都不发 | 修饰键状态自己算得出来 |
-| `pick` | `nihao2` | 数字选词直接上屏第 2 个候选（词库里是「倪浩」），按键连抬起都不转发 |
-| `nav` | `nihao` + `↓` + 空格 | 换候选不改预编辑串，提交第 2 个候选 |
+| `pick` | `shijian2` | 数字选词直接上屏第 2 个候选（「事件」），按键连抬起都不转发 |
+| `nav` | `shijian` + `↓` + 空格 | 换候选不改预编辑串，提交第 2 个候选 |
 | `page` | `ni` + 9× `→` + 空格 | 挪过这一页会自动翻页，提交的不是第一页的「你」 |
 | `caps` | Caps Lock 打开后 `nihao ` | 大写不参与匹配：零提交、零候选框、14 个事件全转发 |
 | `enter` / `escape` | `nihao` + 回车 / Esc | 原样提交 / 取消，按键不给应用 |
@@ -85,8 +90,8 @@ cp ~/.local/share/pliers/dict.db target/dict-copy.db
 | `notice` | 只按 Ctrl+空格，之后一个键都不按 | 「英」提示**自己**到点消失（大约半秒后收掉），不是等下一个按键 |
 | `symbol` | `nihao` + `/` | **先**提交「你好」**再**把 `/` 转给应用（比请求到达的先后顺序） |
 | `punct` | `nihao,` | 一步上屏「你好，」（全角），`,` 不转发给应用 |
-| `segment` | `nihaoma` | 分段挑两次拼出「你好马」，再打一遍直接出（记性） |
-| `forget` | `nihaoma` | 再打一遍时按 `Del` 删掉它，退回「你好吗」 |
+| `segment` | `nihaoma` | 分段挑两次拼一句，再打一遍一次上屏（记性）；断言的是"第三遍提交 = 前两段拼起来"，不写死具体字 |
+| `forget` | `nihaoma` | 记住的那句被 `Del` 删掉后，退回词库自己给的第一候选「你好吗」 |
 | `del_swallow` | `nihaoma` + 3× `Del` + 空格 | 组词当中 `Del` 一律吃掉，一个键都不漏给应用 |
 | `hidpi` | 同 `active`，但客户端带 `PLIERS_SCALE=2` | 候选框按 2 倍像素画（高 84）且发了 `set_buffer_scale(2)` |
 | `control` | 客户端跑着时 `pliers set` 切小鹤，再喂 `nihc` | 提交的仍是「你好」—— 真的换了引擎；顺带跑一遍交互模式和 `status` |

@@ -15,6 +15,7 @@
 
 pub mod config;
 pub mod dict;
+pub mod fetch;
 mod pinyin;
 mod scheme;
 mod sentence;
@@ -1312,20 +1313,20 @@ mod tests {
         let config = Config::parse("[scheme]\nkind = \"full-pinyin\"\nsentence = false\n").unwrap();
         let dict = dict::testing::sample_dict();
         let scheme = config.build_scheme(&dict).unwrap();
-        let texts = |scheme: &Box<dyn Scheme>| -> Vec<String> {
+        let texts = |scheme: &dyn Scheme| -> Vec<String> {
             scheme
                 .candidates(&dict, "nihaoma", 9)
                 .into_iter()
                 .map(|candidate| candidate.text)
                 .collect()
         };
-        let got = texts(&scheme);
+        let got = texts(scheme.as_ref());
         assert!(!got.contains(&"你好吗".to_string()), "{got:?}");
 
         // 开着的时候有（对照，免得哪天默默失效）
         let config = Config::parse("[scheme]\nkind = \"full-pinyin\"\n").unwrap();
         let scheme = config.build_scheme(&dict).unwrap();
-        let got = texts(&scheme);
+        let got = texts(scheme.as_ref());
         assert!(got.contains(&"你好吗".to_string()), "{got:?}");
     }
 

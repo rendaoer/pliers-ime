@@ -1,0 +1,107 @@
+# 构建词库，把 dict.db.zst 挂到 Release 上。
+#
+# 为什么走 Release 而不是直接进仓库：词库是几百 MB 的派生物，GitHub 单文件上限 100 MB，
+# 而且每次重新导入都会产生一堆二进制 diff。`pliers --init` 就是从这个地址拿的：
+#
+#   https://github.com/<owner>/<repo>/releases/latest/download/dict.db.zst
+#   （releases/latest/download/ 永远指向最新 Release 的同名资产，所以不用改代码）
+#
+# 怎么发一版：打个 tag 推上去就行
+#   git tag dict-2026.09 && git push origin dict-2026.09
+#
+# 也可以手动跑（Actions 页面 → 词库 → Run workflow），这时会更新一个叫 dict-latest 的 tag。
+name: 词库
+
+on:
+  push:
+    tags: ["dict-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # 发 Release 要写权限
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: dict-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      # 语料：白霜拼音 rime-frost（GPL-3.0）。字频词频是拿 7.4 亿字语料统计的，
+      # 多音字一行一个读音 —— 正好是 `词<TAB>拼音<TAB>权重`，直接就能导
+      - name: 下载语料
+        run: |
+          mkdir -p corpus
+          for f in 8105 41448 base ext tencent others; do
+            curl -fsSL -o "corpus/$f.dict.yaml" \
+              "https://raw.githubusercontent.com/gaboolic/rime-frost/master/cn_dicts/$f.dict.yaml"
+          done
+          echo "语料行数：$(cat corpus/*.dict.yaml | wc -l)"
+          echo "CORPUS_SHA=$(curl -fsSL https://api.github.com/repos/gaboolic/rime-frost/commits/master | jq -r .sha)" >> "$GITHUB_ENV"
+
+      - name: 构建
+        run: cargo run --release -p pliers-dict -- --rime corpus --out dict.db
+
+      # 发布前自检：词库得是**自包含**的一个文件（导入程序最后会把 WAL 并回主库），
+      # 而且要能被 pliers 正常打开 —— 这一步能挡住"资产里少了一半数据"这种事
+      - name: 自检
+        run: |
+          if [ -s dict.db-wal ]; then
+            echo "::error::dict.db-wal 还有数据，说明没 checkpoint，发布出去会是个残缺的库"
+            exit 1
+          fi
+          PLIERS_DICT="$PWD/dict.db" cargo run --release -p pliers-ime -- dict status | tee /tmp/status.txt
+          grep -q "词条" /tmp/status.txt
+
+      - name: 压缩 + 记指纹
+        run: |
+          zstd -19 -T0 dict.db -o dict.db.zst
+          sha256sum dict.db.zst > dict.db.zst.sha256
+          ls -l dict.db dict.db.zst
+          cat dict.db.zst.sha256
+
+      # 许可：词库是从 GPL-3.0 的语料构建出来的衍生作品，发出来就得随附许可和来源
+      #（来源就是 rime-frost 仓库本身 + 这个工作流，谁都拿得到）
+      - name: 写 Release 说明
+        run: |
+          cat > release-body.md <<EOF
+          中文拼音词库，给 [pliers](https://github.com/${{ github.repository }}) 用。
+
+          \`\`\`
+          pliers --init          # 自动下载安装（就是拿这里的 dict.db.zst）
+          \`\`\`
+
+          | | |
+          | --- | --- |
+          | 语料 | [白霜拼音 rime-frost](https://github.com/gaboolic/rime-frost)（GPL-3.0） |
+          | 语料版本 | \`$CORPUS_SHA\` |
+          | 构建方式 | \`pliers-dict --rime corpus --out dict.db\`（见 \`.github/workflows/dict.yml\`） |
+          | 许可 | **GPL-3.0**（本资产是上述语料的衍生作品） |
+
+          词条是 \`词 + 拼音 + 权重\`，多音字一行一个读音。想自己构建（不用这个资产）：
+
+          \`\`\`
+          pliers dict build
+          \`\`\`
+          EOF
+          cat release-body.md
+
+      - name: 发到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'dict-latest' }}
+          name: 词库 ${{ github.ref_type == 'tag' && github.ref_name || 'dict-latest' }}
+          body_path: release-body.md
+          files: |
+            dict.db.zst
+            dict.db.zst.sha256

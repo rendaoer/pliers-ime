@@ -44,5 +44,9 @@ kind = "full-pinyin"
 # SQLite 词库文件（用 pliers-dict 生成，见 README）
 # path = "~/.local/share/pliers/dict.db"
 
-# 候选框里最多显示几个候选（要翻页的话再调大，数字键 1-9 直接选）
+# 候选框一页显示几个（数字键 1-9 选的是这一页的第几个）
 # max_candidates = 9
+
+# 一次准备多少个候选 = 最多能翻多少页（90 就是 10 页）。
+# 翻页：← → ↑ ↓ 挪选中（挪出这一页自动翻页）、, . 或 - = 或 PgUp/PgDn 整页翻
+# pool_size = 90

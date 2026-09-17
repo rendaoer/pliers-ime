@@ -58,8 +58,9 @@ EVDEV = {
     # 数字 1-9：输入法用它们直接选候选
     "1": 2, "2": 3, "3": 4, "4": 5, "5": 6, "6": 7, "7": 8, "8": 9, "9": 10,
 }
-# 方向键 ↓（组词时用来翻候选）
+# 方向键（组词时用来翻候选）
 EVDEV_DOWN = 108
+EVDEV_RIGHT = 106
 
 # 候选框高度（逻辑像素）：pliers_popup 的版面高度，mock 这边没有 wl_output 所以缩放是 1
 POPUP_HEIGHT = 42
@@ -426,6 +427,20 @@ def main():
                         for st in (1, 0):
                             conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[ch], st))
                             time.sleep(0.03)
+                elif base_mode == "page":
+                    # 打 ni 之后一直按 →：挪出第一页该自动翻到第二页。
+                    # 第 10 个候选具体是什么跟词库有关，所以只验"翻页确实生效"
+                    for ch in KEYS:
+                        for st in (1, 0):
+                            conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[ch], st))
+                            time.sleep(0.03)
+                    for _ in range(9):
+                        for st in (1, 0):
+                            conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV_RIGHT, st))
+                            time.sleep(0.02)
+                    for st in (1, 0):
+                        conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[" "], st))
+                        time.sleep(0.03)
                 elif base_mode == "nav":
                     # 组词之后按 ↓（keycode 108）换候选，再空格上屏选中的那个。
                     # ↓ 不该改动预编辑串，也不该漏给应用
@@ -595,6 +610,20 @@ def main():
         print(
             f"mock: {'PASS' if ok else 'FAIL'}: committed {committed!r}, "
             f"缩放 {buffer_scale}（期望 2）, popup {'ok' if popup_ok else 'BAD'}",
+            flush=True,
+        )
+    elif mode == "page":
+        # 翻页：→ 挪了 9 次之后，空格上屏的应该是第二页的第一个，
+        # 而不是第一页的第一个「你」；候选框也一路跟着重贴
+        ok = (
+            grab_id is not None
+            and committed not in ("", "你")
+            and len(shows) >= 2
+            and not forwards
+        )
+        print(
+            f"mock: {'PASS' if ok else 'FAIL'}: committed {committed!r} (期望不是第一页的「你」), "
+            f"贴框 {len(shows)} 次, forwarded {len(forwards)} keys",
             flush=True,
         )
     elif mode == "english":

@@ -85,6 +85,7 @@ run active         "nihao "  你好  active
 run active_nomods  "nihao "  你好  active_nomods
 run pick           "nihao2"  倪浩  pick          # 数字选词（第 2 个候选）
 run nav            "nihao"   倪浩  nav           # ↓ 换候选再空格
+run page           "ni"      ""    page          # → 挪 9 次自动翻到第二页
 run caps           "nihao "  你好  caps          # Caps Lock 打的大写
 run enter          "nihao"   nihao enter         # 回车提交原文
 run escape         "nihao"   ""    escape        # Esc 取消

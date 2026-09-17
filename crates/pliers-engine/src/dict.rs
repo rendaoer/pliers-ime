@@ -242,7 +242,8 @@ mod tests {
     fn 查得到就按权重排() {
         let dict = sample_dict();
         assert_eq!(words(dict.exact("pinyin", "ni", 3)), ["你", "尼", "泥"]);
-        assert_eq!(words(dict.exact("pinyin", "ni", 9)).len(), 5);
+        // 词库里 ni 的字挺多，限 9 就该给满 9 个
+        assert_eq!(words(dict.exact("pinyin", "ni", 9)).len(), 9);
         assert_eq!(words(dict.exact("pinyin", "ni hao", 9)), ["你好", "妮好"]);
     }
 
@@ -289,13 +290,14 @@ mod tests {
     #[test]
     fn 前缀查得到() {
         let dict = sample_dict();
-        let hits = words(dict.prefix("pinyin", "ni", 9));
+        let hits = words(dict.prefix("pinyin", "ni", 20));
         assert!(hits.contains(&"你好".to_string()), "{hits:?}");
         assert!(hits.contains(&"你".to_string()), "{hits:?}");
-        assert!(
-            hits.contains(&"你哈".to_string()),
-            "半截音节也该搜得到：{hits:?}"
-        );
+
+        // 半截音节：拿 `ni ha` 去搜，`ni hao` 里的词也得出来
+        let hits = words(dict.prefix("pinyin", "ni ha", 9));
+        assert!(hits.contains(&"你好".to_string()), "{hits:?}");
+        assert!(hits.contains(&"你哈".to_string()), "{hits:?}");
     }
 
     #[test]
@@ -357,6 +359,21 @@ pub(crate) mod testing {
                 ("ni", "泥", 7_000),
                 ("ni", "拟", 6_000),
                 ("ni", "逆", 5_000),
+                ("ni", "妮", 4_900),
+                ("ni", "呢", 4_800),
+                ("ni", "匿", 4_700),
+                ("ni", "腻", 4_600),
+                ("ni", "溺", 4_500),
+                ("ni", "倪", 4_400),
+                ("ni", "昵", 4_300),
+                ("ni", "铌", 4_200),
+                ("ni", "猊", 4_100),
+                ("ni", "怩", 4_000),
+                ("ni", "伲", 3_900),
+                ("ni", "旎", 3_800),
+                ("ni", "鲵", 3_700),
+                ("ni", "蜺", 3_600),
+                ("ni", "麑", 3_500),
                 ("hao", "好", 925_430),
                 ("hao", "号", 500_000),
                 ("hao", "浩", 30_000),

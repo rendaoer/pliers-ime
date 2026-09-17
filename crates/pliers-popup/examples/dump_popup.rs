@@ -38,6 +38,12 @@ fn main() {
             "ni（5 个候选）",
             composition("ni", &["你", "尼", "泥", "拟", "逆"], 0),
         ),
+        ("ni（第 2 页 / 共 7 页，右下角是页码）", {
+            let mut preedit = composition("ni", &["你", "尼", "泥", "拟", "逆"], 2);
+            preedit.page = 1;
+            preedit.pages = 7;
+            preedit
+        }),
         (
             "aaaa（查不到，只显示原文）",
             composition("aaaa", &["aaaa"], 0),
@@ -81,6 +87,8 @@ fn composition(text: &str, candidates: &[&str], selected: usize) -> Preedit {
         text: text.to_string(),
         candidates: candidates.iter().map(|s| s.to_string()).collect(),
         selected,
+        page: 0,
+        pages: 1,
     }
 }
 

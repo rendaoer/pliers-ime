@@ -38,6 +38,8 @@ const ITEM_PAD: f32 = 10.0;
 const GAP: f32 = 6.0;
 /// 序号和词之间的间隔
 const INDEX_GAP: f32 = 6.0;
+/// 候选和右下角 "2/9" 之间的间隔
+const PAGE_GAP: f32 = 10.0;
 /// 整框圆角
 const RADIUS: f32 = 10.0;
 /// 选中项那块"药丸"的圆角，以及它上下比整框缩进多少
@@ -133,17 +135,19 @@ impl Painter {
                 )
             })
             .collect();
-        self.draw(items, scale)
+        // 有多页才画右下角那个 "2/9"
+        let page = (preedit.pages > 1).then_some((preedit.page, preedit.pages));
+        self.draw(items, page, scale)
     }
 
     /// 中英文模式提示（就一个「中」/「英」）：不带序号，别让它看着像个候选
     pub fn render_notice(&self, label: &str, scale: i32) -> Image {
         let scale = scale.clamp(1, 4) as f32;
-        self.draw(vec![self.item("", label, true, scale)], scale)
+        self.draw(vec![self.item("", label, true, scale)], None, scale)
     }
 
-    /// 把排好版的候选画成像素
-    fn draw(&self, items: Vec<Item>, scale: f32) -> Image {
+    /// 把排好版的候选画成像素。`page` 有值就在右下角画个 "第几页/共几页"
+    fn draw(&self, items: Vec<Item>, page: Option<(usize, usize)>, scale: f32) -> Image {
         let px = |logical: f32| logical * scale;
         if items.is_empty() {
             // 没在组词。调用方本来就不该画（见 pliers-wayland 的 sync_popup），
@@ -155,10 +159,19 @@ impl Painter {
             };
         }
 
+        // 页码标签：小一号、灰一点，贴在右边
+        let page_rasters = page.map(|(page, pages)| {
+            self.rasterize(&format!("{}/{}", page + 1, pages), INDEX_SIZE, scale)
+        });
+        let page_width = page_rasters
+            .as_ref()
+            .map_or(0.0, |(_, width)| width + PAGE_GAP * scale);
+
         let height = px(HEIGHT).round();
         let width: f32 = px(2.0 * PAD)
             + items.iter().map(|item| item.width).sum::<f32>()
-            + px(GAP) * (items.len() - 1) as f32;
+            + px(GAP) * (items.len() - 1) as f32
+            + page_width;
 
         // 2. 竖直居中：按所有字的**墨迹**算基线，而不是字体的 ascent/descent
         //   （中文行高留白大，按行高居中会看着偏上）
@@ -197,6 +210,13 @@ impl Painter {
                 if item.selected { SEL_FG } else { FG },
             );
             x += item.width + px(GAP);
+        }
+
+        if let Some((rasters, raster_width)) = &page_rasters {
+            // 竖直居中按它自己的墨迹算（跟候选一样，不按字体的行高）
+            let (top, bottom) = ink_bounds(rasters);
+            let baseline = (height - (bottom - top)) / 2.0 - top;
+            canvas.glyphs(rasters, width - px(PAD) - raster_width, baseline, DIM);
         }
 
         Image {
@@ -311,6 +331,8 @@ mod tests {
             text: "nihao".to_string(),
             candidates: candidates.iter().map(|s| s.to_string()).collect(),
             selected,
+            page: 0,
+            pages: 1,
         }
     }
 
@@ -420,6 +442,34 @@ mod tests {
         let two = painter.render(&preedit(&["你好"], 0), 2);
         assert_eq!(two.width, one.width * 2);
         assert_eq!(two.height, one.height * 2);
+    }
+
+    #[test]
+    fn 多页的时候右下角画页码() {
+        let painter = Painter::new();
+        let mut many = preedit(&["你好", "尼好"], 0);
+        many.pages = 7;
+        many.page = 2;
+        let paged = painter.render(&many, 1);
+
+        let mut one = preedit(&["你好", "尼好"], 0);
+        one.pages = 1;
+        let single = painter.render(&one, 1);
+
+        // 多了一小块页码，框会宽一点
+        assert!(
+            paged.width > single.width,
+            "{} vs {}",
+            paged.width,
+            single.width
+        );
+        assert_eq!(paged.height, single.height);
+
+        // 右下角那块确实画了东西（不是背景）
+        let right = count(&paged, paged.width - 30, paged.width, |r, g, b| {
+            r > 100 && g > 100 && b > 100
+        });
+        assert!(right > 20, "右下角该有页码，实际 {right} 个像素");
     }
 
     #[test]

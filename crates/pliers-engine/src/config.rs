@@ -132,9 +132,12 @@ pub struct DictConfig {
     /// 词库文件（`pliers-dict` 导入出来的那个 SQLite）
     #[serde(default = "default_dict")]
     pub path: String,
-    /// 候选框最多显示几个
+    /// 候选框一页显示几个
     #[serde(default = "default_max_candidates")]
     pub max_candidates: usize,
+    /// 一次准备多少个候选 —— 翻页能翻多深就靠它
+    #[serde(default = "default_pool_size")]
+    pub pool_size: usize,
 }
 
 impl Default for DictConfig {
@@ -142,6 +145,7 @@ impl Default for DictConfig {
         Self {
             path: default_dict(),
             max_candidates: default_max_candidates(),
+            pool_size: default_pool_size(),
         }
     }
 }
@@ -152,6 +156,10 @@ fn default_dict() -> String {
 
 fn default_max_candidates() -> usize {
     9
+}
+
+fn default_pool_size() -> usize {
+    90
 }
 
 impl Config {
@@ -222,6 +230,7 @@ impl Config {
     pub fn settings(&self) -> Result<Settings> {
         Ok(Settings {
             limit: self.dict.max_candidates,
+            pool: self.dict.pool_size,
             toggle_keys: ToggleKeys::parse(&self.engine.toggle_keys)?,
             start_mode: self.engine.start_mode,
             indicator: self.engine.indicator,

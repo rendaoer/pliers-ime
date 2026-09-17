@@ -36,10 +36,22 @@ pub const KEY_ESCAPE: u32 = 0xff1b;
 pub const KEY_TAB: u32 = 0xff09;
 /// Shift+Tab：keysym 不是 Tab，而是 ISO_Left_Tab
 pub const KEY_ISO_LEFT_TAB: u32 = 0xfe20;
+/// ←
+pub const KEY_LEFT: u32 = 0xff51;
 /// ↑
 pub const KEY_UP: u32 = 0xff52;
+/// →
+pub const KEY_RIGHT: u32 = 0xff53;
 /// ↓
 pub const KEY_DOWN: u32 = 0xff54;
+/// PageUp / PageDown
+pub const KEY_PAGE_UP: u32 = 0xff55;
+pub const KEY_PAGE_DOWN: u32 = 0xff56;
+/// `,` `.` 和 `-` `=`：也是翻页键（中文输入法的老习惯，微软拼音用的是 `-` `=`）
+pub const KEY_COMMA: u32 = 0x2c;
+pub const KEY_PERIOD: u32 = 0x2e;
+pub const KEY_MINUS: u32 = 0x2d;
+pub const KEY_EQUAL: u32 = 0x3d;
 
 /// 数字 1..9：直接选第几个候选上屏（keysym 就是 ASCII '1'..'9'）
 const KEY_1: u32 = 0x31;
@@ -121,8 +133,10 @@ impl ToggleKeys {
 /// 引擎的行为开关（都来自配置文件）
 #[derive(Debug, Clone)]
 pub struct Settings {
-    /// 候选最多取几个
+    /// 候选框一页显示几个
     pub limit: usize,
+    /// 一次准备多少个候选（翻页能翻多深）
+    pub pool: usize,
     /// 用哪些键切中英文
     pub toggle_keys: ToggleKeys,
     /// 启动时是中文还是英文
@@ -135,6 +149,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             limit: 9,
+            pool: 90,
             toggle_keys: ToggleKeys::default(),
             start_mode: Mode::Chinese,
             indicator: true,
@@ -172,10 +187,13 @@ pub struct KeyInput {
 pub struct Preedit {
     /// 预编辑串：交给应用显示在输入框里的原文（拼音）
     pub text: String,
-    /// 候选词。空 = 没在组词
+    /// **当前这一页**的候选词。空 = 没在组词
     pub candidates: Vec<String>,
-    /// 选中的是第几个候选（从 0 开始）
+    /// 这一页里选中的是第几个（从 0 开始）
     pub selected: usize,
+    /// 第几页（从 0 开始）和一共几页 —— 候选框靠它画右下角那个 "2/9"
+    pub page: usize,
+    pub pages: usize,
 }
 
 impl Preedit {
@@ -205,8 +223,12 @@ pub struct Engine {
     dict: Dict,
     /// 输入方案：全拼 / 双拼 / 码表
     scheme: Box<dyn Scheme>,
-    /// 候选最多取几个
+    /// 候选框一页显示几个
     limit: usize,
+    /// 一次准备多少个候选（翻页用）
+    pool_size: usize,
+    /// 候选池：一次多取一些，"翻页"就是在这个池子里挪游标，不用重新查库
+    pool: Vec<String>,
     /// 现在中文还是英文
     mode: Mode,
     /// 切换键
@@ -218,8 +240,8 @@ pub struct Engine {
 
     /// 攒着的东西：拼音，或者用户用 Shift/Caps Lock 敲出来的大写英文
     buffer: String,
-    /// 选中第几个候选（打字过程中每来一个新字母都回到第一个）
-    selected: usize,
+    /// 选中的是**池子里**第几个候选（当前是第几页由它算出来）
+    cursor: usize,
     /// 被我们吃掉的按键：它们的抬起事件也得吃掉，
     /// 否则应用会收到"没按下就直接抬起"，修饰键状态可能错乱
     consumed: Vec<u32>,
@@ -231,12 +253,14 @@ impl Engine {
             dict,
             scheme,
             limit: settings.limit.max(1),
+            pool_size: settings.pool.max(settings.limit.max(1)),
+            pool: Vec::new(),
             mode: settings.start_mode,
             toggle: settings.toggle_keys,
             indicator: settings.indicator,
             shift_tap: false,
             buffer: String::new(),
-            selected: 0,
+            cursor: 0,
             consumed: Vec::new(),
         }
     }
@@ -267,23 +291,45 @@ impl Engine {
         &self.buffer
     }
 
-    /// 现在这一屏该显示什么
+    /// 现在这一屏该显示什么：当前页的候选 + 这一页里选中的是第几个
     pub fn preedit(&self) -> Preedit {
+        let page = self.page();
+        let start = page * self.limit;
+        let end = (start + self.limit).min(self.pool.len());
         Preedit {
             text: self.buffer.clone(),
-            candidates: self.candidates(),
-            selected: self.selected,
+            candidates: self.pool[start..end].to_vec(),
+            selected: self.cursor.saturating_sub(start),
+            page,
+            // 池子是空的就算 0 页，候选框那边看到 candidates 为空就会收起来
+            pages: self.pool.len().div_ceil(self.limit),
         }
     }
 
+    /// 现在在第几页
+    fn page(&self) -> usize {
+        self.cursor / self.limit
+    }
+
+    /// 现在这一页的第一个候选在池子里的下标
+    fn page_start(&self) -> usize {
+        self.page() * self.limit
+    }
+
     /// 问方案要候选。词库查不到、或者这串键根本不是有效输入，就是空的
-    fn candidates(&self) -> Vec<String> {
-        if self.buffer.is_empty() {
-            return Vec::new();
-        }
-        // 查库用的小写码；预编辑串保留用户敲的大小写
-        self.scheme
-            .candidates(&self.dict, &self.buffer.to_ascii_lowercase(), self.limit)
+    /// 查一次库，把候选池灌满（只在输入变了的时候调 ——
+    /// 翻页/换选中都只是挪游标，不重新查）
+    fn refresh_pool(&mut self) {
+        self.pool = if self.buffer.is_empty() {
+            Vec::new()
+        } else {
+            // 查库用的小写码；预编辑串保留用户敲的大小写
+            self.scheme.candidates(
+                &self.dict,
+                &self.buffer.to_ascii_lowercase(),
+                self.pool_size,
+            )
+        };
     }
 
     /// 输入框失焦：按住没放的键不会再有抬起事件了，账本一起清掉。
@@ -306,7 +352,8 @@ impl Engine {
     /// 一个"没按下过就抬起"的野按键
     fn clear_composing(&mut self) {
         self.buffer.clear();
-        self.selected = 0;
+        self.cursor = 0;
+        self.pool.clear();
     }
 
     /// 处理一个按键，返回该做什么
@@ -388,7 +435,8 @@ impl Engine {
             KEY_RETURN | KEY_KP_ENTER if composing => {
                 self.consumed.push(key.keycode);
                 let text = std::mem::take(&mut self.buffer);
-                self.selected = 0;
+                self.cursor = 0;
+                self.pool.clear();
                 Action::Commit(text) // 账本不动：回车自己的抬起还得吃掉
             }
 
@@ -406,23 +454,37 @@ impl Engine {
                 self.changed()
             }
 
-            // ↓ / Tab：下一个候选。组词当中方向键不该去动输入框里的光标
-            KEY_DOWN | KEY_TAB if composing => {
+            // ←↓→↑ / Tab：挪选中的候选。组词当中方向键不该去动输入框里的光标。
+            // 挪出这一页会自动翻页（页是算出来的）
+            KEY_DOWN | KEY_RIGHT | KEY_TAB if composing => {
                 self.consumed.push(key.keycode);
                 self.step(1)
             }
 
-            // ↑ / Shift+Tab：上一个候选
-            KEY_UP | KEY_ISO_LEFT_TAB if composing => {
+            // ← / ↑ / Shift+Tab：往回挪
+            KEY_LEFT | KEY_UP | KEY_ISO_LEFT_TAB if composing => {
                 self.consumed.push(key.keycode);
                 self.step(-1)
+            }
+
+            // , - / PageUp：上一页；. = / PageDown：下一页。
+            // 一页一页翻，页内位置保持（光标 +整页，取模绕圈）
+            KEY_COMMA | KEY_MINUS | KEY_PAGE_UP if composing => {
+                self.consumed.push(key.keycode);
+                self.step(-(self.limit as i32))
+            }
+
+            KEY_PERIOD | KEY_EQUAL | KEY_PAGE_DOWN if composing => {
+                self.consumed.push(key.keycode);
+                self.step(self.limit as i32)
             }
 
             // 数字 1-9：直接选第几个候选上屏（拼音里的数字没法组词，吃掉不亏）
             KEY_1..=KEY_9 if composing => {
                 let index = (key.keysym - KEY_1) as usize;
                 self.consumed.push(key.keycode);
-                match self.candidates().get(index).cloned() {
+                // 数字选的是**这一页**的第几个（不是池子里的第几个）
+                match self.pool.get(self.page_start() + index).cloned() {
                     Some(word) => {
                         self.pick(&word);
                         Action::Commit(word)
@@ -440,26 +502,27 @@ impl Engine {
     /// 缓冲内容变了：候选列表跟着变，选中回到第一个。
     /// 打字过程中新出现的候选才是你要的，停在旧的行上没意义
     fn changed(&mut self) -> Action {
-        self.selected = 0;
+        self.cursor = 0;
+        self.refresh_pool();
         Action::UpdatePreedit(self.preedit())
     }
 
     /// 选中项上下走一格（绕圈）
     fn step(&mut self, delta: i32) -> Action {
-        let count = self.candidates().len();
-        if count == 0 {
+        if self.pool.is_empty() {
             return Action::Forward;
         }
-        self.selected = (self.selected as i32 + delta).rem_euclid(count as i32) as usize;
+        // 在池子里挪游标，绕圈。挪出这一页就会自动翻页（页是算出来的，不是存下来的）
+        let count = self.pool.len() as i32;
+        self.cursor = (self.cursor as i32 + delta).rem_euclid(count) as usize;
         Action::UpdatePreedit(self.preedit())
     }
 
     /// 上屏当前选中的候选
     fn commit_candidate(&mut self, keycode: u32) -> Action {
-        let candidates = self.candidates();
         // 一个候选都没有（打的是词库里没有的东西，比如 `aaaa`）：原样上屏，
         // 不能提交空串 —— 那样用户打的字就凭空消失了
-        let word = match candidates.get(self.selected).or_else(|| candidates.first()) {
+        let word = match self.pool.get(self.cursor).or_else(|| self.pool.first()) {
             Some(word) => word.clone(),
             None => std::mem::take(&mut self.buffer),
         };
@@ -625,6 +688,113 @@ mod tests {
     }
 
     #[test]
+    fn 候选多了会分页() {
+        let mut engine = engine();
+        type_letters(&mut engine, "ni");
+        let preedit = engine.preedit();
+        assert_eq!(preedit.candidates.len(), 9, "一页 9 个");
+        assert_eq!(preedit.page, 0);
+        assert_eq!(preedit.pages, 3, "词库里 ni 有 20 个候选 → 3 页");
+    }
+
+    #[test]
+    fn 挪出这一页会自动翻页() {
+        // 注意先建 fresh：局部变量 engine 会把同名的测试 helper 遮蔽掉
+        let mut fresh = engine();
+        let mut engine = engine();
+        type_letters(&mut engine, "ni");
+        // 按 9 次 → 正好跨到第 2 页的第一个
+        for _ in 0..9 {
+            engine.on_key(key(KEY_RIGHT));
+        }
+        let preedit = engine.preedit();
+        assert_eq!(preedit.page, 1);
+        assert_eq!(preedit.selected, 0);
+        // 从第一页往回挪：绕到最后一页的最后一个
+        type_letters(&mut fresh, "ni");
+        fresh.on_key(key(KEY_LEFT));
+        let preedit = fresh.preedit();
+        assert_eq!(preedit.page, 2, "20 个候选、每页 9 个 → 最后一页是第 3 页");
+        assert_eq!(preedit.candidates.len(), 2, "最后一页剩 2 个");
+        assert_eq!(preedit.selected, 1, "绕回来选的是最后一个");
+    }
+
+    #[test]
+    fn 逗号句号整页翻() {
+        let mut engine = engine();
+        type_letters(&mut engine, "ni");
+        let first = engine.preedit().candidates[0].clone();
+        // `.` 下一页，页内位置保持（都停在第 1 个）
+        assert!(matches!(
+            engine.on_key(key(KEY_PERIOD)),
+            Action::UpdatePreedit(_)
+        ));
+        let preedit = engine.preedit();
+        assert_eq!(preedit.page, 1);
+        assert_eq!(preedit.selected, 0);
+        assert_ne!(preedit.candidates[0], first);
+        // `,` 翻回去
+        engine.on_key(key(KEY_COMMA));
+        assert_eq!(engine.preedit().page, 0);
+
+        // 这几个键都是翻页：- = （微软拼音的习惯）、, . 、PgUp/PgDn。
+        // 从第 0 页开始，一路按下来应该这么走
+        for (pressed, want_page) in [
+            (KEY_EQUAL, 1),
+            (KEY_MINUS, 0),
+            (KEY_PAGE_DOWN, 1),
+            (KEY_PAGE_UP, 0),
+            (KEY_PERIOD, 1),
+            (KEY_COMMA, 0),
+        ] {
+            engine.on_key(key(pressed));
+            assert_eq!(
+                engine.preedit().page,
+                want_page,
+                "按 {} 之后该在第 {} 页",
+                pressed,
+                want_page
+            );
+        }
+    }
+
+    #[test]
+    fn 数字选的是这一页的第几个() {
+        let mut engine = engine();
+        type_letters(&mut engine, "ni");
+        let first_page_first = engine.preedit().candidates[0].clone();
+        engine.on_key(key(KEY_PERIOD)); // 翻到第 2 页
+        let second_page_first = engine.preedit().candidates[0].clone();
+        assert_ne!(first_page_first, second_page_first);
+        // 按 1 上屏的是这一页的第 1 个，不是整池子的第 1 个
+        assert_eq!(engine.on_key(key(0x31)), Action::Commit(second_page_first));
+    }
+
+    #[test]
+    fn 上下左右都能挪选中() {
+        let mut engine = engine();
+        type_letters(&mut engine, "ni");
+        engine.on_key(key(KEY_DOWN));
+        assert_eq!(engine.preedit().selected, 1);
+        engine.on_key(key(KEY_RIGHT));
+        assert_eq!(engine.preedit().selected, 2);
+        engine.on_key(key(KEY_UP));
+        assert_eq!(engine.preedit().selected, 1);
+        engine.on_key(key(KEY_LEFT));
+        assert_eq!(engine.preedit().selected, 0);
+    }
+
+    #[test]
+    fn 候选不够一页就没有页码() {
+        let mut engine = engine();
+        type_letters(&mut engine, "nihao");
+        let preedit = engine.preedit();
+        assert_eq!(preedit.pages, 1);
+        assert_eq!(preedit.page, 0);
+        assert_eq!(preedit.candidates[0], "你好");
+    }
+
+    #[test]
     fn 数字直接选词上屏() {
         let mut engine = engine();
         type_letters(&mut engine, "ni");
@@ -636,9 +806,11 @@ mod tests {
     #[test]
     fn 数字超出候选范围就什么都别发生() {
         let mut engine = engine();
-        type_letters(&mut engine, "ni");
+        // nihao 只有 2 个候选，按 9 应该当没按过
+        type_letters(&mut engine, "nihao");
+        assert!(engine.preedit().candidates.len() < 9);
         assert_eq!(engine.on_key(key(0x39)), Action::Swallow); // '9'
-        assert_eq!(engine.text(), "ni"); // 没被提交，也没混进拼音
+        assert_eq!(engine.text(), "nihao"); // 没被提交，也没混进拼音
     }
 
     #[test]

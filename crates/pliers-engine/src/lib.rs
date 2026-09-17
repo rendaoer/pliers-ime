@@ -139,6 +139,8 @@ impl ToggleKeys {
 pub struct Settings {
     /// 候选框一页显示几个
     pub limit: usize,
+    /// 中文模式下把半角标点打成全角（`中文标点`）
+    pub chinese_punctuation: bool,
     /// 一次准备多少个候选（翻页能翻多深）
     pub pool: usize,
     /// 用哪些键切中英文
@@ -153,12 +155,48 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             limit: 9,
+            chinese_punctuation: true,
             pool: 90,
             toggle_keys: ToggleKeys::default(),
             start_mode: Mode::Chinese,
             indicator: true,
         }
     }
+}
+
+/// 中文标点：中文模式下这些半角符号打成全角（搜狗/fcitx 的常规映射）。
+/// 没列进来的（`-` `=` `@` `#` `%` `&` `*` `/` 之类）照旧原样，
+/// 其中 `-` `=` 还是翻页键
+const CHINESE_PUNCTUATION: &[(u32, &str)] = &[
+    (0x2c, "，"),
+    (0x2e, "。"),
+    (0x3f, "？"),
+    (0x21, "！"),
+    (0x3b, "；"),
+    (0x3a, "："),
+    (0x28, "（"),
+    (0x29, "）"),
+    (0x5b, "【"),
+    (0x5d, "】"),
+    (0x7b, "「"),
+    (0x7d, "」"),
+    (0x3c, "《"),
+    (0x3e, "》"),
+    (0x22, "“"),
+    (0x27, "‘"),
+    (0x5c, "、"),
+    (0x5f, "——"),
+    (0x5e, "……"),
+    (0x24, "￥"),
+    (0x7e, "～"),
+];
+
+/// 这个 keysym 对应的中文标点（没有就是 None）
+fn chinese_punctuation(keysym: u32) -> Option<&'static str> {
+    CHINESE_PUNCTUATION
+        .iter()
+        .find(|(code, _)| *code == keysym)
+        .map(|(_, text)| *text)
 }
 
 /// Shift 的 keysym（左右两个）
@@ -316,6 +354,8 @@ pub struct Engine {
     toggle: ToggleKeys,
     /// 切换时要不要弹提示（协议层问它）
     indicator: bool,
+    /// 中文标点：中文模式下把 `,` `.` `?` 这些打成 `，` `。` `？`
+    chinese_punctuation: bool,
     /// Shift 按下之后还没抬起来，且中间没按别的键（"轻按 Shift"用）
     shift_tap: bool,
 
@@ -349,6 +389,7 @@ impl Engine {
             mode: settings.start_mode,
             toggle: settings.toggle_keys,
             indicator: settings.indicator,
+            chinese_punctuation: settings.chinese_punctuation,
             shift_tap: false,
             buffer: String::new(),
             cursor: 0,
@@ -603,6 +644,21 @@ impl Engine {
             self.buffer.push(ch);
             self.consumed.push(key.keycode);
             return self.changed();
+        }
+
+        // 中文标点：中文模式下 `,` `.` `?` 这些直接打成全角。
+        // 组词当中还要先把候选上屏（`nihao,` → 「你好，」），一步到位 ——
+        // 走的是 commit_string，不用转发原键，所以应用收到的一定是全角那个
+        if self.chinese_punctuation
+            && let Some(punctuation) = chinese_punctuation(key.keysym)
+        {
+            self.consumed.push(key.keycode);
+            let word = if composing {
+                self.take_whole()
+            } else {
+                String::new()
+            };
+            return Action::Commit(format!("{word}{punctuation}"));
         }
 
         match key.keysym {
@@ -902,6 +958,14 @@ mod tests {
 
     fn engine() -> Engine {
         engine_with(Settings::default())
+    }
+
+    /// 关掉中文标点的引擎（`engine()` 默认是开着的）
+    fn no_punct_engine() -> Engine {
+        engine_with(Settings {
+            chinese_punctuation: false,
+            ..Settings::default()
+        })
     }
 
     /// 造一个 Ctrl+空格（中英文切换键）
@@ -1337,7 +1401,8 @@ mod tests {
 
     #[test]
     fn 逗号句号整页翻() {
-        let mut engine = engine();
+        // 中文标点关掉时 `,` `.` 才是翻页键（打开时它们是标点，见另一个测试）
+        let mut engine = no_punct_engine();
         type_letters(&mut engine, "ni");
         let first = engine.preedit().candidates[0].clone();
         // `.` 下一页，页内位置保持（都停在第 1 个）
@@ -1376,7 +1441,7 @@ mod tests {
 
     #[test]
     fn 数字选的是这一页的第几个() {
-        let mut engine = engine();
+        let mut engine = no_punct_engine();
         type_letters(&mut engine, "ni");
         let first_page_first = engine.preedit().candidates[0].clone();
         engine.on_key(key(KEY_PERIOD)); // 翻到第 2 页
@@ -1729,6 +1794,72 @@ mod tests {
         );
         assert_eq!(engine.mode(), Mode::English);
         assert_eq!(engine.text(), "");
+    }
+
+    #[test]
+    fn 中文标点_组词中一边上屏一边打全角() {
+        let mut engine = engine();
+        type_letters(&mut engine, "nihao");
+        // `,` 在中文标点打开时是标点（不是翻页键）：候选和标点一起上屏
+        assert_eq!(
+            engine.on_key(key(0x2c)),
+            Action::Commit("你好，".into()),
+            "该一步到位，不用转发原键"
+        );
+        assert_eq!(engine.text(), "");
+        // 键的抬起照样吃掉（按下没转给应用，抬起也不能转）
+        assert_eq!(
+            engine.on_key(KeyInput {
+                pressed: false,
+                ..key(0x2c)
+            }),
+            Action::Swallow
+        );
+    }
+
+    #[test]
+    fn 中文标点_没组词时也打全角() {
+        let mut engine = engine();
+        for (keysym, want) in [
+            (0x2c, "，"),
+            (0x2e, "。"),
+            (0x3f, "？"),
+            (0x21, "！"),
+            (0x3b, "；"),
+            (0x3a, "："),
+            (0x28, "（"),
+            (0x5f, "——"),
+            (0x5e, "……"),
+            (0x24, "￥"),
+        ] {
+            assert_eq!(engine.on_key(key(keysym)), Action::Commit(want.into()));
+        }
+        // 表里没有的照旧转发
+        assert_eq!(engine.on_key(key(0x2d)), Action::Forward); // '-'
+        assert_eq!(engine.on_key(key(0x40)), Action::Forward); // '@'
+    }
+
+    #[test]
+    fn 关掉中文标点就还是半角() {
+        let settings = Settings {
+            chinese_punctuation: false,
+            ..Default::default()
+        };
+        let mut engine = engine_with(settings);
+        // 组词中 `,` 还是翻页键
+        type_letters(&mut engine, "nihao");
+        assert!(matches!(engine.on_key(key(0x2c)), Action::UpdatePreedit(_)));
+        // 没组词时标点原样转发
+        let mut idle = no_punct_engine();
+        assert_eq!(idle.on_key(key(0x2c)), Action::Forward);
+        assert_eq!(idle.on_key(key(0x3f)), Action::Forward);
+    }
+
+    #[test]
+    fn 英文模式不换标点() {
+        let mut engine = engine();
+        engine.on_key(ctrl_space()); // 切英文
+        assert_eq!(engine.on_key(key(0x2c)), Action::Forward);
     }
 
     #[test]

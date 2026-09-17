@@ -15,7 +15,7 @@ mod pick;
 use std::io::{IsTerminal, Write};
 
 use pick::{Picker, RawMode};
-use pliers_engine::{Config, Engine};
+use pliers_engine::{Config, Engine, Mode};
 use pliers_wayland::Options;
 
 fn help() -> String {
@@ -27,6 +27,7 @@ fn help() -> String {
          \x20     pliers set                   交互模式：上下选着改（↑↓ + Enter）\n\
          \x20     pliers set <项> <值>          只改**正在跑的实例**（下次启动就回去了）\n\
          \x20     pliers config set <项> <值>   改**配置文件**（保留注释；跑着的实例会自动重读）\n\
+         \x20     pliers config set           交互模式：改的是配置文件\n\
          \x20     pliers config show|path|edit  看配置文件 / 看路径 / 用 $EDITOR 打开\n\n\
          \x20 改配置文件的（config set）和只改内存的（set）是两条路：前者留下来的东西\n\
          \x20 下次启动还在，后者重启即失效 —— 试手感用 set，定下来用 config set。\n\n\
@@ -74,7 +75,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("status") if args.len() == 1 => return remote("status"),
         Some("reload") if args.len() == 1 => return remote("reload"),
         // 不带参数 = 交互模式：上下选着改
-        Some("set") if args.len() == 1 => return interactive(),
+        Some("set") if args.len() == 1 => return interactive(Target::Runtime),
         Some("set") => return remote(&args.join(" ")),
         // 改配置文件（跟 set 区分开：这个会留下来）
         Some("config") => return config_command(&args[1..]),
@@ -139,6 +140,8 @@ fn ask(command: &str) -> Result<Reply, String> {
 fn config_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let path = pliers_engine::config::config_path();
     match args.first().map(String::as_str) {
+        // 不带项/值 = 交互模式（改的是配置文件）
+        Some("set") if args.len() == 1 => interactive(Target::File),
         // 写一项进去（保留注释），再让正在跑的实例立刻重读
         Some("set") => {
             let rest = args[1..].join(" ");
@@ -379,6 +382,12 @@ const ITEMS: &[(&str, &str, Kind, &str)] = &[
         Kind::Choice(&["true", "false"]),
         "indicator",
     ),
+    (
+        "engine.chinese_punctuation",
+        "中文标点",
+        Kind::Choice(&["true", "false"]),
+        "chinese_punctuation",
+    ),
 ];
 
 /// 菜单里除了改配置，还有这两件事
@@ -412,15 +421,18 @@ fn menu_entries(fields: &Fields) -> Vec<pick::Item> {
 }
 
 /// 真正的交互模式：上下选的列表（要真终端；管道进来就退回行式，见 [`interactive`]）
-fn fancy() -> Result<(), Box<dyn std::error::Error>> {
+fn fancy(target: Target) -> Result<(), Box<dyn std::error::Error>> {
     // 整个会话停在原始模式：中途出错也会因为 Drop 恢复终端
     let _raw = RawMode::enable()?;
 
-    let mut fields = match ask("status")? {
-        Reply::Done(payload) => Fields::parse(&payload),
-        Reply::Failed(message) => return Err(format!("没拿到现状：{message}").into()),
+    let mut fields = match target {
+        Target::File => fields_from_config(&read_config()?),
+        Target::Runtime => match ask("status")? {
+            Reply::Done(payload) => Fields::parse(&payload),
+            Reply::Failed(message) => return Err(format!("没拿到现状：{message}").into()),
+        },
     };
-    println!("现在跑着的是：");
+    println!("改的是{}：", target.label());
     print_status(&fields);
     println!();
 
@@ -458,14 +470,14 @@ fn fancy() -> Result<(), Box<dyn std::error::Error>> {
             if value == current {
                 println!("没改：还是 {current}");
             } else {
-                apply(&format!("set {key} {value}"), &mut fields)?;
+                apply(target, key, &value, &mut fields)?;
             }
             continue;
         }
 
         // 或者做件事
         match ACTIONS.get(choice - ITEMS.len()) {
-            Some(("reload", _)) => apply("reload", &mut fields)?,
+            Some(("reload", _)) => apply(target, "reload", "", &mut fields)?,
             Some(("status", _)) => {
                 println!("现在跑着的是：");
                 print_status(&fields);
@@ -498,19 +510,79 @@ fn print_items(fields: &Fields) {
     }
 }
 
+/// 交互模式改哪儿：跑着的实例，还是配置文件
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Target {
+    /// `pliers set`：只改正在跑的实例
+    Runtime,
+    /// `pliers config set`：写进配置文件（实例会自动重读）
+    File,
+}
+
+impl Target {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Runtime => "正在跑的实例（重启就回去了）",
+            Self::File => "配置文件（写进去，跑着的实例自动重读）",
+        }
+    }
+}
+
+/// 从配置文件内容算出"现状"字段：没有实例在跑、或者改的就是文件时用它
+fn fields_from_config(config: &Config) -> Fields {
+    let (kind, layout, name, sentence) = match &config.scheme {
+        pliers_engine::SchemeConfig::FullPinyin { sentence } => ("full-pinyin", "", "", *sentence),
+        pliers_engine::SchemeConfig::DoublePinyin {
+            layout, sentence, ..
+        } => ("double-pinyin", layout.as_str(), "", *sentence),
+        pliers_engine::SchemeConfig::Table { name } => ("table", "", name.as_str(), false),
+    };
+    let dict = config.dict_path();
+    let dict = match std::fs::metadata(&dict) {
+        Ok(meta) => format!("{}（{} MB）", dict.display(), meta.len() / 1024 / 1024),
+        Err(_) => format!("{}（打不开？）", dict.display()),
+    };
+    let fields = [
+        format!("kind={kind}"),
+        format!("layout={layout}"),
+        format!("name={name}"),
+        format!("sentence={sentence}"),
+        format!("dict={dict}"),
+        format!("dict_path={}", config.dict_path().display()),
+        format!("candidates={}", config.dict.max_candidates),
+        format!("pool={}", config.dict.pool_size),
+        format!("toggle={}", config.engine.toggle_keys.join(",")),
+        format!(
+            "start={}",
+            match config.engine.start_mode {
+                Mode::Chinese => "chinese",
+                Mode::English => "english",
+            }
+        ),
+        format!("indicator={}", config.engine.indicator),
+        format!("chinese_punctuation={}", config.engine.chinese_punctuation),
+        format!("config={}", pliers_engine::config::config_path().display()),
+    ];
+    Fields::parse(&fields.join("\t"))
+}
+
 /// 交互模式。
 ///
 /// 真终端里是"上下选"的列表（[`fancy`]）；stdin/stdout 不是终端（管道、脚本、测试）时退回
 /// 行式：列出来、输编号或 `<项> <值>` —— 那样才能自动化跑
-fn interactive() -> Result<(), Box<dyn std::error::Error>> {
+fn interactive(target: Target) -> Result<(), Box<dyn std::error::Error>> {
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-        return fancy();
+        return fancy(target);
     }
-    let mut fields = match ask("status")? {
-        Reply::Done(payload) => Fields::parse(&payload),
-        Reply::Failed(message) => return Err(format!("没拿到现状：{message}").into()),
+    let mut fields = match target {
+        // 改文件：现状就从文件读（不需要有实例在跑）
+        Target::File => fields_from_config(&read_config()?),
+        Target::Runtime => match ask("status")? {
+            Reply::Done(payload) => Fields::parse(&payload),
+            Reply::Failed(message) => return Err(format!("没拿到现状：{message}").into()),
+        },
     };
-    println!("现在跑着的是：");
+    println!("改的是{}：", target.label());
     print_status(&fields);
     println!();
     print_items(&fields);
@@ -528,18 +600,18 @@ fn interactive() -> Result<(), Box<dyn std::error::Error>> {
             "" | "?" | "ls" | "list" | "help" => print_items(&fields),
             "q" | "quit" | "exit" => break,
             "s" | "status" => print_status(&fields),
-            "r" | "reload" => apply("reload", &mut fields)?,
+            "r" | "reload" => apply(target, "reload", "", &mut fields)?,
             _ => {
                 let number = line.parse::<usize>().ok();
-                // 编号也可能是"做件事"那两个
+                // 编号也可能是"做件事"那两个（它们从 ITEMS.len()+1 开始编号）
                 if let Some(action) = number
-                    .and_then(|index| index.checked_sub(ITEMS.len()))
-                    .and_then(|index| ACTIONS.get(index))
+                    .filter(|index| *index > ITEMS.len())
+                    .and_then(|index| ACTIONS.get(index - ITEMS.len() - 1))
                 {
-                    apply(action.0, &mut fields)?;
+                    apply(target, action.0, "", &mut fields)?;
                     continue;
                 }
-                let command = match number {
+                let (key, value) = match number {
                     Some(index) if (1..=ITEMS.len()).contains(&index) => {
                         let (key, label, kind, field) = &ITEMS[index - 1];
                         let allowed = match kind {
@@ -548,12 +620,12 @@ fn interactive() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         print!(
                             "{label}现在是 {}，改成？（回车不改，可选 {allowed}）\n> ",
-                            fields.get(field)
+                            show_value(kind, fields.get(field))
                         );
                         std::io::stdout().flush()?;
                         match read_line(&stdin)? {
                             Some(value) if !value.trim().is_empty() => {
-                                format!("set {key} {}", value.trim())
+                                (key.to_string(), value.trim().to_string())
                             }
                             _ => continue,
                         }
@@ -562,34 +634,91 @@ fn interactive() -> Result<(), Box<dyn std::error::Error>> {
                         println!("没有第 {index} 项（一共 {} 项）", ITEMS.len());
                         continue;
                     }
-                    None if line.contains(' ') => format!("set {line}"),
+                    None if line.contains(' ') => match line.split_once(' ') {
+                        Some((key, value)) => (key.to_string(), value.trim().to_string()),
+                        None => continue,
+                    },
                     None => {
                         println!("输编号（1-{}）或 `<项> <值>`，q 退出", ITEMS.len());
                         continue;
                     }
                 };
-                apply(&command, &mut fields)?;
+                apply(target, &key, &value, &mut fields)?;
             }
         }
     }
     Ok(())
 }
 
-/// 交互模式里执行一条命令：失败只说一句，不退出（还能接着改）
-fn apply(command: &str, fields: &mut Fields) -> Result<(), Box<dyn std::error::Error>> {
-    match ask(command)? {
-        Reply::Done(payload) => {
-            let fresh = Fields::parse(&payload);
-            if !fresh.get("changed").is_empty() {
-                println!("改好了：{}", fresh.get("changed"));
+/// 交互模式里改一项：失败只说一句，不退出（还能接着改）
+fn apply(
+    target: Target,
+    key: &str,
+    value: &str,
+    fields: &mut Fields,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match target {
+        // 只改跑着的实例
+        Target::Runtime => {
+            if key == "reload" {
+                match ask("reload")? {
+                    Reply::Done(payload) => {
+                        *fields = Fields::parse(&payload);
+                        println!();
+                        print_status(fields);
+                    }
+                    Reply::Failed(message) => println!("没成功：{message}"),
+                }
+                return Ok(());
             }
-            *fields = fresh;
+            match ask(&format!("set {key} {value}"))? {
+                Reply::Done(payload) => {
+                    let fresh = Fields::parse(&payload);
+                    if !fresh.get("changed").is_empty() {
+                        println!("改好了：{}", fresh.get("changed"));
+                    }
+                    *fields = fresh;
+                    println!();
+                    print_status(fields);
+                }
+                Reply::Failed(message) => println!("没改成：{message}"),
+            }
+        }
+        // 写进配置文件；跑着的实例顺手催一下重读，然后现状按文件重算
+        Target::File if key == "reload" => {
+            let _ = ask("reload");
+            *fields = fields_from_config(&read_config()?);
+            println!("重新读了配置文件");
             println!();
             print_status(fields);
         }
-        Reply::Failed(message) => println!("没改成：{message}"),
+        Target::File => {
+            let path = pliers_engine::config::config_path();
+            match pliers_engine::config::write_setting(&path, key, value) {
+                Ok(()) => {
+                    println!("写进 {}：{key} = {value}", path.display());
+                    if let Ok(Reply::Done(_)) = ask("reload") {
+                        println!("正在跑的实例已经重读");
+                    }
+                    *fields = fields_from_config(&read_config()?);
+                    println!();
+                    print_status(fields);
+                }
+                Err(e) => println!("没写成：{e}"),
+            }
+        }
     }
     Ok(())
+}
+
+/// 读并解析配置文件（不存在就当默认值）
+fn read_config() -> Result<Config, Box<dyn std::error::Error>> {
+    let path = pliers_engine::config::config_path();
+    if !path.exists() {
+        return Ok(Config::default());
+    }
+    let text = std::fs::read_to_string(&path)?;
+    Config::parse(&text)
 }
 
 fn read_line(stdin: &std::io::Stdin) -> std::io::Result<Option<String>> {

@@ -81,6 +81,9 @@ pub struct EngineConfig {
     /// 切换时在光标处弹一下「中」/「英」
     #[serde(default = "default_true")]
     pub indicator: bool,
+    /// 中文标点：中文模式下把 `,` `.` `?` 这些打成全角 `，` `。` `？`
+    #[serde(default = "default_true")]
+    pub chinese_punctuation: bool,
 }
 
 impl Default for EngineConfig {
@@ -89,6 +92,7 @@ impl Default for EngineConfig {
             toggle_keys: default_toggle_keys(),
             start_mode: Mode::default(),
             indicator: true,
+            chinese_punctuation: true,
         }
     }
 }
@@ -258,6 +262,7 @@ impl Config {
         Ok(Settings {
             limit: self.dict.max_candidates,
             pool: self.dict.pool_size,
+            chinese_punctuation: self.engine.chinese_punctuation,
             toggle_keys: ToggleKeys::parse(&self.engine.toggle_keys)?,
             start_mode: self.engine.start_mode,
             indicator: self.engine.indicator,
@@ -287,6 +292,7 @@ impl Config {
     /// | `engine.toggle_keys` | 逗号分隔，如 `ctrl+space,shift` |
     /// | `engine.start_mode` | `chinese` / `english` |
     /// | `engine.indicator` | `true` / `false` |
+    /// | `engine.chinese_punctuation` | `true` / `false`（中文标点） |
     ///
     /// 换 `kind` 时会把另一套方案的字段带过去（比如全拼 → 双拼保留原来的键位），
     /// 省得每换一次都要重设一遍。报错信息是给用户看的，所以都说人话
@@ -398,11 +404,16 @@ impl Config {
             "engine.indicator" => {
                 self.engine.indicator = parse_bool(value).ok_or_else(|| bad("true / false"))?;
             }
+            "engine.chinese_punctuation" => {
+                self.engine.chinese_punctuation =
+                    parse_bool(value).ok_or_else(|| bad("true / false"))?;
+            }
             other => {
                 return Err(format!(
                     "不认识的配置项 {other:?}（能改的：scheme.kind / scheme.layout / \
                      scheme.sentence / scheme.name / dict.path / dict.max_candidates / \
-                     dict.pool_size / engine.toggle_keys / engine.start_mode / engine.indicator）"
+                     dict.pool_size / engine.toggle_keys / engine.start_mode / engine.indicator / \
+                     engine.chinese_punctuation）"
                 ));
             }
         }
@@ -485,10 +496,12 @@ fn toml_value(key: &str, value: &str) -> toml_edit::Item {
             Ok(number) => toml_edit::value(number),
             Err(_) => toml_edit::value(value),
         },
-        "scheme.sentence" | "engine.indicator" => match parse_bool(value) {
-            Some(flag) => toml_edit::value(flag),
-            None => toml_edit::value(value),
-        },
+        "scheme.sentence" | "engine.indicator" | "engine.chinese_punctuation" => {
+            match parse_bool(value) {
+                Some(flag) => toml_edit::value(flag),
+                None => toml_edit::value(value),
+            }
+        }
         "engine.toggle_keys" => {
             let mut array = toml_edit::Array::new();
             for key in value.split(',').map(str::trim).filter(|k| !k.is_empty()) {
@@ -576,12 +589,14 @@ mod tests {
             .set("engine.toggle_keys", "ctrl+space, shift")
             .unwrap();
         config.set("engine.indicator", "off").unwrap();
+        config.set("engine.chinese_punctuation", "off").unwrap();
         config.set("engine.start_mode", "english").unwrap();
         assert_eq!(config.dict.path, "/tmp/别的库.db");
         assert_eq!(config.dict.max_candidates, 5);
         assert_eq!(config.dict.pool_size, 50);
         assert_eq!(config.engine.toggle_keys, ["ctrl+space", "shift"]);
         assert!(!config.engine.indicator);
+        assert!(!config.engine.chinese_punctuation);
         assert_eq!(config.engine.start_mode, Mode::English);
     }
 

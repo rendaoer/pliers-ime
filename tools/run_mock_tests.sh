@@ -234,6 +234,10 @@ run switch         "nihao"   nihao switch        # 组词中切英文：半截�
 echo "== 组词中敲符号 =="
 run symbol         "nihao"   你好  symbol        # 符号必须排在文字后面
 
+echo "== 中文标点 =="
+# `nihao,` → 一步上屏「你好，」（全角），`comma` 这个键不转发给应用
+run punct          "n,i,h,a,o,comma" "你好，" script
+
 echo "== 分段上屏 + 记忆 =="
 run segment        "nihaoma" ""    segment       # 挑两段拼出「你好马」，再打一遍直接出
 run forget         "nihaoma" ""    forget        # 再打一遍时按 Del 删掉它，退回「你好吗」

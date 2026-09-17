@@ -10,6 +10,7 @@
 //! 跑起来之后还能隔着一条 Unix socket 遥控它（`pliers status` / `reload` /
 //! `set scheme.kind double-pinyin`）—— 见 `pliers --help`。
 
+mod dict;
 mod pick;
 
 use std::io::{IsTerminal, Write};
@@ -22,6 +23,8 @@ fn help() -> String {
     format!(
         "pliers —— 从零手写的 Wayland 中文输入法\n\n\
          用法：pliers [启动选项]\n\
+         \x20     pliers --init                装一份能用的：写配置 + 下载词库\n\
+         \x20     pliers dict fetch|build|status  词库：下载 / 自己构建 / 看现状\n\
          \x20     pliers status                看正在跑的实例现在是什么配置\n\
          \x20     pliers reload                让它重新读一遍配置文件\n\
          \x20     pliers set                   交互模式：上下选着改（↑↓ + Enter）\n\
@@ -43,13 +46,15 @@ fn help() -> String {
          \x20 engine.start_mode     chinese | english\n\
          \x20 engine.indicator      true | false\n\n\
          启动选项：\n\
-         \x20 --init-config [--force]  写一份配置模板到配置路径\n\
-         \x20 --help                   看这个\n\n\
+         \x20 --init [--force] [--build]  写配置 + 装词库（--build = 自己下语料构建）\n\
+         \x20 --init-config [--force]     只写配置模板\n\
+         \x20 --help                      看这个\n\n\
          配置：{}\n\
-         词库：cargo run -p pliers-dict --release -- --help 看怎么生成\n\
+         词库：{}（pliers dict status 看里面有什么）\n\
          调试：PLIERS_DEBUG=1 pliers 把每个按键的判定打到 stderr\n\
          遥控：命令走 Unix socket，路径看 $PLIERS_SOCKET（默认 $XDG_RUNTIME_DIR/pliers.sock）",
-        pliers_engine::config::config_path().display()
+        pliers_engine::config::config_path().display(),
+        pliers_engine::config::default_dict_path().display()
     )
 }
 
@@ -64,8 +69,12 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        // 装一份能用的：写配置 + 下载词库（新机器就这一条命令）
+        Some("--init") => return dict::init(&args[1..]),
         // 写一份带注释的配置模板，省得手敲（已存在就不覆盖）
         Some("--init-config") => return init_config(args.iter().any(|arg| arg == "--force")),
+        // 词库：下载 / 自己构建 / 看现状
+        Some("dict") => return dict::command(&args[1..]),
         Some("--help" | "-h") => {
             println!("{}", help());
             return Ok(());

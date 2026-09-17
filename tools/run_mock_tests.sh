@@ -49,12 +49,16 @@ if [ -z "$DICT" ]; then
 fi
 if [ -z "$DICT" ] || [ ! -f "$DICT" ]; then
     echo "找不到词库（试过 target/dict.db 和 ~/.local/share/pliers/dict.db）"
-    echo "先导入：cargo run -p pliers-dict --release -- --freq jieba-dict.txt --out ~/.local/share/pliers/dict.db"
+    echo "先装一份：pliers --init（或 pliers dict build 自己构建）"
     exit 1
 fi
 # 测试用自己的一份词库副本：选词/记整句都会写进库里，别污染真库
+SRC_DICT="$DICT"   # 原始词库，一直保持"干净"：需要候选顺序确定的场景从它拷
 TEST_DICT="$(mktemp -d)/dict.db"
-cp "$DICT" "$TEST_DICT"
+cp "$SRC_DICT" "$TEST_DICT"
+# 还没并回主库的 WAL 也得一起拷：刚导入完的库、或者输入法正开着的库，
+# 最新的写入（很可能包括音节表）还在 -wal 里，只拷 .db 会拿到一个不完整的库
+[ -f "$SRC_DICT-wal" ] && cp "$SRC_DICT-wal" "$TEST_DICT-wal"
 DICT="$TEST_DICT"
 echo "词库：$DICT（测试用的副本）"
 LOGS="$(mktemp -d)"
@@ -192,10 +196,17 @@ run() { # run <名字> <按键> <期望提交> <模式> [额外环境变量]
     local png=""
     [ "$name" = "active" ] && png="${PNG_ARG:-}"
 
-    # 记性的两个场景要"干净词库"（前面场景会把拼过的句子记进去），各用一份自己的副本
+    # 这几个场景的断言跟"第几个候选"有关，得从**没被前面场景写过**的词库拷一份：
+    #   segment/forget —— 前面场景会把拼过的句子记进去（记性会顶到第一位）
+    #   pick/nav       —— 前一个场景选过的词会加 100 万权重，把候选顺序顶乱
+    #                     （pick 选「事件」之后，nav 的「事件」就跑到第一位了）
     local dict="$DICT"
     case "$name" in
-        segment|forget) dict="$LOGS/$name.db"; cp "$DICT" "$dict" ;;
+        segment|forget|pick|nav)
+            dict="$LOGS/$name.db"
+            cp "$SRC_DICT" "$dict"
+            [ -f "$SRC_DICT-wal" ] && cp "$SRC_DICT-wal" "$dict-wal"
+            ;;
     esac
 
     MOCK_PNG="$png" python3 tools/mock_compositor.py "$SOCK" "$keys" "$expect" "$mode" >"$log" 2>&1 &
@@ -218,8 +229,8 @@ run() { # run <名字> <按键> <期望提交> <模式> [额外环境变量]
 echo "== 正常组词 =="
 run active         "nihao "  你好  active
 run active_nomods  "nihao "  你好  active_nomods
-run pick           "nihao2"  倪浩  pick          # 数字选词（第 2 个候选）
-run nav            "nihao"   倪浩  nav           # ↓ 换候选再空格
+run pick           "shijian2" 事件 pick          # 数字选词（第 2 个候选；事件在两种词库下都是第 2 个）
+run nav            "shijian"  事件 nav           # ↓ 换候选再空格
 run page           "ni"      ""    page          # → 挪 9 次自动翻到第二页
 run caps           "nihao "  ""    caps          # Caps Lock 打开 = 打大写英文，不进组词
 run enter          "nihao"   nihao enter         # 回车提交原文
@@ -230,6 +241,7 @@ run shift          "a"       ""    shift         # 纯 Shift+A：4 个事件全�
 echo "== 中英文切换 =="
 run english        "hello "   ""    english       # Ctrl+空格 切英文后打英文
 run switch         "nihao"   nihao switch        # 组词中切英文：半截拼音先上屏
+run notice         ""        ""    notice        # 切完一个键都不按：「英」提示自己到点消失
 
 echo "== 组词中敲符号 =="
 run symbol         "nihao"   你好  symbol        # 符号必须排在文字后面

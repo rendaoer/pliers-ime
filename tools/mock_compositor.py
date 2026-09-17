@@ -10,8 +10,10 @@ wl_seat / wl_compositor / wl_shm / zwp_input_method_v2 / zwp_virtual_keyboard_v1
   3. it waits for the keyboard grab request,
   4. it sends an XKB keymap and then feeds a key sequence,
   5. it prints every pre-edit / commit / forwarded key the client sends back,
-  6. it accepts the client's candidate-window surface (input_popup role) and
-     reports when the client shows / hides it.
+  6. it accepts the client's candidate-window surface (input_popup role),
+     reports when the client shows / hides it, and reads the pixels back --
+     so a test can check the popup really contains rendered glyphs, not just
+     a coloured rectangle. Set MOCK_PNG=<path> to save the last frame as a PNG.
 
 This is how the live path can be tested without a compositor that supports
 input methods and without a physical keyboard:
@@ -23,9 +25,13 @@ Note on the wire format: file descriptors travel as ancillary data and take
 *no* slot in the message body, so the keymap message is just
 [format][size] plus one fd.
 
-Usage: mock_compositor.py <socket-path> [keys] [expected-committed-text]
+Usage: mock_compositor.py <socket-path> [keys] [expected-committed-text] [mode]
+
+Modes: active | inactive | shortcut | shift | mixed | enter | escape | caps |
+       pick (数字选词) | nav (方向键换候选), each optionally with a _nomods suffix.
 """
 import array
+import mmap
 import os
 import select
 import socket
@@ -34,6 +40,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zlib
 
 SOCK_PATH = sys.argv[1] if len(sys.argv) > 1 else "/tmp/mock-wl"
 KEYS = sys.argv[2] if len(sys.argv) > 2 else "nihao "
@@ -48,7 +55,14 @@ EVDEV = {
     "i": 23, "j": 36, "k": 37, "l": 38, "m": 50, "n": 49, "o": 24, "p": 25,
     "q": 16, "r": 19, "s": 31, "t": 20, "u": 22, "v": 47, "w": 17, "x": 45,
     "y": 21, "z": 44, " ": 57, "\x08": 14, "\n": 28, "\x1b": 1,
+    # 数字 1-9：输入法用它们直接选候选
+    "1": 2, "2": 3, "3": 4, "4": 5, "5": 6, "6": 7, "7": 8, "8": 9, "9": 10,
 }
+# 方向键 ↓（组词时用来翻候选）
+EVDEV_DOWN = 108
+
+# 候选框高度（逻辑像素）：ime_popup 的版面高度，mock 这边没有 wl_output 所以缩放是 1
+POPUP_HEIGHT = 42
 
 # Request signatures. "H" is a file descriptor: it consumes no message body
 # bytes, it is taken from the received ancillary data.
@@ -89,6 +103,64 @@ REQ = {
 
 def pad(n):
     return (-n) % 4
+
+
+def read_pixels(fd, size):
+    """把客户端那块 shm 读出来（候选框的像素就在里面）"""
+    try:
+        mapped = mmap.mmap(fd, size, prot=mmap.PROT_READ)
+    except (OSError, ValueError) as e:
+        print(f"mock: 读不了 shm：{e}", flush=True)
+        return None
+    data = mapped[:]
+    mapped.close()
+    return data
+
+
+def count_glyph_pixels(data, offset, width, height, stride):
+    """数"明显是字"的像素：不透明、而且接近白色（未选中的候选是浅色字）。
+
+    框底是深灰、选中项是橙块，都不满足"三个通道都亮"，所以数出来的就是笔画。
+    """
+    inked = opaque = 0
+    for y in range(height):
+        row = offset + y * stride
+        for x in range(width):
+            i = row + x * 4
+            b, g, r, a = data[i], data[i + 1], data[i + 2], data[i + 3]
+            if a > 0:
+                opaque += 1
+            if a > 200 and r > 150 and g > 150 and b > 150:
+                inked += 1
+    return inked, opaque
+
+
+def write_png(path, data, offset, width, height, stride, zoom=3):
+    """把一帧候选框存成 PNG：放大 zoom 倍，底下垫棋盘格，透明的地方看得见"""
+    out_w, out_h = width * zoom, height * zoom
+    raw = bytearray()
+    for y in range(out_h):
+        raw.append(0)  # 每行的 filter 字节
+        for x in range(out_w):
+            i = offset + (y // zoom) * stride + (x // zoom) * 4
+            b, g, r, a = data[i], data[i + 1], data[i + 2], data[i + 3]
+            keep = 255 - a
+            # 棋盘格是 8 个逻辑像素一格
+            dark = ((x // (8 * zoom)) + (y // (8 * zoom))) % 2 == 0
+            bg = 0x55 if dark else 0x99
+            # 候选框的像素是预乘过的 BGRA，直接 over 上去
+            raw += bytes([min(255, r + bg * keep // 255),
+                          min(255, g + bg * keep // 255),
+                          min(255, b + bg * keep // 255), 255])
+    chunk = lambda tag, body: (struct.pack(">I", len(body)) + tag + body
+                               + struct.pack(">I", zlib.crc32(tag + body) & 0xFFFFFFFF))
+    png = (b"\x89PNG\r\n\x1a\n"
+           + chunk(b"IHDR", struct.pack(">IIBBBBB", out_w, out_h, 8, 6, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(bytes(raw), 6))
+           + chunk(b"IEND", b""))
+    with open(path, "wb") as f:
+        f.write(png)
+    print(f"mock: 候选框存到 {path}（{out_w}x{out_h}）", flush=True)
 
 
 class Conn:
@@ -182,11 +254,16 @@ def main():
     synced = 0
     im_id = vk_id = grab_id = None
     log = []
-    # 候选框：pool 的 fd 要一直留着，buffer 记住尺寸，attach 序列用来判定显示/隐藏
+    # 候选框：pool 的 fd 要一直留着，buffer 记住尺寸，attach 序列用来判定显示/隐藏。
+    # frames 里留着每帧的像素，用来数"框里到底有没有字"
     shm_fds = []
+    pools = {}
     buffers = {}
+    frames = []
     popup_id = None
     popup_events = []
+    # 客户端最后告诉我们的 buffer 缩放（1 = 普通屏，2 = 高分屏）
+    buffer_scale = 1
     deadline = time.time() + 20
 
     while time.time() < deadline:
@@ -233,23 +310,38 @@ def main():
             elif iface == "wl_shm" and opcode == 0:                  # create_pool
                 objects[args[0]] = "wl_shm_pool"
                 shm_fds.append(args[1])                              # 别让 fd 被回收
+                pools[args[0]] = (args[1], args[2])                  # fd, size
                 print(f"mock: shm pool id={args[0]} size={args[2]}", flush=True)
             elif iface == "wl_shm_pool" and opcode == 0:             # create_buffer
                 objects[args[0]] = "wl_buffer"
-                buffers[args[0]] = args[1:]                          # offset, w, h, stride, format
+                buffers[args[0]] = args[1:] + [pools.get(obj)]       # offset,w,h,stride,fmt,pool
             elif iface == "zwp_input_method_v2" and opcode == 4:     # get_input_popup_surface
                 popup_id = args[0]
                 objects[popup_id] = "zwp_input_popup_surface_v2"
                 print("mock: got popup surface request", flush=True)
+            elif iface == "wl_surface" and opcode == 8:              # set_buffer_scale
+                buffer_scale = args[0]
+                print(f"mock: buffer scale = {buffer_scale}", flush=True)
             elif iface == "wl_surface" and opcode == 1:              # attach
                 buffer_id = args[0] if args[0] != 0 else None
                 if buffer_id is None:
                     popup_events.append(("hide",))
                     print("mock: popup hidden (attach NULL)", flush=True)
                 else:
-                    _, w, h, stride, fmt = buffers.get(buffer_id, (0, 0, 0, 0, 0))
+                    offset, w, h, stride, fmt, pool = buffers.get(
+                        buffer_id, (0, 0, 0, 0, 0, None)
+                    )
                     popup_events.append(("show", w, h, stride, fmt))
                     print(f"mock: popup shown {w}x{h} stride={stride} format={fmt}", flush=True)
+                    # 把这块 shm 读出来数一数字的像素：能验到"候选框里真有字"
+                    if pool is not None:
+                        data = read_pixels(pool[0], pool[1])
+                        if data is not None and offset + h * stride <= len(data):
+                            inked, opaque = count_glyph_pixels(data, offset, w, h, stride)
+                            frames.append((w, h, data, offset, stride, inked))
+                            print(f"mock: 框里数出 {inked} 个笔画像素（不透明 {opaque}）", flush=True)
+                    # 真合成器渲染完就会 release，客户端才能重画这块内存
+                    conn.send(buffer_id, 0)
                     # 合成器会顺带告知光标矩形（相对候选框左上角）
                     if popup_id is not None:
                         conn.send(popup_id, 0, struct.pack("<iiii", 0, -h, 2, 24))
@@ -262,7 +354,7 @@ def main():
                 conn.send(grab_id, 3, struct.pack("<ii", 25, 600))          # repeat_info
                 if not MODE.endswith("_nomods"):
                     conn.send(grab_id, 2, struct.pack("<IIIII", 0, 0, 0, 0, 0))  # modifiers
-                if MODE == "inactive":
+                if MODE.removesuffix("_nomods") == "inactive":
                     conn.send(im_id, 1)  # deactivate
                     print("mock: sending deactivate before the keys", flush=True)
                 time.sleep(0.3)
@@ -316,6 +408,19 @@ def main():
                     conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, shift, 0))
                     if send_mods:
                         conn.send(grab_id, 2, struct.pack("<IIIII", 0, 0, 0, 0, 0))
+                elif base_mode == "nav":
+                    # 组词之后按 ↓（keycode 108）换候选，再空格上屏选中的那个。
+                    # ↓ 不该改动预编辑串，也不该漏给应用
+                    for ch in KEYS:
+                        for st in (1, 0):
+                            conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[ch], st))
+                            time.sleep(0.03)
+                    for st in (1, 0):
+                        conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV_DOWN, st))
+                        time.sleep(0.03)
+                    for st in (1, 0):
+                        conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[" "], st))
+                        time.sleep(0.03)
                 else:
                     if base_mode == "caps":
                         # Caps Lock 打开：真键盘是按一下 Caps Lock 键（keycode 58），
@@ -336,7 +441,10 @@ def main():
                         for state in (1, 0):
                             conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, code, state))
                             time.sleep(0.03)
+                # 按键发完了：再等一小会儿收客户端的提交，然后就可以收摊了
+                #（不用一直等到 20 秒的总超时）
                 time.sleep(0.5)
+                deadline = min(deadline, time.time() + 1.5)
             elif iface == "zwp_input_method_v2":
                 log.append((opcode, args))
                 print(f"mock: input method request opcode={opcode} args={args}", flush=True)
@@ -371,16 +479,24 @@ def main():
     print(f"mock: commit serials  : {serials}", flush=True)
     print(f"mock: forwarded keys  : {forwards}", flush=True)
     print(f"mock: modifier masks  : {vk_mods}", flush=True)
+    glyph_pixels = frames[-1][5] if frames else 0
     print(f"mock: popup surface   : {'yes' if popup_id is not None else 'NO'}", flush=True)
+    print(f"mock: popup glyphs    : {glyph_pixels} 个笔画像素", flush=True)
+    print(f"mock: buffer scale    : {buffer_scale}", flush=True)
     print(f"mock: popup shown     : {[(w, h) for _, w, h, _, _ in shows]}", flush=True)
     print(f"mock: popup hidden    : {len(hides)} times", flush=True)
 
-    # 候选框的基本卫生：ARGB8888、stride 正确、每次有拼音都贴一块、提交后藏起来
+    # 候选框的基本卫生：ARGB8888、stride 正确、高矮对、每次有拼音都贴一块、
+    # 提交后藏起来，而且框里真的画了字（不是只有一块底色）
     popup_ok = (
         popup_id is not None
-        and all(fmt == 0 and stride == w * 4 and h == 56 for _, w, h, stride, fmt in shows)
+        and all(
+            fmt == 0 and stride == w * 4 and h == POPUP_HEIGHT * buffer_scale
+            for _, w, h, stride, fmt in shows
+        )
         and len(shows) == len(nonempty)
         and len(hides) == len(preedits) - len(nonempty)
+        and glyph_pixels > 100
     )
 
     committed = "".join(commits)
@@ -448,6 +564,49 @@ def main():
             f"commits {commits} (期望空), forwarded {len(forwards)}/2 keys",
             flush=True,
         )
+    elif mode == "hidpi":
+        # 高分屏（IME_AA_SCALE=2）：候选框要按 2 倍像素画（高 84），
+        # 并且用 set_buffer_scale 告诉合成器"这块 buffer 是 2 倍密度"，
+        # 不然 1.5x/2x 的屏幕上字是糊的
+        ok = (
+            grab_id is not None
+            and committed == EXPECT
+            and buffer_scale == 2
+            and popup_ok
+        )
+        print(
+            f"mock: {'PASS' if ok else 'FAIL'}: committed {committed!r}, "
+            f"缩放 {buffer_scale}（期望 2）, popup {'ok' if popup_ok else 'BAD'}",
+            flush=True,
+        )
+    elif mode == "pick":
+        # 数字选词："nihao2" 里的 2 直接上屏第二个候选，按键（连抬起）都吃掉，
+        # 所以既没有转发、也没有把 2 留进拼音
+        ok = (
+            grab_id is not None
+            and committed == EXPECT
+            and preedits[-1] == ""
+            and not forwards
+        )
+        print(
+            f"mock: {'PASS' if ok else 'FAIL'}: committed {committed!r} (期望 {EXPECT!r}), "
+            f"forwarded {len(forwards)} keys (期望 0)",
+            flush=True,
+        )
+    elif mode == "nav":
+        # 方向键换候选：预编辑串全程不变（↓ 之后还是 "nihao"），
+        # ↓ 和空格的按下抬起都被吃掉，一个键都不该转发
+        ok = (
+            grab_id is not None
+            and committed == EXPECT
+            and nonempty[-1] == KEYS
+            and not forwards
+        )
+        print(
+            f"mock: {'PASS' if ok else 'FAIL'}: committed {committed!r} (期望 {EXPECT!r}), "
+            f"最后一个预编辑 {nonempty[-1] if nonempty else None!r}, forwarded {len(forwards)} keys",
+            flush=True,
+        )
     elif mode == "enter":
         # 组词中按回车：把原始拼音提交掉，回车本身不给应用
         ok = grab_id is not None and committed == "nihao" and not forwards
@@ -491,6 +650,11 @@ def main():
             f"popup {'ok' if popup_ok else 'BAD'}",
             flush=True,
         )
+    png = os.environ.get("MOCK_PNG")
+    if png and frames:
+        w, h, data, offset, stride, _ = frames[-1]
+        write_png(png, data, offset, w, h, stride)
+
     return 0 if ok else 1
 
 

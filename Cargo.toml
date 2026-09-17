@@ -1,10 +1,18 @@
-[package]
-name = "ime-aa"
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+# 直接 `cargo run` 就跑主程序，不用写 -p
+default-members = ["crates/ime-aa"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
-# 跟合成器直接说协议所需的三件套：连接/协议绑定、input-method 协议、键盘布局
+[workspace.dependencies]
 wayland-client = "0.31"
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 xkbcommon = "0.7"
+
+ime-engine = { path = "crates/ime-engine" }
+ime-popup = { path = "crates/ime-popup" }
+ime-wayland = { path = "crates/ime-wayland" }

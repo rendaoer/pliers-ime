@@ -1,0 +1,7 @@
+[package]
+name = "ime-engine"
+description = "输入法引擎：按键 → 决定（纯逻辑，不碰 Wayland）"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

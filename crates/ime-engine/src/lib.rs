@@ -1,15 +1,26 @@
 //! 输入法引擎：只做"这个按键该干什么"的决定，完全不碰 Wayland。
 //!
-//! 把这一层单独拆出来的好处：词表、组词规则这些真正属于"输入法"的东西可以脱离合成器
-//! 跑测试（`cargo test -p ime-engine`），以后想换界面（候选框从 shm 换成 Slint/egui）
-//! 或者换协议层，这一层都不用动。
+//! 引擎自己不管拼音怎么切、候选怎么排 —— 那些在 `scheme`（输入方案）和
+//! `dict`（SQLite 词库）里。引擎只负责**按键的状态机**：
 //!
-//! 对外只有两个类型：进去是 [`KeyInput`]（协议层翻译好的一个按键），
-//! 出来是 [`Action`]（该干什么），中间的状态是 [`Preedit`]（候选框要显示什么）。
+//! ```text
+//! 按键 ──► KeyInput ──► Engine ──► Action ──► 协议层照做
+//!                        │
+//!                        ├── scheme：这串键对应哪些码（全拼切音节 / 双拼解码 / 五笔码）
+//!                        └── dict  ：这些码对应哪些词、谁排前面（词频 + 用户习惯）
+//! ```
+//!
+//! 拆开的好处：换输入方案（全拼↔双拼↔五笔）改配置文件就行；加词、调权重改数据库就行；
+//! 都不需要动这个文件。
 
-mod dict;
+pub mod config;
+pub mod dict;
+mod pinyin;
+mod scheme;
 
-pub use dict::{DICT, candidates, convert};
+pub use config::{Config, EXAMPLE as EXAMPLE_CONFIG, SchemeConfig};
+pub use dict::Dict;
+pub use scheme::{DoublePinyin, FullPinyin, Layout, Scheme, Table};
 
 /// 空格（X11 keysym）
 pub const KEY_SPACE: u32 = 0x20;
@@ -84,9 +95,15 @@ pub enum Action {
     Swallow,
 }
 
-/// 组词状态
-#[derive(Default)]
+/// 输入法引擎
 pub struct Engine {
+    /// 词库（SQLite）
+    dict: Dict,
+    /// 输入方案：全拼 / 双拼 / 码表
+    scheme: Box<dyn Scheme>,
+    /// 候选最多取几个
+    limit: usize,
+
     /// 攒着的东西：拼音，或者用户用 Shift/Caps Lock 敲出来的大写英文
     buffer: String,
     /// 选中第几个候选（打字过程中每来一个新字母都回到第一个）
@@ -97,11 +114,29 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(dict: Dict, scheme: Box<dyn Scheme>, limit: usize) -> Self {
+        Self {
+            dict,
+            scheme,
+            limit: limit.max(1),
+            buffer: String::new(),
+            selected: 0,
+            consumed: Vec::new(),
+        }
     }
 
-    /// 预编辑串原文（拼音）
+    /// 按配置文件建引擎：打开词库、装上方案
+    pub fn from_config(config: &Config) -> dict::Result<Self> {
+        let (dict, scheme) = config.build_engine_parts()?;
+        Ok(Self::new(dict, scheme, config.dict.max_candidates))
+    }
+
+    /// 现在用的是哪套方案（日志用）
+    pub fn scheme_name(&self) -> &str {
+        self.scheme.name()
+    }
+
+    /// 预编辑串原文（拼音 / 码）
     pub fn text(&self) -> &str {
         &self.buffer
     }
@@ -110,9 +145,19 @@ impl Engine {
     pub fn preedit(&self) -> Preedit {
         Preedit {
             text: self.buffer.clone(),
-            candidates: candidates(&self.buffer),
+            candidates: self.candidates(),
             selected: self.selected,
         }
+    }
+
+    /// 问方案要候选。词库查不到、或者这串键根本不是有效输入，就是空的
+    fn candidates(&self) -> Vec<String> {
+        if self.buffer.is_empty() {
+            return Vec::new();
+        }
+        // 查库用的小写码；预编辑串保留用户敲的大小写
+        self.scheme
+            .candidates(&self.dict, &self.buffer.to_ascii_lowercase(), self.limit)
     }
 
     /// 输入框失焦：按住没放的键不会再有抬起事件了，账本一起清掉
@@ -156,19 +201,20 @@ impl Engine {
         }
 
         let composing = !self.buffer.is_empty();
-        match key.keysym {
-            // 字母 a-z / A-Z：一律攒进 buffer 当预编辑 —— 包括 Shift、Caps Lock 打出来的
-            // 大写。打字中途绝不往应用里塞字符：应用这时正处在预编辑状态，对"野生"字符的
-            // 处理不可靠（实测转发 Shift+A 过去，输入框里 A 和 a 都不出现）
-            0x41..=0x5a | 0x61..=0x7a => match char::from_u32(key.keysym) {
-                Some(ch) => {
-                    self.buffer.push(ch);
-                    self.consumed.push(key.keycode);
-                    self.changed()
-                }
-                None => Action::Forward,
-            },
 
+        // 能进组词的字符：一般就是 a-z，双拼方案可能还收分号。
+        // 一律攒进 buffer 当预编辑 —— 包括 Shift、Caps Lock 打出来的大写。
+        // 打字中途绝不往应用里塞字符：应用这时正处在预编辑状态，对"野生"字符的
+        // 处理不可靠（实测转发 Shift+A 过去，输入框里 A 和 a 都不出现）
+        if let Some(ch) = char::from_u32(key.keysym)
+            && self.scheme.accepts(ch.to_ascii_lowercase())
+        {
+            self.buffer.push(ch);
+            self.consumed.push(key.keycode);
+            return self.changed();
+        }
+
+        match key.keysym {
             // 空格：把选中的候选交给应用（nihao → 你好）；没在组词就当普通空格
             KEY_SPACE if composing => self.commit_candidate(key.keycode),
 
@@ -211,12 +257,12 @@ impl Engine {
             KEY_1..=KEY_9 if composing => {
                 let index = (key.keysym - KEY_1) as usize;
                 self.consumed.push(key.keycode);
-                match candidates(&self.buffer).get(index).cloned() {
+                match self.candidates().get(index).cloned() {
                     Some(word) => {
-                        self.clear_composing();
+                        self.pick(&word);
                         Action::Commit(word)
                     }
-                    // 只有 4 个候选却按了 7：当没按过（但也不把数字塞进拼音）
+                    // 候选没那么多却按了这个数字：当没按过（但也不把数字塞进拼音）
                     None => Action::Swallow,
                 }
             }
@@ -235,7 +281,7 @@ impl Engine {
 
     /// 选中项上下走一格（绕圈）
     fn step(&mut self, delta: i32) -> Action {
-        let count = candidates(&self.buffer).len();
+        let count = self.candidates().len();
         if count == 0 {
             return Action::Forward;
         }
@@ -245,15 +291,29 @@ impl Engine {
 
     /// 上屏当前选中的候选
     fn commit_candidate(&mut self, keycode: u32) -> Action {
-        let list = candidates(&self.buffer);
-        let word = list
-            .get(self.selected)
-            .or_else(|| list.first())
-            .cloned()
-            .unwrap_or_default();
+        let candidates = self.candidates();
+        // 一个候选都没有（打的是词库里没有的东西，比如 `aaaa`）：原样上屏，
+        // 不能提交空串 —— 那样用户打的字就凭空消失了
+        let word = match candidates.get(self.selected).or_else(|| candidates.first()) {
+            Some(word) => word.clone(),
+            None => std::mem::take(&mut self.buffer),
+        };
         self.consumed.push(keycode);
-        self.clear_composing();
+        if !word.is_empty() {
+            self.pick(&word);
+        } else {
+            self.clear_composing();
+        }
         Action::Commit(word)
+    }
+
+    /// 用户挑了一个词：记一笔，下次它排得更靠前。
+    /// 这就是"用户使用频率权重"那半边，存在库里的 `user_word` 表
+    fn pick(&mut self, word: &str) {
+        if let Err(e) = self.dict.note_used(word) {
+            eprintln!("ime-aa: 记用户词频失败：{e}");
+        }
+        self.clear_composing();
     }
 }
 
@@ -272,6 +332,13 @@ mod tests {
             shortcut: false,
             active: true,
         }
+    }
+
+    /// 小词库 + 全拼方案
+    fn engine() -> Engine {
+        let dict = dict::testing::sample_dict();
+        let scheme = FullPinyin::new(dict.syllables());
+        Engine::new(dict, Box::new(scheme), 9)
     }
 
     /// 动作里的预编辑串（不是这个动作就 None）
@@ -296,7 +363,7 @@ mod tests {
 
     #[test]
     fn 打_nihao_再空格出你好() {
-        let mut engine = Engine::new();
+        let mut engine = engine();
         assert_eq!(type_letters(&mut engine, "nihao").last().unwrap(), "nihao");
         assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Commit("你好".into()));
         assert_eq!(engine.text(), "");
@@ -304,7 +371,7 @@ mod tests {
 
     #[test]
     fn 预编辑串逐字母长大() {
-        let mut engine = Engine::new();
+        let mut engine = engine();
         assert_eq!(
             type_letters(&mut engine, "nihao"),
             ["n", "ni", "nih", "niha", "nihao"]
@@ -312,21 +379,37 @@ mod tests {
     }
 
     #[test]
+    fn 打到一半就有候选了() {
+        let mut engine = engine();
+        type_letters(&mut engine, "ni");
+        // ni 的候选就是 你/尼/泥…
+        let preedit = engine.preedit();
+        assert_eq!(preedit.candidates[0], "你");
+        assert!(preedit.candidates.contains(&"泥".to_string()));
+        // 再打两个字母，「你好」才出现
+        type_letters(&mut engine, "ha");
+        assert!(
+            engine.preedit().candidates.contains(&"你好".to_string()),
+            "打到 niha 时该已经能看见 你好 了：{:?}",
+            engine.preedit().candidates
+        );
+    }
+
+    #[test]
     fn 候选框跟着输入长大() {
-        let mut engine = Engine::new();
+        let mut engine = engine();
         type_letters(&mut engine, "nihao");
         let preedit = engine.preedit();
         assert_eq!(preedit.text, "nihao");
-        assert_eq!(preedit.candidates, ["你好", "尼好", "妮好", "拟好"]);
+        assert_eq!(preedit.candidates[0], "你好");
         assert_eq!(preedit.selected, 0);
         assert_eq!(preedit.current(), Some("你好"));
     }
 
     #[test]
     fn 没在组词时没有候选() {
-        let mut engine = Engine::new();
+        let mut engine = engine();
         assert!(engine.preedit().candidates.is_empty());
-        // 打一半再全删掉，候选也得跟着没
         type_letters(&mut engine, "n");
         engine.on_key(key(KEY_BACKSPACE));
         assert!(engine.preedit().candidates.is_empty());
@@ -334,65 +417,63 @@ mod tests {
 
     #[test]
     fn 方向键换候选空格上屏选中的() {
-        let mut engine = Engine::new();
-        type_letters(&mut engine, "nihao");
+        let mut engine = engine();
+        type_letters(&mut engine, "ni");
+        let second = engine.preedit().candidates[1].clone();
         // ↓ 选中第二个
-        assert_eq!(
-            text_of(engine.on_key(key(KEY_DOWN))).unwrap(),
-            "nihao" // 换候选不动预编辑串
-        );
+        assert_eq!(text_of(engine.on_key(key(KEY_DOWN))).unwrap(), "ni");
         assert_eq!(engine.preedit().selected, 1);
-        assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Commit("尼好".into()));
+        assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Commit(second));
     }
 
     #[test]
     fn tab_也能翻候选() {
-        let mut engine = Engine::new();
-        type_letters(&mut engine, "nihao");
+        let mut engine = engine();
+        type_letters(&mut engine, "ni");
         engine.on_key(key(KEY_TAB));
         engine.on_key(key(KEY_TAB));
         assert_eq!(engine.preedit().selected, 2);
-        // Shift+Tab 往回走一格
         engine.on_key(key(KEY_ISO_LEFT_TAB));
         assert_eq!(engine.preedit().selected, 1);
         // ↑ 走到头会绕回最后一个
         engine.on_key(key(KEY_UP));
         engine.on_key(key(KEY_UP));
-        assert_eq!(engine.preedit().selected, 3);
+        assert_eq!(
+            engine.preedit().selected,
+            engine.preedit().candidates.len() - 1
+        );
     }
 
     #[test]
     fn 数字直接选词上屏() {
-        let mut engine = Engine::new();
-        type_letters(&mut engine, "nihao");
-        assert_eq!(engine.on_key(key(0x33)), Action::Commit("妮好".into())); // '3'
+        let mut engine = engine();
+        type_letters(&mut engine, "ni");
+        let third = engine.preedit().candidates[2].clone();
+        assert_eq!(engine.on_key(key(0x33)), Action::Commit(third)); // '3'
         assert_eq!(engine.text(), "");
     }
 
     #[test]
     fn 数字超出候选范围就什么都别发生() {
-        let mut engine = Engine::new();
-        type_letters(&mut engine, "nihao"); // 只有 4 个候选
+        let mut engine = engine();
+        type_letters(&mut engine, "ni");
         assert_eq!(engine.on_key(key(0x39)), Action::Swallow); // '9'
-        assert_eq!(engine.text(), "nihao"); // 没被提交，也没混进拼音
+        assert_eq!(engine.text(), "ni"); // 没被提交，也没混进拼音
     }
 
     #[test]
     fn 退格之后选中回到第一个() {
-        let mut engine = Engine::new();
+        let mut engine = engine();
         type_letters(&mut engine, "nihao");
         engine.on_key(key(KEY_DOWN));
         assert_eq!(engine.preedit().selected, 1);
         engine.on_key(key(KEY_BACKSPACE));
         assert_eq!(engine.preedit().selected, 0);
-        // "niha" 查不到，候选只剩原文一条，选中的还是第一个
-        assert_eq!(engine.preedit().candidates, ["niha"]);
-        assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Commit("niha".into()));
     }
 
     #[test]
     fn 退格删掉一个字符() {
-        let mut engine = Engine::new();
+        let mut engine = engine();
         type_letters(&mut engine, "nihaox");
         assert_eq!(text_of(engine.on_key(key(KEY_BACKSPACE))).unwrap(), "nihao");
         assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Commit("你好".into()));
@@ -400,14 +481,14 @@ mod tests {
 
     #[test]
     fn 查不到的词原样提交() {
-        let mut engine = Engine::new();
+        let mut engine = engine();
         type_letters(&mut engine, "abc");
         assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Commit("abc".into()));
     }
 
     #[test]
     fn 大写字母也待在预编辑里() {
-        let mut engine = Engine::new();
+        let mut engine = engine();
         type_letters(&mut engine, "aaa");
         // Shift+A：keysym 是 'A'（0x41），协议层翻译时就带上了修饰键的影响
         assert_eq!(text_of(engine.on_key(key(0x41))).unwrap(), "aaaA");
@@ -416,7 +497,7 @@ mod tests {
 
     #[test]
     fn caps_lock_的大写照样能转拼音() {
-        let mut engine = Engine::new();
+        let mut engine = engine();
         // Caps Lock 打开：keysym 全是大写
         assert_eq!(type_letters(&mut engine, "NIHAO").last().unwrap(), "NIHAO");
         // 查表大小写不敏感
@@ -425,7 +506,7 @@ mod tests {
 
     #[test]
     fn 回车提交不把回车给应用() {
-        let mut engine = Engine::new();
+        let mut engine = engine();
         type_letters(&mut engine, "nihao");
         assert_eq!(
             engine.on_key(key(KEY_RETURN)),
@@ -437,7 +518,7 @@ mod tests {
 
     #[test]
     fn esc_取消组词且不转发() {
-        let mut engine = Engine::new();
+        let mut engine = engine();
         type_letters(&mut engine, "nihao");
         assert_eq!(
             engine.on_key(key(KEY_ESCAPE)),
@@ -450,41 +531,15 @@ mod tests {
 
     #[test]
     fn 没在组词时空格方向键数字都转发() {
-        let mut engine = Engine::new();
+        let mut engine = engine();
         for keysym in [KEY_SPACE, KEY_DOWN, KEY_UP, KEY_TAB, 0x31] {
             assert_eq!(engine.on_key(key(keysym)), Action::Forward);
         }
     }
 
     #[test]
-    fn 上屏之后那个键的抬起照样吃掉() {
-        let mut engine = Engine::new();
-        type_letters(&mut engine, "nihao");
-        // 真键盘上空格是 keycode 57
-        let mut space = key(KEY_SPACE);
-        space.keycode = 57;
-        assert_eq!(engine.on_key(space), Action::Commit("你好".into()));
-        // 抬起不能漏给应用：应用会收到"没按下过就直接抬起"
-        assert_eq!(
-            engine.on_key(KeyInput {
-                pressed: false,
-                ..space
-            }),
-            Action::Swallow
-        );
-        // 再抬一次账本已经清了，转发
-        assert_eq!(
-            engine.on_key(KeyInput {
-                pressed: false,
-                ..space
-            }),
-            Action::Forward
-        );
-    }
-
-    #[test]
     fn 快捷键一律转发() {
-        let mut engine = Engine::new();
+        let mut engine = engine();
         type_letters(&mut engine, "nihao");
         let ctrl_a = KeyInput {
             shortcut: true,
@@ -497,7 +552,7 @@ mod tests {
 
     #[test]
     fn 没有输入框时全部转发() {
-        let mut engine = Engine::new();
+        let mut engine = engine();
         let inactive = KeyInput {
             active: false,
             ..key(0x61)
@@ -508,12 +563,11 @@ mod tests {
 
     #[test]
     fn 吃掉的键连抬起一起吃掉() {
-        let mut engine = Engine::new();
+        let mut engine = engine();
         let mut pressed = key(0x61);
         pressed.keycode = 30;
         assert!(matches!(engine.on_key(pressed), Action::UpdatePreedit(_)));
 
-        // 同一个 keycode 的抬起：吃掉
         let released = KeyInput {
             pressed: false,
             ..pressed
@@ -524,10 +578,25 @@ mod tests {
     }
 
     #[test]
-    fn 没吃过的键抬起要转发() {
-        let mut engine = Engine::new();
+    fn 上屏之后那个键的抬起照样吃掉() {
+        let mut engine = engine();
         type_letters(&mut engine, "nihao");
-        // Shift（keysym 0xffe1）从来没被吃掉，抬起该转发
+        let mut space = key(KEY_SPACE);
+        space.keycode = 57;
+        assert_eq!(engine.on_key(space), Action::Commit("你好".into()));
+        assert_eq!(
+            engine.on_key(KeyInput {
+                pressed: false,
+                ..space
+            }),
+            Action::Swallow
+        );
+    }
+
+    #[test]
+    fn 没吃过的键抬起要转发() {
+        let mut engine = engine();
+        type_letters(&mut engine, "nihao");
         let shift_up = KeyInput {
             keysym: 0xffe1,
             pressed: false,
@@ -538,20 +607,48 @@ mod tests {
 
     #[test]
     fn reset_清空组词和账本() {
-        let mut engine = Engine::new();
+        let mut engine = engine();
         let mut pressed = key(0x61);
         pressed.keycode = 30;
         engine.on_key(pressed);
         engine.reset();
         assert_eq!(engine.text(), "");
         assert_eq!(engine.preedit().selected, 0);
-        // 账本也清了：抬起要转发
         assert_eq!(
             engine.on_key(KeyInput {
                 pressed: false,
                 ..pressed
             }),
             Action::Forward
+        );
+    }
+
+    #[test]
+    fn 用户选过的词下次排前面() {
+        let mut engine = engine();
+        type_letters(&mut engine, "ni");
+        assert_eq!(engine.preedit().candidates[0], "你");
+        engine.on_key(key(KEY_ESCAPE)); // 先取消这次组词，否则下面会接着往后打
+
+        // 连选三次「泥」。注意每次都得重新找它在第几个 ——
+        // 选过一次它就会往前挪，这正是要验的东西
+        for _ in 0..3 {
+            type_letters(&mut engine, "ni");
+            let index = engine
+                .preedit()
+                .candidates
+                .iter()
+                .position(|word| word == "泥")
+                .expect("候选中该有「泥」");
+            engine.on_key(key(0x31 + index as u32)); // 数字键选它
+        }
+
+        type_letters(&mut engine, "ni");
+        assert_eq!(
+            engine.preedit().candidates[0],
+            "泥",
+            "选过三次的词该压过「你」排第一：{:?}",
+            engine.preedit().candidates
         );
     }
 }

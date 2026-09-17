@@ -60,7 +60,7 @@ pub fn run(engine: Engine, options: Options) -> Result<(), Box<dyn Error>> {
     let mut queue = conn.new_event_queue();
     let qh = queue.handle();
     let mut state = State {
-        engine,
+        engine: Some(engine),
         debug,
         // 找字体要扫系统字体目录（几十毫秒），放启动时做，别卡在第一次敲键上
         painter: Some(Painter::new()),
@@ -145,24 +145,33 @@ struct State {
     /// 合成器告知的光标矩形（相对候选框），只是提示
     caret: (i32, i32, i32, i32),
 
-    /// 组词逻辑（拼音 buffer、词表、按键账本）
-    engine: Engine,
+    /// 引擎（按键状态机 + 输入方案 + 词库）。
+    /// Option 只是为了 State::default() 能编译 —— 引擎要开词库、找字体，没法 Default；
+    /// run() 一定会把它塞进来
+    engine: Option<Engine>,
     debug: bool,
     quit: bool,
 }
 
 impl State {
+    /// 引擎（run() 之前不该有人调用）
+    fn engine(&mut self) -> &mut Engine {
+        self.engine.as_mut().expect("引擎还没放进来")
+    }
+
     // ---- 把引擎的决定翻译成协议请求 ----------------------------------------
 
     /// 处理一个已经翻译好的按键：问引擎该干什么，然后照做
     fn handle_key(&mut self, keycode: u32, keysym: u32, pressed: bool) {
-        let action = self.engine.on_key(KeyInput {
+        // 先把修饰键状态读出来，再借引擎（不然同时可变+不可变借用同一个 self）
+        let input = KeyInput {
             keycode,
             keysym,
             pressed,
             shortcut: self.shortcut_mods,
             active: self.active,
-        });
+        };
+        let action = self.engine().on_key(input);
         if self.debug {
             match &action {
                 Action::UpdatePreedit(preedit) if preedit.candidates.is_empty() => {
@@ -379,7 +388,7 @@ impl Dispatch<im::ZwpInputMethodV2, ()> for State {
             // 焦点离开输入框：按住没放的键不会再有抬起事件，账本一起清掉
             im::Event::Deactivate => {
                 state.active = false;
-                state.engine.reset();
+                state.engine().reset();
                 state.sync_popup(&Preedit::default());
             }
 
@@ -444,13 +453,13 @@ impl Dispatch<grab::ZwpInputMethodKeyboardGrabV2, ()> for State {
                 };
                 state.refresh_mods();
                 if state.debug {
+                    let preedit = state.engine().text().to_string();
                     eprintln!(
-                        "ime-aa: 收到 keycode={key} keysym=0x{keysym:04x} {}（shift={} caps={} ctrl/alt/super={} 预编辑={:?}）",
+                        "ime-aa: 收到 keycode={key} keysym=0x{keysym:04x} {}（shift={} caps={} ctrl/alt/super={} 预编辑={preedit:?}）",
                         if pressed { "按下" } else { "抬起" },
                         state.shift_held,
                         state.caps_lock,
                         state.shortcut_mods,
-                        state.engine.text()
                     );
                 }
                 state.handle_key(key, keysym, pressed);

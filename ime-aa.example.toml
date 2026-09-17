@@ -1,0 +1,27 @@
+# ime-aa 配置示例
+#
+# 复制到 ~/.config/ime-aa/config.toml 就会生效（也可以放在别处，
+# 用 IME_AA_CONFIG=/path/to/config.toml 指过去）。删掉这个文件也能跑，用内置默认值。
+
+# ---- 输入方案 ---------------------------------------------------------------
+[scheme]
+# full-pinyin    全拼：nihao + 空格 → 你好
+# double-pinyin  双拼：两键一个音节，nihc（自然码）→ 你好
+# table          码表方案：五笔、郑码、仓颉这类"键本身就是码"的
+kind = "full-pinyin"
+
+# 双拼键位，只在 kind = "double-pinyin" 时看：
+#   natural = 自然码（搜狗/QQ 拼音默认）   flypy = 小鹤   mspy = 微软双拼
+# layout = "natural"
+
+# 码表在词库里的名字，只在 kind = "table" 时看。
+# 码表要用 ime-dict 导进去：--table 码表.txt --table-scheme wubi
+# name = "wubi"
+
+# ---- 词库 -------------------------------------------------------------------
+[dict]
+# SQLite 词库文件（用 ime-dict 生成，见 README）
+# path = "~/.local/share/ime-aa/dict.db"
+
+# 候选框里最多显示几个候选（要翻页的话再调大，数字键 1-9 直接选）
+# max_candidates = 9

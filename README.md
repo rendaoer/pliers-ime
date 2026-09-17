@@ -1,8 +1,15 @@
 # ime-aa
 
-最小可用的 Wayland 中文输入法例子：敲 `nihao` + 空格 → 输出「你好」，组词时输入框旁边
-弹出一块候选框，里面是「你好 尼好 妮好 拟好」，`↓`/`Tab` 或数字 `1`–`9` 挑，
-空格上屏选中的那个。没有词库、没有拼音引擎、没有 GUI 框架。
+最小可用的 Wayland 中文输入法：敲 `nihao` + 空格 → 输出「你好」，组词时输入框旁边弹出
+候选框，`↓`/`Tab` 或数字 `1`–`9` 挑，空格上屏选中的那个。
+
+* **全拼**是完整实现的：150 万词的词库、音节切分、词频排序、用户调频
+* **双拼 / 五笔**留好了位置：双拼（自然码/小鹤/微软）已经能用，五笔是"码表方案"那条路
+* **行为都在配置文件里**（TOML）：换方案、换词库、改候选个数都不用改代码
+* **词库在 SQLite 里**：用 [turso](https://github.com/tursodatabase/turso)（Rust 写的 SQLite）读写，
+  带权重字段，加词/调权重/看数据都能直接用 SQL
+
+没有 GUI 框架：候选框是自己往 `wl_shm` 画像素（见「候选框是怎么做出来的」）。
 
 它直接用 `wayland-client` 跟合成器说协议，不经过 imekit 之类的封装 —— 因为候选框要用
 `zwp_input_popup_surface_v2`，而那个 surface 必须在**创建它的那条连接**上画。
@@ -13,20 +20,35 @@
 
 | crate | 管什么 | 依赖 |
 | --- | --- | --- |
-| `crates/ime-engine` | 按键 → 决定：组词 buffer、候选词、按键账本、什么时候提交 | 无（纯逻辑，可单测） |
-| `crates/ime-popup` | 候选框长什么样：找字体、排版、画像素、共享内存文件 | ab_glyph / fontdb + ime-engine |
+| `crates/ime-engine` | 按键状态机 + 输入方案（全拼/双拼/码表）+ 词库 + 配置 | turso / toml / serde |
+| `crates/ime-popup` | 候选框长什么样：找字体、排版、画像素、共享内存文件 | ab_glyph / fontdb |
 | `crates/ime-wayland` | 跟合成器说协议：注册、抓键盘、转发按键、贴候选框 | wayland-client / xkbcommon |
-| `crates/ime-aa` | `main()`：把上面几个拼起来 | ime-engine + ime-wayland |
+| `crates/ime-aa` | `main()`：读配置、把上面几个拼起来 | ime-engine + ime-wayland |
+| `crates/ime-dict` | 导入工具：词表 + 词频表 → SQLite 词库 | turso |
 
 ```
 ime-engine  ←──┬──  ime-popup  ──┐
                └────────────────┴──  ime-wayland  ←──  ime-aa (bin)
+     ▲
+     └──  ime-dict (bin)：往词库里灌数据
 ```
 
-这么切的好处：**词表、组词规则、候选框长相都能脱离合成器跑测试**，而协议层里剩下的
-全是"Wayland 要求这么做"的东西。想改哪块就只动哪块：
+`ime-engine` 里面按"一件小事一个文件"分：
 
-* 加个词 → `crates/ime-engine/src/dict.rs` 的 `DICT`
+| 文件 | 管什么 |
+| --- | --- |
+| `lib.rs` | 按键状态机：什么键进 buffer、什么时候上屏、按键账本 |
+| `scheme.rs` | 输入方案：[`Scheme`] trait + 全拼 / 双拼 / 码表三套实现 |
+| `pinyin.rs` | 音节切分：`nihao` → `ni hao`，`nih` → `ni ha?` 补全 |
+| `dict.rs` | SQLite 词库：建表、查词、记用户词频 |
+| `config.rs` | 读 TOML 配置 |
+
+这么切的好处：**输入方案、词库、候选框长相都能脱离合成器跑测试**（52 个单测），
+协议层里剩下的全是"Wayland 要求这么做"的东西。想改哪块就只动哪块：
+
+* 加词 / 调词频 → 用 SQL 改词库，或者重新跑一遍 `ime-dict`
+* 换输入方案（双拼、五笔）→ 改 `~/.config/ime-aa/config.toml`
+* 加一套新方案（郑码、仓颉、注音）→ 在 `crates/ime-engine/src/scheme.rs` 里实现 `Scheme`
 * 换个候选框长相（甚至换成 egui/Slint 画）→ `crates/ime-popup`
 * 加协议功能（比如 `delete_surrounding_text`）→ `crates/ime-wayland`
 
@@ -48,12 +70,42 @@ ime-engine  ←──┬──  ime-popup  ──┐
 发来的 XKB 键盘布局 + xkbcommon；同一份布局还会原样转给虚拟键盘，这样应用收到的字符
 跟真实键盘布局一致。
 
+## 先导入词库（只做一次）
+
+词库不在仓库里（150 万词，上百 MB），得自己生成：拿一份拼音词表 + 一份词频表灌进 SQLite。
+
+```bash
+# 词频表：jieba 的（MIT 许可，35 万词带频次）。没有它也能导入，
+# 只是所有词的权重都一样，排序会很难看（打 shijian 第一个出「世鉴」）
+curl -o jieba-dict.txt https://raw.githubusercontent.com/fxsjy/jieba/master/jieba/dict.txt
+
+cargo run -p ime-dict --release -- \
+    --source ~/Downloads/CustomPinyinDictionary_IBus.txt \
+    --freq   jieba-dict.txt \
+    --out    ~/.local/share/ime-aa/dict.db
+```
+
+三份数据各管一件事（`--source` 是**唯一**必需的参数）：
+
+| 来源 | 提供 | 为什么需要 |
+| --- | --- | --- |
+| IBus 拼音词表 | 150 万条「词 + 拼音」 | 词库本体 |
+| jieba 词频表 | 权重 | 词表本身**没有词频**，不给权重就只能按拼音字典序排 |
+| 词表自己 | 单字 | 表里全是 2 字以上的词，单字靠"字↔音节"对齐推出来 |
+
+导入一次大概几分钟（`--release` 快很多），生成的库 ~100 MB。之后想加词就直接写 SQL：
+
+```bash
+sqlite3 ~/.local/share/ime-aa/dict.db \
+  "INSERT OR REPLACE INTO word (scheme, code, text, weight) VALUES ('pinyin','ni hao','你好',3000000);"
+```
+
 ## 运行与测试
 
 ```bash
 cargo run                  # 跑主程序（workspace 里默认就跑 ime-aa）
-cargo test --workspace     # 引擎 + 候选框的单测（44 个，不需要合成器）
-cargo test -p ime-engine   # 只看组词逻辑
+cargo test --workspace     # 引擎 + 候选框的单测（52 个，不需要合成器、不需要词库）
+cargo test -p ime-engine   # 只看引擎：切词、方案、词库、按键状态机
 ./tools/run_mock_tests.sh  # 拿 mock 合成器把 15 个场景跑一遍（含候选框像素）
 ```
 
@@ -84,7 +136,7 @@ IME_AA_DEBUG=1 cargo run
 | `a`–`z` / `A`–`Z`（Shift、Caps Lock 打出来的大写也一样） | 攒进 buffer，用 `set_preedit_string` 显示为预编辑文本 —— 打字中途**不会**往应用里塞任何字符 |
 | 空格 | 有内容就把**选中的候选**提交（`nihao` → 你好，大小写不敏感，`NIHAO` 也算），否则当普通空格转发给应用 |
 | `↓` / `Tab` / `↑` / `Shift+Tab` | 换候选（绕圈）。组词当中方向键不去动输入框里的光标 |
-| `1`–`9` | 直接选第几个候选上屏（`nihao2` → 尼好）；超出候选个数就什么也不做 |
+| `1`–`9` | 直接选第几个候选上屏；超出候选个数就什么也不做 |
 | 回车 / 小键盘回车 | 有内容就原样提交，**不**把回车给应用（免得顺手提交表单） |
 | Esc | 有内容就取消这次组词，这个键谁也不给（免得顺手退出全屏） |
 | 退格 | 删掉一个字符 |
@@ -92,17 +144,115 @@ IME_AA_DEBUG=1 cargo run
 | 其他键 | 用虚拟键盘原样转发，普通打字不受影响 |
 
 所以 `aaaa` 之后按住 Shift 敲 `AAAA`，预编辑里就是 `aaaaAAAA`（候选框跟着变长），
-按空格/回车才整体落到输入框；查不到词表的内容原样提交，大小写照旧保留。
+按空格/回车才整体落到输入框；查不到的内容原样提交，大小写照旧保留。
 
-要加词，就改 `crates/ime-engine/src/dict.rs` 里的 `DICT` —— 每个拼音对应**一串**候选，
-第一个是主候选（空格直接上屏的那个）：
+### 输入方案（配置文件）
 
-```rust
-pub const DICT: &[(&str, &[&str])] = &[
-    ("nihao", &["你好", "尼好", "妮好", "拟好"]),
-    // ...
-];
+行为定义在 `~/.config/ime-aa/config.toml`（模板见仓库根目录 `ime-aa.example.toml`）：
+
+```toml
+[scheme]
+kind = "full-pinyin"      # full-pinyin | double-pinyin | table
+
+[dict]
+# path = "~/.local/share/ime-aa/dict.db"
+# max_candidates = 9
 ```
+
+**双拼**已经能用，键位是照 Rime 的方案文件推的：
+
+```toml
+[scheme]
+kind = "double-pinyin"
+layout = "natural"        # natural(自然码) | flypy(小鹤) | mspy(微软双拼)
+```
+
+自然码下 `nihk` → 你好（`hao` 在 `k` 键上），小鹤是 `nihc`。多音字、零声母
+（`ang` → `ah`）这些规则都在 `crates/ime-engine/src/scheme.rs` 的 `encode()` 里，
+一个音节两键，推不出两键的音节说明那套键位没设计它。
+
+**五笔**（以及郑码、仓颉这类码表方案）走 `table`：
+
+```toml
+[scheme]
+kind = "table"
+name = "wubi"             # 词库里 word.scheme 用哪个名字
+```
+
+码表用 ime-dict 的 `--table` 导入：`--table wubi.txt --table-scheme wubi`
+（每行 `词<TAB>码[<TAB>权重]`，rime 那种 .txt 码表就是这个格式）。仓库里**没有**带码表数据，
+所以这条路目前只有骨架。
+
+## 词库为什么是 SQLite，以及全拼是怎么查的
+
+这一节是踩出来的，如果你要自己写一个输入法，**建议照这个思路走**。
+
+### 一条反直觉的结论：拼音查询不能交给 SQL
+
+最自然的写法是把拼音存成 `nihao`（或者 `ni hao`），然后：
+
+```sql
+SELECT text FROM word WHERE code LIKE 'ni%' ORDER BY weight DESC LIMIT 9
+```
+
+在 20 万行的表上实测（`cargo run -p ime-engine --example turso_bench` 可以自己跑一遍）：
+
+| 查询 | 耗时 | 说明 |
+| --- | --- | --- |
+| `code = 'ni hao'` | **64 µs** | 精确匹配，走索引，随便打 |
+| `code LIKE 'ni ha%'` | 46 µs | 范围很窄，还行 |
+| `code LIKE 'ni%'` | **280 ms** | 扫出几万行再排序 —— 打一个字母卡半秒 |
+| 建索引（20 万行） | 40 s | 所以导入是分钟级的 |
+
+`ni%` 这种宽前缀是致命的：**输入法每敲一个键都要查一次**。所以正确的分工是：
+
+* **切词在内存里做**（`pinyin.rs`，412 个音节，几微秒）：`nihao` → `ni hao`，
+  `nih` → 尾巴 `h` 补成 `ha/hai/…/hao`
+* **数据库只回答"这个完整的码对应哪些词"**（`dict.rs`，每次 60 µs 上下）
+* 一次输入对应好几个码（`xian` 既是「先」也是「西安」；`nih` 要试 20 多个补全），
+  查完在 Rust 里**按分数合并去重**（`scheme.rs` 的 `merge()`）
+
+一次按键最多查 32 个码（`MAX_CODES`），最坏情况 2 ms 上下 —— 打不卡。
+
+### 表结构
+
+```sql
+word(scheme, code, text, weight)    -- 词库本体：scheme='pinyin' / 'wubi' / …
+user_word(text, count, last_used)   -- 用户选过多少次（调频用）
+syllable(syl)                       -- 412 个合法音节，切词用
+meta(key, value)                    -- 词库来源、导入时间
+```
+
+* `scheme` 字段就是"多方案"的落点：一套方案一批行，互不干扰
+* 词库是**只读的派生物**：重新导入不会碰 `user_word`，用户习惯留得住
+* 权重 = 词频（jieba 频次 ×10）+ 用户选过的次数 ×100 万（最多算 50 次）。
+  所以选过十次的词能压过绝大多数常用词，但压不过「的」「你」这种顶级高频词 ——
+  避免误选一次就再也翻不了身
+
+排序就是一句 SQL：
+
+```sql
+SELECT w.text, w.weight + MIN(COALESCE(u.count, 0), 50) * 1000000 AS score
+FROM word w LEFT JOIN user_word u ON u.text = w.text
+WHERE w.scheme = ?1 AND w.code = ?2
+ORDER BY score DESC LIMIT ?3
+```
+
+选中的词会在 `Engine::pick()` 里写一笔 `user_word`，下次它自己就往前排了 ——
+这就是"用户使用频率权重"。
+
+### 全拼的几条规矩
+
+| 输入 | 查什么 | 为什么 |
+| --- | --- | --- |
+| `nihao` | `ni hao` | 完整切分，精确匹配 |
+| `xian` | `xian` + `xi an` | 歧义切法都查，「先」和「西安」都能出来 |
+| `nih` | `ni ha`…`ni hao` | 尾巴没打完，补全音节 |
+| `shiji` | `shi ji` + `shi jian`/`shi jie`… | 多音节时最后一个音节往后补，「时间」「世界」提前出现 |
+| `ni` | 只查 `ni` | **单个完整音节不联想**，否则打 `ni` 会冒出一堆「年/牛/您」 |
+
+多音字只保留**主读音**（从 150 万条词里统计哪个读音出现最多：的 → de 602 次 vs di 31 次），
+所以「的确」这种次读音打不出来 —— 见「已知不足」。
 
 ## 几个容易踩的坑
 
@@ -192,13 +342,20 @@ pub const DICT: &[(&str, &[&str])] = &[
 
 ## 已知不足
 
-- 组词当中按 Ctrl/Alt/Super 快捷键时，按键虽然正确转发给应用了，预编辑串还挂在那儿
+* **没有简拼**（`nh` → 你好）、**没有模糊音**（zh=z、an=ang）、**没有联想/整句**。
+  这三样都得再动 `scheme.rs` 和词库索引。
+* **多音字只有主读音**：单字是从双字词里统计出来的（的→de 对，但「的确」的 di 就没了）。
+  真要全，得在导入时给每个字写多条读音。
+* **五笔只有骨架**：码表方案（`Table`）读的是 `scheme='wubi'` 的行，但仓库里没有码表数据；
+  而且码表查询是**前缀**查询（打 `w` 要出所有 w 开头的字），正好是最慢的那种，
+  真要用得在导入时按前缀预先算好 top-N。
+* **导入要几分钟**、库 ~100 MB：turso 建索引不快（20 万行 40 秒）。
+  词库是一次性投入，但如果你改词频想重新导入，得等。
+* 组词当中按 Ctrl/Alt/Super 快捷键时，按键虽然正确转发给应用了，预编辑串还挂在那儿
   （正经输入法会先把拼音提交或取消掉）。
-- 候选超过 9 个要翻页，现在只显示前 9 个（`MAX_ITEMS`）。
-- 词表是手写的十几条，没有拼音切分、词频、模糊音；`nihao` 之外的词得自己往 `DICT` 里加。
-- 缩放只取整数倍（1.5x 的屏幕用 2 倍 buffer 再让合成器缩回去，够清楚但不是像素级完美）；
-  要做到完美得配 `wp_fractional_scale_v1` + `wp_viewporter`。
-- 字体只加载一套，没有逐字回退：某个字缺字形就是空白。
+* 候选超过 `max_candidates` 个要翻页，现在只显示前 N 个。
+* 缩放只取整数倍（1.5x 的屏幕用 2 倍 buffer 再让合成器缩回去，够清楚但不是像素级完美）。
+* 字体只加载一套，没有逐字回退：某个字缺字形就是空白。
 
 ## 联调工具（可选，不需要就删掉 `tools/`）
 
@@ -213,15 +370,16 @@ wl_compositor / wl_shm / zwp_input_method_v2 / zwp_virtual_keyboard_v1 的够用
 MOCK_PNG=target/popup.png ./tools/run_mock_tests.sh   # 顺便存一张候选框实拍
 ```
 
-也可以单跑一个场景，第二、三个参数是「要喂的按键」和「期望提交的文本」
-（上面那串宽度里 300 是 `ni` —— 它本身就是词表里的词，一次冒出 5 个候选，框就宽了）：
+它默认用 `target/dict.db` 那份词库，也可以用 `IME_AA_DICT=/path/dict.db` 换。
+
+也可以单跑一个场景，第二、三个参数是「要喂的按键」和「期望提交的文本」：
 
 ```bash
 python3 tools/mock_compositor.py /tmp/mock-wl "nihao " 你好 &
-WAYLAND_DISPLAY=/tmp/mock-wl cargo run
+IME_AA_DICT=target/dict.db WAYLAND_DISPLAY=/tmp/mock-wl cargo run
 # mock: pre-edit updates: ['n', 'ni', 'nih', 'niha', 'nihao', '']
-# mock: popup shown     : [(64, 42), (300, 42), (80, 42), (91, 42), (318, 42)]
-# mock: 框里数出 537 个笔画像素（不透明 13298）
+# mock: popup shown     : [(90, 42), (168, 42), (318, 42), (318, 42), (318, 42)]
+# mock: 框里数出 581 个笔画像素（不透明 13298）
 # mock: PASS: committed '你好', expected '你好', popup ok
 ```
 
@@ -232,8 +390,8 @@ modifiers 事件都不发"）：
 | 场景 | 喂什么 | 验什么 |
 | --- | --- | --- |
 | `active` | `nihao ` | 提交「你好」，候选框宽度随候选变化、框里有字 |
-| `pick` | `nihao2` | 数字选词直接上屏「尼好」，按键连抬起都不转发 |
-| `nav` | `nihao` + `↓` + 空格 | 换候选不改预编辑串，提交「尼好」 |
+| `pick` | `nihao2` | 数字选词直接上屏第 2 个候选（词库里是「倪浩」），按键连抬起都不转发 |
+| `nav` | `nihao` + `↓` + 空格 | 换候选不改预编辑串，提交第 2 个候选 |
 | `hidpi` | 同 `active`，但客户端带 `IME_AA_SCALE=2` | 候选框按 2 倍像素画（高 84）且发了 `set_buffer_scale(2)` |
 | `inactive` | `nihao ` | 先发 `deactivate`：12 个按键事件全部原样转发、零提交、候选框一次都不弹 |
 | `shortcut` | Ctrl+A / Ctrl+C | 8 个事件全部转发，不能被当成拼音吃掉 |
@@ -242,3 +400,24 @@ modifiers 事件都不发"）：
 | `enter` / `escape` | `nihao` + 回车 / Esc | 原样提交 / 取消，按键不给应用 |
 
 （`\x08` 是退格、`\x1b` 是 Esc。）
+
+## 调词库/看候选：`lookup`
+
+想确认"打某个拼音到底会出哪些候选、每个键花多久"，不用开输入法：
+
+```bash
+cargo run -p ime-engine --release --example lookup -- shijian
+# 方案 pinyin，词库 /home/dao/.local/share/ime-aa/dict.db（打开用了 1.2ms）
+#
+# s             1.50ms   [上] 说 三 省 手 谁 受 水 山
+# sh            1.13ms   [是] 上 说 时 使 事 市 省 手
+# shi          154.46µs  [是] 时 使 事 市 式 师 石 十
+# shij         974.04µs  [时间] 世界 世纪 实际 事件 实践 始建 时机 使劲
+# shiji        775.36µs  [时间] 世界 世纪 实际 事件 实践 始建 时机 使劲
+# shijia       566.44µs  [时间] 事件 实践 始建 世间 世家 施加 视角 市郊
+# shijian      842.39µs  [时间] 事件 实践 始建 世间 石匠 识见 诗笺 尸检
+#
+# 空格 → Commit("时间")
+```
+
+加词、改权重之后用它看效果最快。`--config 别的.toml` 可以换一套方案/词库试试。

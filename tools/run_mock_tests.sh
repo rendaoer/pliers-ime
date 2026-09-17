@@ -11,6 +11,12 @@ cd "$(dirname "$0")/.."
 cargo build -q || exit 1
 
 SOCK="/tmp/ime-aa-mock-$$.sock"
+# 词库：默认用仓库里导入好的那份（装到 ~/.local/share/ime-aa/ 之后就不用设了）
+DICT="${IME_AA_DICT:-$PWD/target/dict.db}"
+if [ ! -f "$DICT" ]; then
+    echo "找不到词库 $DICT，先跑：cargo run -p ime-dict -- --freq target/jieba-dict.txt --out target/dict.db"
+    exit 1
+fi
 LOGS="$(mktemp -d)"
 pass=0
 fail=0
@@ -24,7 +30,7 @@ run() { # run <名字> <按键> <期望提交> <模式> [额外环境变量]
     MOCK_PNG="$png" python3 tools/mock_compositor.py "$SOCK" "$keys" "$expect" "$mode" >"$log" 2>&1 &
     local mock=$!
     sleep 0.4
-    env $extra WAYLAND_DISPLAY="$SOCK" timeout 30 ./target/debug/ime-aa >>"$log" 2>&1
+    env IME_AA_DICT="$DICT" $extra WAYLAND_DISPLAY="$SOCK" timeout 30 ./target/debug/ime-aa >>"$log" 2>&1
     wait "$mock"
 
     if grep -q "PASS" "$log"; then
@@ -41,8 +47,8 @@ run() { # run <名字> <按键> <期望提交> <模式> [额外环境变量]
 echo "== 正常组词 =="
 run active         "nihao "  你好  active
 run active_nomods  "nihao "  你好  active_nomods
-run pick           "nihao2"  尼好  pick          # 数字选词
-run nav            "nihao"   尼好  nav           # ↓ 换候选再空格
+run pick           "nihao2"  倪浩  pick          # 数字选词（第 2 个候选）
+run nav            "nihao"   倪浩  nav           # ↓ 换候选再空格
 run caps           "nihao "  你好  caps          # Caps Lock 打的大写
 run enter          "nihao"   nihao enter         # 回车提交原文
 run escape         "nihao"   ""    escape        # Esc 取消

@@ -37,6 +37,9 @@ use xkbcommon::xkb;
 
 const KEY_SPACE: u32 = 0x20;
 const KEY_BACKSPACE: u32 = 0xff08;
+const KEY_RETURN: u32 = 0xff0d;
+const KEY_KP_ENTER: u32 = 0xff8d;
+const KEY_ESCAPE: u32 = 0xff1b;
 const KEYMAP_FORMAT_XKB_V1: u32 = 1; // wl_keyboard.keymap_format 里的 XKB_V1
 
 // 候选框长什么样：一共就一块背景 + 一根跟着拼音变长的色条
@@ -67,6 +70,20 @@ struct State {
     active: bool, // 现在有输入框在用吗（没有的话按键只能原样转发）
     serial: u32,  // 收到过几次 done；commit 的 serial 必须等于这个数
     time: u32,    // 最近一次按键的时间戳，转发按键时要带上
+    // Ctrl/Alt/Super 正按着：这时的字母键是快捷键（Ctrl+A 全选、Ctrl+C 中断……），
+    // 不能拿去组词。注意 key_get_one_sym() 不做 Control 变换：按住 Ctrl 时 'a' 解出来
+    // 仍然是 0x61，只有 key_get_utf8() 才会给 \x01，所以只能靠修饰键状态来区分。
+    shortcut_mods: bool,
+    // Shift 正按着 / Caps Lock 开着：现在只影响"打出来的是大写还是小写字母"
+    //（keysym 会不一样），攒进 buffer 的都是用户看到的那个字符。
+    // 留着主要是给调试日志看，另外以后要做"Shift 切英文模式"也用得上
+    shift_held: bool,
+    caps_lock: bool,
+    // IME_AA_DEBUG=1 时把每个按键的判定打到 stderr，排查按键问题时开
+    debug: bool,
+    // 上一次同步给虚拟键盘的修饰键掩码（depressed, latched, locked, group）。
+    // 应用要靠虚拟键盘的 modifiers 请求才知道 Shift/Ctrl 按着没有，变了才发
+    last_mods: (u32, u32, u32, u32),
 
     // 候选框
     popup: Option<Popup>,
@@ -82,7 +99,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let conn = Connection::connect_to_env()?;
     let mut queue = conn.new_event_queue();
     let qh = queue.handle();
-    let mut state = State::default();
+    let mut state = State {
+        debug: std::env::var_os("IME_AA_DEBUG").is_some(),
+        ..State::default()
+    };
 
     // 第一次往返：拿回全局对象列表（wl_registry 的 global 事件）
     conn.display().get_registry(&qh, ());
@@ -157,8 +177,64 @@ impl State {
         Popup::new(compositor, shm, im_obj, qh)
     }
 
+    /// 把修饰键掩码同步给虚拟键盘（应用靠它决定 Shift 下该出 'A' 还是 'a'）。
+    /// 没变化就不发，免得每按一个键都灌一遍
+    fn sync_mods_to_vk(&mut self, mods: (u32, u32, u32, u32)) {
+        if mods == self.last_mods {
+            return;
+        }
+        self.last_mods = mods;
+        if self.debug {
+            eprintln!(
+                "ime-aa:   → 虚拟键盘 modifiers(depressed={:#x}, latched={:#x}, locked={:#x}, group={})",
+                mods.0, mods.1, mods.2, mods.3
+            );
+        }
+        if self.vk_ready
+            && let Some(vk) = &self.vk
+        {
+            vk.modifiers(mods.0, mods.1, mods.2, mods.3);
+        }
+    }
+
+    /// 按当前 xkb 状态更新"修饰键标志"，并同步给虚拟键盘。
+    ///
+    /// 我们是**自己**按 keycode 喂 xkb 状态（`update_key`），不指望合成器发
+    /// `Modifiers` 事件：合成器只在"修饰键状态刚变"的那一次按键上才带这个事件
+    /// （smithay 里是 `mods_changed.then_some(...)`），拿它当唯一来源太脆。
+    /// 客户端本来也是这么算字符的：keycode + 自己的 xkb 状态。
+    fn refresh_mods(&mut self) {
+        let Some(xkb) = &self.xkb else { return };
+        let mods = xkb::STATE_MODS_EFFECTIVE;
+        let shortcut = xkb.mod_name_is_active(xkb::MOD_NAME_CTRL, mods)
+            || xkb.mod_name_is_active(xkb::MOD_NAME_ALT, mods)
+            || xkb.mod_name_is_active(xkb::MOD_NAME_LOGO, mods);
+        let shift = xkb.mod_name_is_active(xkb::MOD_NAME_SHIFT, mods);
+        let caps = xkb.mod_name_is_active(xkb::MOD_NAME_CAPS, mods);
+        let masks = (
+            xkb.serialize_mods(xkb::STATE_MODS_DEPRESSED),
+            xkb.serialize_mods(xkb::STATE_MODS_LATCHED),
+            xkb.serialize_mods(xkb::STATE_MODS_LOCKED),
+            xkb.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE),
+        );
+        // 上面借用了 self.xkb，到这里结束，后面才能改 self
+        self.shortcut_mods = shortcut;
+        self.shift_held = shift;
+        self.caps_lock = caps;
+        self.sync_mods_to_vk(masks);
+    }
+
     /// 把按键原样交给应用（通过虚拟键盘）
     fn forward(&self, keycode: u32, pressed: bool) {
+        if self.debug {
+            eprintln!(
+                "ime-aa:   → 转发 keycode={keycode} {}（shift={} caps={} ctrl/alt/super={}）",
+                if pressed { "按下" } else { "抬起" },
+                self.shift_held,
+                self.caps_lock,
+                self.shortcut_mods
+            );
+        }
         if !self.vk_ready {
             return; // 还没拿到键盘布局，转发出去的应用会收到错的字符
         }
@@ -187,23 +263,53 @@ impl State {
             return;
         }
 
+        // 按着 Ctrl/Alt/Super 的时候，什么键都是快捷键，一律原样转发。
+        // 不判断的话 Ctrl+A 会被当成拼音的 'a' 吃掉：Firefox 全选失灵、终端 Ctrl+C 也发不出去
+        if self.shortcut_mods {
+            self.forward(keycode, true);
+            return;
+        }
+
         match keysym {
-            // 字母 a-z：攒进拼音 buffer，并作为预编辑文本显示
-            0x61..=0x7a => {
-                self.buffer.push(keysym as u8 as char);
+            // 字母 a-z / A-Z：一律攒进 buffer 当预编辑 —— 包括 Shift、Caps Lock 打出来的
+            // 大写。打字中途绝不往应用里塞字符：应用这时正处在预编辑状态，对"野生"字符的
+            // 处理不可靠（实测转发 Shift+A 过去，输入框里 A 和 a 都不出现）。
+            // 攒着的这串东西提交时才一起交给应用，所以 aaaaAAAA 会一直待在预编辑里
+            0x41..=0x5a | 0x61..=0x7a => {
+                let ch = char::from_u32(keysym).unwrap_or('?');
+                self.buffer.push(ch);
+                if self.debug {
+                    eprintln!("ime-aa:   → 组词 '{ch}'，拼音变成 {:?}", self.buffer);
+                }
                 self.show_preedit();
                 self.consumed.push(keycode);
             }
 
             // 空格：有拼音就转成汉字提交，没有就当普通空格交给应用
             KEY_SPACE if !self.buffer.is_empty() => {
-                // 想加词就往这个 match 里加；不认识的拼音原样提交
-                let text = match self.buffer.as_str() {
-                    "nihao" => "你好",
-                    other => other,
-                }
-                .to_string();
+                // 想加词就往这个 match 里加。查表大小写不敏感（NIHAO 也算 nihao），
+                // 查不到的原样提交，所以大写英文、混合大小写都会照原样落进输入框
+                let text = match self.buffer.to_ascii_lowercase().as_str() {
+                    "nihao" => "你好".to_string(),
+                    _ => self.buffer.clone(),
+                };
                 self.commit_text(&text);
+                self.consumed.push(keycode);
+            }
+
+            // 回车：把还没转换的拼音原样提交，不把回车交给应用
+            //（否则表单会被顺手提交掉）
+            KEY_RETURN | KEY_KP_ENTER if !self.buffer.is_empty() => {
+                let text = self.buffer.clone();
+                self.commit_text(&text);
+                self.consumed.push(keycode);
+            }
+
+            // Esc：取消这次组词，预编辑串抹掉，也不给应用
+            //（否则会顺手退出全屏、关掉弹窗之类）
+            KEY_ESCAPE if !self.buffer.is_empty() => {
+                self.buffer.clear();
+                self.show_preedit(); // 空串 = 抹掉预编辑，候选框也跟着收起
                 self.consumed.push(keycode);
             }
 
@@ -351,15 +457,37 @@ impl Dispatch<grab::ZwpInputMethodKeyboardGrabV2, ()> for State {
                 ..
             } => {
                 state.time = time;
-                let Some(xkb) = &state.xkb else { return };
-                // Wayland 给的是 evdev 编号，XKB 的编号比它大 8
-                let keysym = xkb.key_get_one_sym(xkb::Keycode::new(key + 8)).raw();
                 let pressed = matches!(key_state, WEnum::Value(wl_keyboard::KeyState::Pressed));
+                // Wayland 给的是 evdev 编号，XKB 的编号比它大 8
+                let keysym = {
+                    let Some(xkb) = &mut state.xkb else { return };
+                    let kc = xkb::Keycode::new(key + 8);
+                    // 用自己的 xkb 状态跟着按键走：Shift/Ctrl/Alt/Caps 都从 keycode 推出来
+                    let dir = if pressed {
+                        xkb::KeyDirection::Down
+                    } else {
+                        xkb::KeyDirection::Up
+                    };
+                    xkb.update_key(kc, dir);
+                    xkb.key_get_one_sym(kc).raw()
+                };
+                state.refresh_mods();
+                if state.debug {
+                    eprintln!(
+                        "ime-aa: 收到 keycode={key} keysym=0x{keysym:04x} {}（shift={} caps={} ctrl/alt/super={} 拼音={:?}）",
+                        if pressed { "按下" } else { "抬起" },
+                        state.shift_held,
+                        state.caps_lock,
+                        state.shortcut_mods,
+                        state.buffer
+                    );
+                }
                 state.on_key(key, keysym, pressed);
             }
 
-            // 修饰键状态（Shift/Ctrl/Alt…）：更新我们自己的布局状态，
-            // 同时同步给虚拟键盘，否则转发出去的 Ctrl+C 之类会变成别的字符
+            // 合成器报的修饰键状态。我们自己的判断不靠它（见 refresh_mods），
+            // 但既然送来了就顺手同步给虚拟键盘 —— 而且它也是"合成器到底发不发这个
+            // 事件"的唯一线索，所以调试模式下打一行
             grab::Event::Modifiers {
                 mods_depressed,
                 mods_latched,
@@ -367,14 +495,13 @@ impl Dispatch<grab::ZwpInputMethodKeyboardGrabV2, ()> for State {
                 group,
                 ..
             } => {
-                if let Some(xkb) = &mut state.xkb {
-                    xkb.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
+                if state.debug {
+                    eprintln!(
+                        "ime-aa: 收到 modifiers 事件 depressed={mods_depressed:#x} latched={mods_latched:#x} locked={mods_locked:#x} group={group}"
+                    );
                 }
-                if state.vk_ready
-                    && let Some(vk) = &state.vk
-                {
-                    vk.modifiers(mods_depressed, mods_latched, mods_locked, group);
-                }
+                // 不动 state.xkb：xkb 文档明确说 update_key 和 update_mask 不要混用
+                state.sync_mods_to_vk((mods_depressed, mods_latched, mods_locked, group));
             }
 
             _ => {}
@@ -525,7 +652,9 @@ impl Dispatch<popup::ZwpInputPopupSurfaceV2, ()> for State {
             && state.caret != (x, y, width, height)
         {
             state.caret = (x, y, width, height);
-            eprintln!("ime-aa: 光标矩形 {width}x{height} @ ({x},{y})（相对候选框左上角）");
+            if state.debug {
+                eprintln!("ime-aa: 光标矩形 {width}x{height} @ ({x},{y})（相对候选框左上角）");
+            }
         }
     }
 }

@@ -260,16 +260,82 @@ def main():
                 # XKB keymap: body is [format][size], the fd is ancillary data.
                 conn.send(grab_id, 0, struct.pack("<II", 1, len(keymap_text)), fds=[keymap_file.fileno()])
                 conn.send(grab_id, 3, struct.pack("<ii", 25, 600))          # repeat_info
-                conn.send(grab_id, 2, struct.pack("<IIIII", 0, 0, 0, 0, 0))  # modifiers
+                if not MODE.endswith("_nomods"):
+                    conn.send(grab_id, 2, struct.pack("<IIIII", 0, 0, 0, 0, 0))  # modifiers
                 if MODE == "inactive":
                     conn.send(im_id, 1)  # deactivate
                     print("mock: sending deactivate before the keys", flush=True)
                 time.sleep(0.3)
-                for ch in KEYS:
-                    code = EVDEV[ch]
-                    for state in (1, 0):  # pressed, released
-                        conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, code, state))
+                # xxx_nomods = 合成器一个 modifiers 事件都不发（真机上的情况），
+                # 用来验证输入法自己按 keycode 推修饰键状态也照样能工作
+                base_mode = MODE.removesuffix("_nomods")
+                send_mods = MODE == base_mode
+                if base_mode == "shortcut":
+                    # Ctrl+A、Ctrl+C：必须原样转发，不能被当成拼音的 a / c 吃掉。
+                    # 修饰键掩码用的是 XKB 固定位序：Shift=1 Lock=2 Control=4 Mod1=8 … Mod4=64
+                    ctrl = 29
+                    for code in (EVDEV["a"], EVDEV["c"]):
+                        conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, ctrl, 1))
+                        if send_mods:
+                            conn.send(grab_id, 2, struct.pack("<IIIII", 0, 4, 0, 0, 0))
+                        conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, code, 1))
+                        conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, code, 0))
+                        conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, ctrl, 0))
+                        if send_mods:
+                            conn.send(grab_id, 2, struct.pack("<IIIII", 0, 0, 0, 0, 0))
+                        time.sleep(0.05)
+                elif base_mode == "mixed":
+                    # 用户的实际场景：先敲几个小写字母组词（预编辑挂着），按住 Shift 敲 A，
+                    # 最后按空格提交。期望整个 "aaaA" 一直待在预编辑里，
+                    # 只在最后提交一次 —— 打字中途不往应用塞任何字符
+                    for ch in KEYS:
+                        for st in (1, 0):
+                            conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[ch], st))
+                            time.sleep(0.03)
+                    shift = 42
+                    conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, shift, 1))
+                    if send_mods:
+                        conn.send(grab_id, 2, struct.pack("<IIIII", 0, 1, 0, 0, 0))
+                    conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV["a"], 1))
+                    conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV["a"], 0))
+                    conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, shift, 0))
+                    if send_mods:
+                        conn.send(grab_id, 2, struct.pack("<IIIII", 0, 0, 0, 0, 0))
+                    time.sleep(0.05)
+                    for st in (1, 0):  # 空格：这时候才提交
+                        conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[" "], st))
                         time.sleep(0.03)
+                elif base_mode == "shift":
+                    # Shift+A：XKB 里 Shift = 1，字母 keysym 变成大写 'A'
+                    shift = 42
+                    conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, shift, 1))
+                    if send_mods:
+                        conn.send(grab_id, 2, struct.pack("<IIIII", 0, 1, 0, 0, 0))
+                    conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV["a"], 1))
+                    conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV["a"], 0))
+                    conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, shift, 0))
+                    if send_mods:
+                        conn.send(grab_id, 2, struct.pack("<IIIII", 0, 0, 0, 0, 0))
+                else:
+                    if base_mode == "caps":
+                        # Caps Lock 打开：真键盘是按一下 Caps Lock 键（keycode 58），
+                        # xkb 靠这个按键事件翻转 Lock 位，合成器随后再补一个 modifiers 事件。
+                        # 所以输入法不能只看 modifiers 事件，得自己跟着按键喂 xkb 状态
+                        for st in (1, 0):
+                            conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, 58, st))
+                        if send_mods:
+                            conn.send(grab_id, 2, struct.pack("<IIIII", 0, 0, 0, 2, 0))
+                        time.sleep(0.05)
+                    for ch in KEYS:
+                        code = EVDEV[ch]
+                        for state in (1, 0):  # pressed, released
+                            conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, code, state))
+                            time.sleep(0.03)
+                    if base_mode in ("enter", "escape"):
+                        code = EVDEV["\n"] if base_mode == "enter" else EVDEV["\x1b"]
+                        for state in (1, 0):
+                            conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, code, state))
+                            time.sleep(0.03)
                 time.sleep(0.5)
             elif iface == "zwp_input_method_v2":
                 log.append((opcode, args))
@@ -296,6 +362,7 @@ def main():
     shows = [e for e in popup_events if e[0] == "show"]
     hides = [e for e in popup_events if e[0] == "hide"]
     nonempty = [p for p in preedits if p]
+    vk_mods = [args[0] for op, args in log if op == "vk2"]
 
     print("\nmock: ---- result ----", flush=True)
     print(f"mock: keyboard grab   : {'yes' if grab_id is not None else 'NO'}", flush=True)
@@ -303,6 +370,7 @@ def main():
     print(f"mock: commits         : {commits}", flush=True)
     print(f"mock: commit serials  : {serials}", flush=True)
     print(f"mock: forwarded keys  : {forwards}", flush=True)
+    print(f"mock: modifier masks  : {vk_mods}", flush=True)
     print(f"mock: popup surface   : {'yes' if popup_id is not None else 'NO'}", flush=True)
     print(f"mock: popup shown     : {[(w, h) for _, w, h, _, _ in shows]}", flush=True)
     print(f"mock: popup hidden    : {len(hides)} times", flush=True)
@@ -316,7 +384,9 @@ def main():
     )
 
     committed = "".join(commits)
-    if MODE == "inactive":
+    # 场景名去掉 _nomods 后缀后判断（_nomods = 合成器一个 modifiers 事件都不发）
+    mode = MODE.removesuffix("_nomods")
+    if mode == "inactive":
         # 没有输入框时：每个按键（按下+抬起）都应原样转发，且不应有任何提交、不该弹候选框
         ok = (
             grab_id is not None
@@ -327,6 +397,91 @@ def main():
         print(
             f"mock: {'PASS' if ok else 'FAIL'}: forwarded {len(forwards)}/{2 * len(KEYS)} keys, "
             f"commits {commits}, popup shown {len(shows)}",
+            flush=True,
+        )
+    elif mode == "shortcut":
+        # Ctrl+A / Ctrl+C：4 个按键事件 ×2 组全部转发，不能有预编辑或提交，
+        # 修饰键掩码只在变化时发：[Ctrl 按下 4, 松开 0] ×2
+        ok = (
+            grab_id is not None
+            and not commits
+            and not preedits
+            and len(forwards) == 8
+            and vk_mods == [4, 0, 4, 0]
+            and not shows
+        )
+        print(
+            f"mock: {'PASS' if ok else 'FAIL'}: forwarded {len(forwards)}/8 keys, "
+            f"commits {commits}, pre-edits {preedits}, modifier masks {vk_mods}",
+            flush=True,
+        )
+    elif mode == "mixed":
+        # 组词当中按 Shift+A，最后空格提交：整个 "aaaA" 一直待在预编辑里，
+        # 只在最后提交一次（所以 commits 恰好是 ['aaaA']，不是挨个字符往外蹦）
+        want = KEYS + "A"
+        ok = (
+            grab_id is not None
+            and commits == [want]
+            and preedits
+            and preedits[-1] == ""  # 提交后预编辑要清干净
+            and vk_mods == [1, 0]
+        )
+        print(
+            f"mock: {'PASS' if ok else 'FAIL'}: commits {commits} (期望 [{want!r}] 一次), "
+            f"最后一个预编辑 {preedits[-1] if preedits else None!r}",
+            flush=True,
+        )
+    elif mode == "shift":
+        # Shift+A：大写字母也留在预编辑里（"A"），打字中途不提交、不转发字符键。
+        # 转发只该剩 Shift 自己的按下抬起 2 个，修饰键掩码 [Shift 按下 1, 松开 0]
+        ok = (
+            grab_id is not None
+            and not commits
+            and preedits
+            and preedits[-1] == "A"
+            and len(forwards) == 2
+            and vk_mods == [1, 0]
+            and len(shows) == 1  # buffer 里有一个字符，候选框该弹一次
+        )
+        print(
+            f"mock: {'PASS' if ok else 'FAIL'}: 预编辑 {preedits[-1] if preedits else None!r} (期望 'A'), "
+            f"commits {commits} (期望空), forwarded {len(forwards)}/2 keys",
+            flush=True,
+        )
+    elif mode == "enter":
+        # 组词中按回车：把原始拼音提交掉，回车本身不给应用
+        ok = grab_id is not None and committed == "nihao" and not forwards
+        print(
+            f"mock: {'PASS' if ok else 'FAIL'}: committed {committed!r} (期望原始拼音), "
+            f"forwarded {len(forwards)} keys (期望 0)",
+            flush=True,
+        )
+    elif mode == "escape":
+        # 组词中按 Esc：取消组词，既不提交也不转发
+        ok = (
+            grab_id is not None
+            and not commits
+            and not forwards
+            and preedits
+            and preedits[-1] == ""
+        )
+        print(
+            f"mock: {'PASS' if ok else 'FAIL'}: commits {commits}, forwarded {len(forwards)} keys, "
+            f"最后一个预编辑 {preedits[-1] if preedits else None!r}",
+            flush=True,
+        )
+    elif mode == "caps":
+        # Caps Lock 打开时：字母解出来是大写，照样攒进预编辑（"NIHAO"），
+        # 空格时查表大小写不敏感 → 提交 你好。转发只该剩 Caps Lock 自己 2 个
+        ok = (
+            grab_id is not None
+            and committed == EXPECT
+            and nonempty == ["N", "NI", "NIH", "NIHA", "NIHAO"]
+            and len(forwards) == 2  # CapsLock 按下抬起
+        )
+        print(
+            f"mock: {'PASS' if ok else 'FAIL'}: committed {committed!r} (期望 {EXPECT!r}), "
+            f"预编辑 {nonempty[-1] if nonempty else None!r}, forwarded {len(forwards)}/2 keys",
             flush=True,
         )
     else:

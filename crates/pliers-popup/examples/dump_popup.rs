@@ -1,13 +1,13 @@
 //! 把候选框画成 PNG —— 不开输入法、不用合成器，直接看长相：
 //!
 //! ```text
-//! cargo run -p ime-popup --example dump_popup [输出路径]
+//! cargo run -p pliers-popup --example dump_popup [输出路径]
 //! ```
 //!
 //! 默认写到 `target/popup.png`。输出会放大 3 倍，底下垫棋盘格：
 //! 能一眼看出哪里是透明的（圆角、框底那点半透明）。
 
-use ime_popup::{Image, Painter, Preedit};
+use pliers_popup::{Image, Painter, Preedit};
 
 /// 输出放大几倍
 const ZOOM: u32 = 3;

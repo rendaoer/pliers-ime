@@ -384,7 +384,7 @@ impl Scheme for DoublePinyin {
 /// 码表方案：键本身就是码，直接拿去查（五笔、郑码、仓颉……都是这个形状）。
 ///
 /// 词库那张表有 `scheme` 字段，所以一套码表就是一批 `scheme = 'wubi'` 的行。
-/// 导入用 `ime-dict --table 码表.txt --table-scheme wubi`。
+/// 导入用 `pliers-dict --table 码表.txt --table-scheme wubi`。
 ///
 /// 注意：码表查询是**前缀**查询（打 `w` 要能出所有以 w 开头的字），
 /// 这是唯一会扫一大片的查询，码表很大时会慢。真要用起来得在导入时按前缀

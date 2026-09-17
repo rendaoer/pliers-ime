@@ -1,6 +1,6 @@
 [package]
-name = "ime-popup"
-description = "候选框长什么样：尺寸、像素、共享内存（纯逻辑，不碰 Wayland）"
+name = "pliers-popup"
+description = "候选框：找字体、排版、画像素、共享内存（不碰 Wayland）"
 version.workspace = true
 edition.workspace = true
 
@@ -10,7 +10,7 @@ ab_glyph = "0.2"
 # 找系统字体（它认识 .ttc 里的每一个字面，也认识 ~/.local/share/fonts）
 # 关掉 fontconfig 特性：不想为了列个字体目录去链接 libfontconfig
 fontdb = { version = "0.24", default-features = false, features = ["std", "fs", "memmap"] }
-ime-engine.workspace = true
+pliers-engine.workspace = true
 
 [dev-dependencies]
 # 只给 examples/dump_popup.rs 用：把候选框存成 PNG，不用真跑输入法也能看长相

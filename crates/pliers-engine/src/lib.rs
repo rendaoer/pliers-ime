@@ -311,7 +311,7 @@ impl Engine {
     /// 这就是"用户使用频率权重"那半边，存在库里的 `user_word` 表
     fn pick(&mut self, word: &str) {
         if let Err(e) = self.dict.note_used(word) {
-            eprintln!("ime-aa: 记用户词频失败：{e}");
+            eprintln!("pliers: 记用户词频失败：{e}");
         }
         self.clear_composing();
     }

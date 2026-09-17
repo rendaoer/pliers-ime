@@ -1,10 +1,10 @@
-//! 把拼音词表导成 ime-aa 用的 SQLite 词库。
+//! 把拼音词表导成 pliers 用的 SQLite 词库。
 //!
 //! ```text
-//! cargo run -p ime-dict --release -- \
+//! cargo run -p pliers-dict --release -- \
 //!     --source ~/Downloads/CustomPinyinDictionary_IBus.txt \
 //!     --freq   ~/Downloads/jieba-dict.txt \
-//!     --out    ~/.local/share/ime-aa/dict.db
+//!     --out    ~/.local/share/pliers/dict.db
 //! ```
 //!
 //! 手上有三份数据，各管一件事：
@@ -26,7 +26,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use ime_engine::dict::{create_schema, synthetic_weight};
+use pliers_engine::dict::{create_schema, synthetic_weight};
 use turso::{Builder, Connection};
 
 /// 每多少行提交一次（一次性开一个大事务会把内存吃光）
@@ -293,7 +293,7 @@ impl Args {
         let mut args = Self {
             source: PathBuf::from(format!("{home}/Downloads/CustomPinyinDictionary_IBus.txt")),
             freq: None,
-            out: PathBuf::from(format!("{home}/.local/share/ime-aa/dict.db")),
+            out: PathBuf::from(format!("{home}/.local/share/pliers/dict.db")),
             table: None,
             table_scheme: None,
         };

@@ -1,4 +1,4 @@
-//! Wayland 协议层：以"输入法"的身份连上合成器，抓键盘，把 `ime-engine` 的决定变成
+//! Wayland 协议层：以"输入法"的身份连上合成器，抓键盘，把 `pliers-engine` 的决定变成
 //! 协议请求。
 //!
 //! 一共用四个协议：
@@ -10,7 +10,7 @@
 //! * `zwp_virtual_keyboard_v1`
 //!   虚拟键盘：不归我们管的按键，用它原样发回给应用
 //! * `zwp_input_popup_surface_v2` + `wl_shm`
-//!   候选框：自己往共享内存画像素，位置交给合成器；画什么在 `ime-popup` 里
+//!   候选框：自己往共享内存画像素，位置交给合成器；画什么在 `pliers-popup` 里
 //! * `wl_output`
 //!   只为了问一句"屏幕缩放多少"：1.5x/2x 的屏幕得按倍数多画几倍像素，不然字是糊的
 
@@ -34,13 +34,13 @@ use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
 };
 use xkbcommon::xkb;
 
-use ime_engine::{Action, Engine, KeyInput, Preedit};
-use ime_popup::Painter;
 use keyboard::Keyboard;
+use pliers_engine::{Action, Engine, KeyInput, Preedit};
+use pliers_popup::Painter;
 use popup::PopupSurface;
 
 /// keysym 常量留给引擎用，这里重导出一份方便主程序看
-pub use ime_engine;
+pub use pliers_engine;
 
 /// `zwp_virtual_keyboard_v1.keymap` 的 format：1 = XKB_KEYMAP_FORMAT_TEXT_V1
 const KEYMAP_FORMAT_XKB_V1: u32 = 1;
@@ -48,13 +48,13 @@ const KEYMAP_FORMAT_XKB_V1: u32 = 1;
 /// 启动参数
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Options {
-    /// 把每个按键的判定过程打到 stderr（也可以直接设环境变量 IME_AA_DEBUG=1）
+    /// 把每个按键的判定过程打到 stderr（也可以直接设环境变量 PLIERS_DEBUG=1）
     pub debug: bool,
 }
 
 /// 起一个输入法，一直跑到合成器把协议收回去为止
 pub fn run(engine: Engine, options: Options) -> Result<(), Box<dyn Error>> {
-    let debug = options.debug || std::env::var_os("IME_AA_DEBUG").is_some();
+    let debug = options.debug || std::env::var_os("PLIERS_DEBUG").is_some();
 
     let conn = Connection::connect_to_env()?;
     let mut queue = conn.new_event_queue();
@@ -65,7 +65,7 @@ pub fn run(engine: Engine, options: Options) -> Result<(), Box<dyn Error>> {
         // 找字体要扫系统字体目录（几十毫秒），放启动时做，别卡在第一次敲键上
         painter: Some(Painter::new()),
         // 一般不用管缩放（问合成器就知道了），调试的时候可以用它强制指定
-        scale_override: std::env::var("IME_AA_SCALE")
+        scale_override: std::env::var("PLIERS_SCALE")
             .ok()
             .and_then(|value| value.parse().ok()),
         ..State::default()
@@ -120,7 +120,7 @@ struct State {
     outputs: Vec<wl_output::WlOutput>,
     /// 每个输出的缩放，下标跟 `outputs` 对齐
     output_scales: Vec<i32>,
-    /// IME_AA_SCALE 强制指定的缩放（没有就用输出的）
+    /// PLIERS_SCALE 强制指定的缩放（没有就用输出的）
     scale_override: Option<i32>,
 
     // 协议状态
@@ -175,17 +175,17 @@ impl State {
         if self.debug {
             match &action {
                 Action::UpdatePreedit(preedit) if preedit.candidates.is_empty() => {
-                    eprintln!("ime-aa:   → 预编辑清空，候选框收起");
+                    eprintln!("pliers:   → 预编辑清空，候选框收起");
                 }
                 Action::UpdatePreedit(preedit) => eprintln!(
-                    "ime-aa:   → 预编辑 {:?}，候选 {} 个（选中第 {} 个）",
+                    "pliers:   → 预编辑 {:?}，候选 {} 个（选中第 {} 个）",
                     preedit.text,
                     preedit.candidates.len(),
                     preedit.selected + 1
                 ),
-                Action::Commit(text) => eprintln!("ime-aa:   → 提交文本 {text:?}"),
+                Action::Commit(text) => eprintln!("pliers:   → 提交文本 {text:?}"),
                 Action::Forward => {}
-                Action::Swallow => eprintln!("ime-aa:   → 吃掉这个抬起"),
+                Action::Swallow => eprintln!("pliers:   → 吃掉这个抬起"),
             }
         }
         match action {
@@ -265,7 +265,7 @@ impl State {
     fn forward(&self, keycode: u32, pressed: bool) {
         if self.debug {
             eprintln!(
-                "ime-aa:   → 转发 keycode={keycode} {}（shift={} caps={} ctrl/alt/super={}）",
+                "pliers:   → 转发 keycode={keycode} {}（shift={} caps={} ctrl/alt/super={}）",
                 if pressed { "按下" } else { "抬起" },
                 self.shift_held,
                 self.caps_lock,
@@ -291,7 +291,7 @@ impl State {
         self.last_mods = mods;
         if self.debug {
             eprintln!(
-                "ime-aa:   → 虚拟键盘 modifiers(depressed={:#x}, latched={:#x}, locked={:#x}, group={})",
+                "pliers:   → 虚拟键盘 modifiers(depressed={:#x}, latched={:#x}, locked={:#x}, group={})",
                 mods.0, mods.1, mods.2, mods.3
             );
         }
@@ -380,7 +380,7 @@ impl Dispatch<im::ZwpInputMethodV2, ()> for State {
                 if state.popup.is_none() {
                     match state.create_popup(im_obj, qh) {
                         Ok(p) => state.popup = Some(p),
-                        Err(e) => eprintln!("ime-aa: 创建候选框失败：{e}"),
+                        Err(e) => eprintln!("pliers: 创建候选框失败：{e}"),
                     }
                 }
             }
@@ -400,7 +400,7 @@ impl Dispatch<im::ZwpInputMethodV2, ()> for State {
             im::Event::Unavailable => {
                 // 注意：同一个 seat 上只要出现第二个 zwp_input_method_v2，合成器就会给
                 // 旧的那个发 unavailable（smithay: InputMethodHandle::add_instance）
-                eprintln!("ime-aa: 有另一个输入法接管了这个 seat，协议被收回，退出");
+                eprintln!("pliers: 有另一个输入法接管了这个 seat，协议被收回，退出");
                 state.quit = true;
             }
 
@@ -430,7 +430,7 @@ impl Dispatch<grab::ZwpInputMethodKeyboardGrabV2, ()> for State {
                 let ctx = xkb::Context::new(0);
                 match Keyboard::new(&ctx, fd, size as usize) {
                     Some(keyboard) => state.keyboard = Some(keyboard),
-                    None => eprintln!("ime-aa: 解析 XKB 键盘布局失败"),
+                    None => eprintln!("pliers: 解析 XKB 键盘布局失败"),
                 }
                 if let (Some(vk_obj), Some(copy)) = (&state.vk, copy) {
                     vk_obj.keymap(KEYMAP_FORMAT_XKB_V1, copy.as_fd(), size);
@@ -455,7 +455,7 @@ impl Dispatch<grab::ZwpInputMethodKeyboardGrabV2, ()> for State {
                 if state.debug {
                     let preedit = state.engine().text().to_string();
                     eprintln!(
-                        "ime-aa: 收到 keycode={key} keysym=0x{keysym:04x} {}（shift={} caps={} ctrl/alt/super={} 预编辑={preedit:?}）",
+                        "pliers: 收到 keycode={key} keysym=0x{keysym:04x} {}（shift={} caps={} ctrl/alt/super={} 预编辑={preedit:?}）",
                         if pressed { "按下" } else { "抬起" },
                         state.shift_held,
                         state.caps_lock,
@@ -476,7 +476,7 @@ impl Dispatch<grab::ZwpInputMethodKeyboardGrabV2, ()> for State {
             } => {
                 if state.debug {
                     eprintln!(
-                        "ime-aa: 收到 modifiers 事件 depressed={mods_depressed:#x} latched={mods_latched:#x} locked={mods_locked:#x} group={group}"
+                        "pliers: 收到 modifiers 事件 depressed={mods_depressed:#x} latched={mods_latched:#x} locked={mods_locked:#x} group={group}"
                     );
                 }
                 state.sync_mods_to_vk((mods_depressed, mods_latched, mods_locked, group));
@@ -502,7 +502,7 @@ impl Dispatch<wl_output::WlOutput, ()> for State {
         {
             state.output_scales[index] = factor;
             if state.debug {
-                eprintln!("ime-aa: 输出缩放 {factor}x（候选框按这个倍数画）");
+                eprintln!("pliers: 输出缩放 {factor}x（候选框按这个倍数画）");
             }
         }
     }

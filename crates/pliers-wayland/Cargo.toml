@@ -1,5 +1,5 @@
 [package]
-name = "ime-wayland"
+name = "pliers-wayland"
 description = "Wayland 协议层：以输入法身份注册、抓键盘、转发按键、贴候选框"
 version.workspace = true
 edition.workspace = true
@@ -8,5 +8,5 @@ edition.workspace = true
 wayland-client.workspace = true
 wayland-protocols-misc.workspace = true
 xkbcommon.workspace = true
-ime-engine.workspace = true
-ime-popup.workspace = true
+pliers-engine.workspace = true
+pliers-popup.workspace = true

@@ -26,7 +26,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use turso::{Builder, Connection};
 
-/// 建库用的 DDL。导入工具（`ime-dict`）和测试共用同一份，免得两边写岔。
+/// 建库用的 DDL。导入工具（`pliers-dict`）和测试共用同一份，免得两边写岔。
 ///
 /// 注意是一条一条执行的：turso 的 `execute()` 一次只认一条语句
 /// （把四条 DDL 拼成一个字符串喂进去，它只会建第一张表）
@@ -89,7 +89,7 @@ impl Dict {
     pub fn open(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Err(format!(
-                "词库不存在：{}\n先导入一份：\n  cargo run -p ime-dict --release -- --source ~/Downloads/CustomPinyinDictionary_IBus.txt --out {}",
+                "词库不存在：{}\n先导入一份：\n  cargo run -p pliers-dict --release -- --source ~/Downloads/CustomPinyinDictionary_IBus.txt --out {}",
                 path.display(),
                 path.display()
             )
@@ -180,7 +180,7 @@ impl Dict {
             Err(e) => {
                 // 查库失败不该让输入法崩掉：当成"没有候选"，吼一次就够了
                 if !self.complained.replace(true) {
-                    eprintln!("ime-aa: 查词库失败：{e}");
+                    eprintln!("pliers: 查词库失败：{e}");
                 }
                 Vec::new()
             }
@@ -300,13 +300,13 @@ mod tests {
 
     #[test]
     fn 缺词库时报错要说人话() {
-        let message = match Dict::open(Path::new("/nonexistent/ime-aa.db")) {
+        let message = match Dict::open(Path::new("/nonexistent/pliers.db")) {
             Ok(_) => panic!("不该打开成功"),
             Err(e) => e.to_string(),
         };
         assert!(message.contains("词库不存在"), "{message}");
         assert!(
-            message.contains("ime-dict"),
+            message.contains("pliers-dict"),
             "错误信息里该告诉用户怎么导入：{message}"
         );
     }
@@ -337,7 +337,7 @@ pub(crate) mod testing {
     /// 造一份小词库
     pub fn sample_dict() -> Dict {
         let dir = std::env::temp_dir().join(format!(
-            "ime-aa-test-{}-{}",
+            "pliers-test-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));

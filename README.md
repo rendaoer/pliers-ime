@@ -1,4 +1,4 @@
-# ime-aa
+# pliers
 
 最小可用的 Wayland 中文输入法：敲 `nihao` + 空格 → 输出「你好」，组词时输入框旁边弹出
 候选框，`↓`/`Tab` 或数字 `1`–`9` 挑，空格上屏选中的那个。
@@ -11,6 +11,9 @@
 
 没有 GUI 框架：候选框是自己往 `wl_shm` 画像素（见「候选框是怎么做出来的」）。
 
+名字：**pliers / 钳子** —— 螃蟹那对钳子。crates.io 上 `pliers` 已被占，所以主包叫
+`pliers-ime`，但**命令还是 `pliers`**（配置目录 `~/.config/pliers/`、环境变量 `PLIERS_*` 也一样短）。
+
 它直接用 `wayland-client` 跟合成器说协议，不经过 imekit 之类的封装 —— 因为候选框要用
 `zwp_input_popup_surface_v2`，而那个 surface 必须在**创建它的那条连接**上画。
 
@@ -20,20 +23,20 @@
 
 | crate | 管什么 | 依赖 |
 | --- | --- | --- |
-| `crates/ime-engine` | 按键状态机 + 输入方案（全拼/双拼/码表）+ 词库 + 配置 | turso / toml / serde |
-| `crates/ime-popup` | 候选框长什么样：找字体、排版、画像素、共享内存文件 | ab_glyph / fontdb |
-| `crates/ime-wayland` | 跟合成器说协议：注册、抓键盘、转发按键、贴候选框 | wayland-client / xkbcommon |
-| `crates/ime-aa` | `main()`：读配置、把上面几个拼起来 | ime-engine + ime-wayland |
-| `crates/ime-dict` | 导入工具：词表 + 词频表 → SQLite 词库 | turso |
+| `crates/pliers-engine` | 按键状态机 + 输入方案（全拼/双拼/码表）+ 词库 + 配置 | turso / toml / serde |
+| `crates/pliers-popup` | 候选框长什么样：找字体、排版、画像素、共享内存文件 | ab_glyph / fontdb |
+| `crates/pliers-wayland` | 跟合成器说协议：注册、抓键盘、转发按键、贴候选框 | wayland-client / xkbcommon |
+| `crates/pliers` | `main()`：读配置、把上面几个拼起来 | pliers-engine + pliers-wayland |
+| `crates/pliers-dict` | 导入工具：词表 + 词频表 → SQLite 词库 | turso |
 
 ```
-ime-engine  ←──┬──  ime-popup  ──┐
-               └────────────────┴──  ime-wayland  ←──  ime-aa (bin)
+pliers-engine  ←──┬──  pliers-popup  ──┐
+               └────────────────┴──  pliers-wayland  ←──  pliers (bin)
      ▲
-     └──  ime-dict (bin)：往词库里灌数据
+     └──  pliers-dict (bin)：往词库里灌数据
 ```
 
-`ime-engine` 里面按"一件小事一个文件"分：
+`pliers-engine` 里面按"一件小事一个文件"分：
 
 | 文件 | 管什么 |
 | --- | --- |
@@ -46,13 +49,13 @@ ime-engine  ←──┬──  ime-popup  ──┐
 这么切的好处：**输入方案、词库、候选框长相都能脱离合成器跑测试**（52 个单测），
 协议层里剩下的全是"Wayland 要求这么做"的东西。想改哪块就只动哪块：
 
-* 加词 / 调词频 → 用 SQL 改词库，或者重新跑一遍 `ime-dict`
-* 换输入方案（双拼、五笔）→ 改 `~/.config/ime-aa/config.toml`
-* 加一套新方案（郑码、仓颉、注音）→ 在 `crates/ime-engine/src/scheme.rs` 里实现 `Scheme`
-* 换个候选框长相（甚至换成 egui/Slint 画）→ `crates/ime-popup`
-* 加协议功能（比如 `delete_surrounding_text`）→ `crates/ime-wayland`
+* 加词 / 调词频 → 用 SQL 改词库，或者重新跑一遍 `pliers-dict`
+* 换输入方案（双拼、五笔）→ 改 `~/.config/pliers/config.toml`
+* 加一套新方案（郑码、仓颉、注音）→ 在 `crates/pliers-engine/src/scheme.rs` 里实现 `Scheme`
+* 换个候选框长相（甚至换成 egui/Slint 画）→ `crates/pliers-popup`
+* 加协议功能（比如 `delete_surrounding_text`）→ `crates/pliers-wayland`
 
-`crates/ime-wayland` 内部也分了三个文件：`lib.rs`（状态 + 各个 Dispatch 实现）、
+`crates/pliers-wayland` 内部也分了三个文件：`lib.rs`（状态 + 各个 Dispatch 实现）、
 `keyboard.rs`（keycode→keysym、修饰键状态）、`popup.rs`（候选框 surface）。
 
 ## 用了哪些协议
@@ -79,10 +82,7 @@ ime-engine  ←──┬──  ime-popup  ──┐
 # 只是所有词的权重都一样，排序会很难看（打 shijian 第一个出「世鉴」）
 curl -o jieba-dict.txt https://raw.githubusercontent.com/fxsjy/jieba/master/jieba/dict.txt
 
-cargo run -p ime-dict --release -- \
-    --source ~/Downloads/CustomPinyinDictionary_IBus.txt \
-    --freq   jieba-dict.txt \
-    --out    ~/.local/share/ime-aa/dict.db
+cargo run -p pliers-dict --release -- --source ~/Downloads/CustomPinyinDictionary_IBus.txt --freq jieba-dict.txt --out ~/.local/share/pliers/dict.db
 ```
 
 三份数据各管一件事（`--source` 是**唯一**必需的参数）：
@@ -93,26 +93,35 @@ cargo run -p ime-dict --release -- \
 | jieba 词频表 | 权重 | 词表本身**没有词频**，不给权重就只能按拼音字典序排 |
 | 词表自己 | 单字 | 表里全是 2 字以上的词，单字靠"字↔音节"对齐推出来 |
 
-导入一次大概几分钟（`--release` 快很多），生成的库 ~100 MB。之后想加词就直接写 SQL：
+导入一次大概几分钟（`--release` 快很多），生成的库 ~130 MB。之后想加词就直接写 SQL ——
+**但得先把输入法退掉**：turso 开着的时候会一直占着这个库，别的进程连只读连接都进不去
+（`database is locked`）。只想看看数据就拷一份出来读：
 
 ```bash
-sqlite3 ~/.local/share/ime-aa/dict.db \
-  "INSERT OR REPLACE INTO word (scheme, code, text, weight) VALUES ('pinyin','ni hao','你好',3000000);"
+# 加词 / 改权重（先退出输入法，否则 database is locked）
+sqlite3 ~/.local/share/pliers/dict.db "INSERT OR REPLACE INTO word (scheme, code, text, weight) VALUES ('pinyin','ni hao','你好',3000000);"
+
+# 想把用户词频清零（同样要先退出输入法）
+sqlite3 ~/.local/share/pliers/dict.db "DELETE FROM user_word;"
+
+# 只想看看数据（输入法开着也能读，因为读的是副本）
+cp ~/.local/share/pliers/dict.db /tmp/dict-copy.db
+sqlite3 /tmp/dict-copy.db "SELECT text, count FROM user_word ORDER BY count DESC LIMIT 10;"
 ```
 
 ## 运行与测试
 
 ```bash
-cargo run                  # 跑主程序（workspace 里默认就跑 ime-aa）
+cargo run                  # 跑主程序（workspace 里默认就跑 pliers）
 cargo test --workspace     # 引擎 + 候选框的单测（52 个，不需要合成器、不需要词库）
-cargo test -p ime-engine   # 只看引擎：切词、方案、词库、按键状态机
+cargo test -p pliers-engine   # 只看引擎：切词、方案、词库、按键状态机
 ./tools/run_mock_tests.sh  # 拿 mock 合成器把 15 个场景跑一遍（含候选框像素）
 ```
 
 只想看候选框长什么样、不想开输入法：
 
 ```bash
-cargo run -p ime-popup --example dump_popup   # 存成 target/popup.png
+cargo run -p pliers-popup --example dump_popup   # 存成 target/popup.png
 ```
 
 然后把焦点放到输入框里，敲 `n i h a o` 再按空格。能不能用取决于**应用自己有没有
@@ -122,9 +131,9 @@ cargo run -p ime-popup --example dump_popup   # 存成 target/popup.png
 排查按键问题时加个环境变量，它会把每个按键的判定过程打到 stderr：
 
 ```bash
-IME_AA_DEBUG=1 cargo run
-# ime-aa: 收到 keycode=30 keysym=0x0061 按下（shift=false caps=false ctrl/alt/super=false 预编辑=""）
-# ime-aa:   → 预编辑 "a"
+PLIERS_DEBUG=1 cargo run
+# pliers: 收到 keycode=30 keysym=0x0061 按下（shift=false caps=false ctrl/alt/super=false 预编辑=""）
+# pliers:   → 预编辑 "a"
 ```
 
 注意**同一个 seat 上只能有一个输入法**：起第二个实例时，合成器会给旧的那个发
@@ -148,14 +157,14 @@ IME_AA_DEBUG=1 cargo run
 
 ### 输入方案（配置文件）
 
-行为定义在 `~/.config/ime-aa/config.toml`（模板见仓库根目录 `ime-aa.example.toml`）：
+行为定义在 `~/.config/pliers/config.toml`（模板见仓库根目录 `pliers.example.toml`）：
 
 ```toml
 [scheme]
 kind = "full-pinyin"      # full-pinyin | double-pinyin | table
 
 [dict]
-# path = "~/.local/share/ime-aa/dict.db"
+# path = "~/.local/share/pliers/dict.db"
 # max_candidates = 9
 ```
 
@@ -168,7 +177,7 @@ layout = "natural"        # natural(自然码) | flypy(小鹤) | mspy(微软双�
 ```
 
 自然码下 `nihk` → 你好（`hao` 在 `k` 键上），小鹤是 `nihc`。多音字、零声母
-（`ang` → `ah`）这些规则都在 `crates/ime-engine/src/scheme.rs` 的 `encode()` 里，
+（`ang` → `ah`）这些规则都在 `crates/pliers-engine/src/scheme.rs` 的 `encode()` 里，
 一个音节两键，推不出两键的音节说明那套键位没设计它。
 
 **五笔**（以及郑码、仓颉这类码表方案）走 `table`：
@@ -179,9 +188,23 @@ kind = "table"
 name = "wubi"             # 词库里 word.scheme 用哪个名字
 ```
 
-码表用 ime-dict 的 `--table` 导入：`--table wubi.txt --table-scheme wubi`
+码表用 pliers-dict 的 `--table` 导入：`--table wubi.txt --table-scheme wubi`
 （每行 `词<TAB>码[<TAB>权重]`，rime 那种 .txt 码表就是这个格式）。仓库里**没有**带码表数据，
 所以这条路目前只有骨架。
+
+### 用 Nushell？
+
+上面所有命令在 bash 和 Nushell 里都能直接跑（我在这台机器上用 nushell 0.115 验过）。
+只有三处写法两边不一样，README 里已经都避开了：
+
+| 想干的事 | bash / zsh | Nushell |
+| --- | --- | --- |
+| 临时设环境变量再跑 | `PLIERS_DEBUG=1 cargo run` | 一样能写（nushell ≥0.99）<br>老版本用 `with-env { PLIERS_DEBUG: 1 } { cargo run }` |
+| 连着跑两条 | `a && b` | `a; b`（nushell **不支持** `&&`） |
+| 命令换行接着写 | `cmd \` | nushell **不支持** `\` 续行，写成一行或用括号 |
+
+`~` 在两边都会展开（包括传给 `cargo` / `curl` 这种外部命令的参数），`mkdir` 在 Nushell 里
+本身就会建中间目录，不用 `-p`。
 
 ## 词库为什么是 SQLite，以及全拼是怎么查的
 
@@ -195,7 +218,7 @@ name = "wubi"             # 词库里 word.scheme 用哪个名字
 SELECT text FROM word WHERE code LIKE 'ni%' ORDER BY weight DESC LIMIT 9
 ```
 
-在 20 万行的表上实测（`cargo run -p ime-engine --example turso_bench` 可以自己跑一遍）：
+在 20 万行的表上实测（`cargo run -p pliers-engine --example turso_bench` 可以自己跑一遍）：
 
 | 查询 | 耗时 | 说明 |
 | --- | --- | --- |
@@ -258,7 +281,7 @@ ORDER BY score DESC LIMIT ?3
 
 1. **抓到的键盘要自己转发。** 抓取一旦生效，合成器就不再处理任何按键，全丢给我们。
    没有输入框在用（焦点在 XWayland 应用、或不支持 text-input 的应用上）时也必须原样
-   转发，否则那些应用直接打不了字 —— 见 `ime-engine` 的 `Engine::on_key()` 开头那个
+   转发，否则那些应用直接打不了字 —— 见 `pliers-engine` 的 `Engine::on_key()` 开头那个
    `!key.active` 分支。
 2. **`key_get_one_sym()` 不做 Control 变换。** 按住 Ctrl 时 `a` 解出来**还是 `0x61`**
    （只有 `key_get_utf8()` 会给出 `\x01`）。所以如果只按 keysym 判断字母，Ctrl+A 会变成
@@ -279,7 +302,7 @@ ORDER BY score DESC LIMIT ?3
    一旦收不到，`shift_held`/`ctrl` 全是 false —— 表现就是 **Ctrl+A 被当成拼音的 a 吃掉**。
    正确做法跟普通客户端一样：自己拿 keymap 建一个 `xkb::State`，每个按键事件喂
    `update_key(keycode, Down/Up)`，修饰键、Caps Lock 全都从这推出来
-   （`crates/ime-wayland/src/keyboard.rs`）。
+   （`crates/pliers-wayland/src/keyboard.rs`）。
    注意 xkb 文档说 `update_key` 和 `update_mask` 不要混用，所以 `Modifiers` 事件只用来
    转发给虚拟键盘，不再喂我们自己的状态。
 4. **预编辑状态下别把字符键转发给应用，也别中途往应用里塞字符。** 应用这时正处在
@@ -308,7 +331,7 @@ ORDER BY score DESC LIMIT ?3
 
 ## 候选框是怎么做出来的
 
-**协议那半边**（`crates/ime-wayland/src/popup.rs`）：
+**协议那半边**（`crates/pliers-wayland/src/popup.rs`）：
 
 1. 有输入框时 `im.get_input_popup_surface(&surface, qh, ())`：合成器给这个 surface
    指派 `input_popup` role。role 一辈子只能定一次（协议：*If the surface already has
@@ -326,10 +349,10 @@ ORDER BY score DESC LIMIT ?3
    它报 2），再用 `set_buffer_scale(2)` 告诉合成器"这块 buffer 是 2 倍密度"。
    注意 `damage()` 用的是 surface 坐标（逻辑像素），不是 buffer 像素，要除回去。
 
-**内容那半边**（`crates/ime-popup`）：
+**内容那半边**（`crates/pliers-popup`）：
 
 6. **字体去系统里找**：`fontdb` 扫 `/usr/share/fonts` 这些目录，优先 Noto Sans CJK SC
-   之类的常见中文字体；找不到就只画个空框，不报错。`IME_AA_FONT=/path/to/font.ttc`
+   之类的常见中文字体；找不到就只画个空框，不报错。`PLIERS_FONT=/path/to/font.ttc`
    可以指定一套。
 7. **光栅化用 `ab_glyph`**（字符 → 轮廓 → 灰度图）。这里有个坑：它的 `PxScale` 是
    **行高**不是字号，而中文行高是字号的 1.4 倍上下，直接填字号字会小一圈 ——
@@ -367,16 +390,16 @@ wl_compositor / wl_shm / zwp_input_method_v2 / zwp_virtual_keyboard_v1 的够用
 
 ```bash
 ./tools/run_mock_tests.sh                       # 15 个场景，全绿才算过
-MOCK_PNG=target/popup.png ./tools/run_mock_tests.sh   # 顺便存一张候选框实拍
+./tools/run_mock_tests.sh --png target/popup.png      # 顺便存一张候选框实拍
 ```
 
-它默认用 `target/dict.db` 那份词库，也可以用 `IME_AA_DICT=/path/dict.db` 换。
+它默认用 `target/dict.db` 那份词库，也可以用 `PLIERS_DICT=/path/dict.db` 换。
 
 也可以单跑一个场景，第二、三个参数是「要喂的按键」和「期望提交的文本」：
 
 ```bash
 python3 tools/mock_compositor.py /tmp/mock-wl "nihao " 你好 &
-IME_AA_DICT=target/dict.db WAYLAND_DISPLAY=/tmp/mock-wl cargo run
+PLIERS_DICT=target/dict.db WAYLAND_DISPLAY=/tmp/mock-wl cargo run
 # mock: pre-edit updates: ['n', 'ni', 'nih', 'niha', 'nihao', '']
 # mock: popup shown     : [(90, 42), (168, 42), (318, 42), (318, 42), (318, 42)]
 # mock: 框里数出 581 个笔画像素（不透明 13298）
@@ -392,7 +415,7 @@ modifiers 事件都不发"）：
 | `active` | `nihao ` | 提交「你好」，候选框宽度随候选变化、框里有字 |
 | `pick` | `nihao2` | 数字选词直接上屏第 2 个候选（词库里是「倪浩」），按键连抬起都不转发 |
 | `nav` | `nihao` + `↓` + 空格 | 换候选不改预编辑串，提交第 2 个候选 |
-| `hidpi` | 同 `active`，但客户端带 `IME_AA_SCALE=2` | 候选框按 2 倍像素画（高 84）且发了 `set_buffer_scale(2)` |
+| `hidpi` | 同 `active`，但客户端带 `PLIERS_SCALE=2` | 候选框按 2 倍像素画（高 84）且发了 `set_buffer_scale(2)` |
 | `inactive` | `nihao ` | 先发 `deactivate`：12 个按键事件全部原样转发、零提交、候选框一次都不弹 |
 | `shortcut` | Ctrl+A / Ctrl+C | 8 个事件全部转发，不能被当成拼音吃掉 |
 | `mixed` | `aaa` + `Shift+A` + 空格 | 整个 `aaaA` 只在最后提交一次 |
@@ -406,8 +429,8 @@ modifiers 事件都不发"）：
 想确认"打某个拼音到底会出哪些候选、每个键花多久"，不用开输入法：
 
 ```bash
-cargo run -p ime-engine --release --example lookup -- shijian
-# 方案 pinyin，词库 /home/dao/.local/share/ime-aa/dict.db（打开用了 1.2ms）
+cargo run -p pliers-engine --release --example lookup -- shijian
+# 方案 pinyin，词库 /home/dao/.local/share/pliers/dict.db（打开用了 1.2ms）
 #
 # s             1.50ms   [上] 说 三 省 手 谁 受 水 山
 # sh            1.13ms   [是] 上 说 时 使 事 市 省 手

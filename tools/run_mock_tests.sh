@@ -8,13 +8,25 @@
 set -u
 cd "$(dirname "$0")/.."
 
+# 参数写法跟 shell 无关（${VAR=x cmd} 这种前缀在 zsh/bash/nushell 里写法不一样）：
+#   --dict <路径>   词库（默认 target/dict.db，也认 IME_AA_DICT/PLIERS_DICT）
+#   --png  <路径>   把 active 场景的候选框存成 PNG
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dict) DICT_ARG="$2"; shift 2 ;;
+        --png)  PNG_ARG="$2";  shift 2 ;;
+        -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
+        *) echo "不认识的参数 $1"; exit 2 ;;
+    esac
+done
+
 cargo build -q || exit 1
 
-SOCK="/tmp/ime-aa-mock-$$.sock"
-# 词库：默认用仓库里导入好的那份（装到 ~/.local/share/ime-aa/ 之后就不用设了）
-DICT="${IME_AA_DICT:-$PWD/target/dict.db}"
+SOCK="/tmp/pliers-mock-$$.sock"
+# 词库：默认用仓库里导入好的那份（装到 ~/.local/share/pliers/ 之后就不用设了）
+DICT="${PLIERS_DICT:-$PWD/target/dict.db}"
 if [ ! -f "$DICT" ]; then
-    echo "找不到词库 $DICT，先跑：cargo run -p ime-dict -- --freq target/jieba-dict.txt --out target/dict.db"
+    echo "找不到词库 $DICT，先跑：cargo run -p pliers-dict -- --freq target/jieba-dict.txt --out target/dict.db"
     exit 1
 fi
 LOGS="$(mktemp -d)"
@@ -25,12 +37,12 @@ run() { # run <名字> <按键> <期望提交> <模式> [额外环境变量]
     local name="$1" keys="$2" expect="$3" mode="$4" extra="${5:-}"
     local log="$LOGS/$name.log"
     local png=""
-    [ "$name" = "active" ] && png="${MOCK_PNG:-}"
+    [ "$name" = "active" ] && png="${PNG_ARG:-}"
 
     MOCK_PNG="$png" python3 tools/mock_compositor.py "$SOCK" "$keys" "$expect" "$mode" >"$log" 2>&1 &
     local mock=$!
     sleep 0.4
-    env IME_AA_DICT="$DICT" $extra WAYLAND_DISPLAY="$SOCK" timeout 30 ./target/debug/ime-aa >>"$log" 2>&1
+    env PLIERS_DICT="$DICT" $extra WAYLAND_DISPLAY="$SOCK" timeout 30 ./target/debug/pliers >>"$log" 2>&1
     wait "$mock"
 
     if grep -q "PASS" "$log"; then
@@ -56,7 +68,7 @@ run mixed          "aaa"     aaaA  mixed         # 组词当中 Shift+A
 run shift          "a"       ""    shift         # 纯 Shift+A
 
 echo "== 高分屏 =="
-run hidpi          "nihao "  你好  hidpi  "IME_AA_SCALE=2"
+run hidpi          "nihao "  你好  hidpi  "PLIERS_SCALE=2"
 
 echo "== 快捷键 / 焦点 =="
 run shortcut       "a"       ""    shortcut

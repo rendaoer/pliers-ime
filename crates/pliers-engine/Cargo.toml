@@ -1,6 +1,6 @@
 [package]
-name = "ime-engine"
-description = "输入法引擎：按键 → 决定（纯逻辑，不碰 Wayland）"
+name = "pliers-engine"
+description = "引擎：按键状态机 + 输入方案（全拼/双拼/码表）+ SQLite 词库"
 version.workspace = true
 edition.workspace = true
 

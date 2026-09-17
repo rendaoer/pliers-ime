@@ -67,16 +67,16 @@ pub struct Font {
 }
 
 impl Font {
-    /// 找一套有中文的字体：先看 `IME_AA_FONT` 环境变量，再问系统
+    /// 找一套有中文的字体：先看 `PLIERS_FONT` 环境变量，再问系统
     pub fn load() -> Option<Font> {
-        if let Some(path) = std::env::var_os("IME_AA_FONT") {
-            let name = format!("{path:?}（IME_AA_FONT 指定）");
+        if let Some(path) = std::env::var_os("PLIERS_FONT") {
+            let name = format!("{path:?}（PLIERS_FONT 指定）");
             match std::fs::read(Path::new(&path))
                 .ok()
                 .and_then(|data| Font::from_data(data, 0, name))
             {
                 Some(font) => return Some(font),
-                None => eprintln!("ime-aa: 读不出 IME_AA_FONT={path:?}，改用系统字体"),
+                None => eprintln!("pliers: 读不出 PLIERS_FONT={path:?}，改用系统字体"),
             }
         }
 
@@ -100,8 +100,8 @@ impl Font {
         })??;
         if !font.covers('你') {
             eprintln!(
-                "ime-aa: 选中的字体没有中文字形（装个 noto-fonts-cjk，\
-                 或者用 IME_AA_FONT=/path/to/font.ttc 指定一套）"
+                "pliers: 选中的字体没有中文字形（装个 noto-fonts-cjk，\
+                 或者用 PLIERS_FONT=/path/to/font.ttc 指定一套）"
             );
         }
         Some(font)

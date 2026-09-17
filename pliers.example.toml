@@ -1,7 +1,7 @@
-# ime-aa 配置示例
+# pliers 配置示例
 #
-# 复制到 ~/.config/ime-aa/config.toml 就会生效（也可以放在别处，
-# 用 IME_AA_CONFIG=/path/to/config.toml 指过去）。删掉这个文件也能跑，用内置默认值。
+# 复制到 ~/.config/pliers/config.toml 就会生效（也可以放在别处，
+# 用 PLIERS_CONFIG=/path/to/config.toml 指过去）。删掉这个文件也能跑，用内置默认值。
 
 # ---- 输入方案 ---------------------------------------------------------------
 [scheme]
@@ -15,13 +15,13 @@ kind = "full-pinyin"
 # layout = "natural"
 
 # 码表在词库里的名字，只在 kind = "table" 时看。
-# 码表要用 ime-dict 导进去：--table 码表.txt --table-scheme wubi
+# 码表要用 pliers-dict 导进去：--table 码表.txt --table-scheme wubi
 # name = "wubi"
 
 # ---- 词库 -------------------------------------------------------------------
 [dict]
-# SQLite 词库文件（用 ime-dict 生成，见 README）
-# path = "~/.local/share/ime-aa/dict.db"
+# SQLite 词库文件（用 pliers-dict 生成，见 README）
+# path = "~/.local/share/pliers/dict.db"
 
 # 候选框里最多显示几个候选（要翻页的话再调大，数字键 1-9 直接选）
 # max_candidates = 9

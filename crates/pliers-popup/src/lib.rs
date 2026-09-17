@@ -9,7 +9,7 @@
 //! 想看画出来什么样、又不想开输入法：
 //!
 //! ```text
-//! cargo run -p ime-popup --example dump_popup        # 存成 PNG
+//! cargo run -p pliers-popup --example dump_popup        # 存成 PNG
 //! ```
 
 mod font;
@@ -20,8 +20,8 @@ use std::io;
 use std::os::unix::fs::FileExt;
 
 // 候选框要显示的就是引擎给的那份组词状态，原样重导出一份，
-// 免得用的人还得同时依赖 ime-engine
-pub use ime_engine::Preedit;
+// 免得用的人还得同时依赖 pliers-engine
+pub use pliers_engine::Preedit;
 
 use font::{Font, Raster, ink_bounds};
 use paint::Canvas;
@@ -93,10 +93,10 @@ impl Painter {
     /// 找字体要扫一遍系统字体目录（本机 30ms 左右），所以整个进程只做一次
     pub fn new() -> Self {
         let font = Font::load();
-        if std::env::var_os("IME_AA_DEBUG").is_some() {
+        if std::env::var_os("PLIERS_DEBUG").is_some() {
             match &font {
                 Some(font) => eprintln!(
-                    "ime-aa: 候选框字体 = {}（汉字{}）",
+                    "pliers: 候选框字体 = {}（汉字{}）",
                     font.name(),
                     if font.covers('你') {
                         "有"
@@ -104,7 +104,7 @@ impl Painter {
                         "没有！"
                     }
                 ),
-                None => eprintln!("ime-aa: 没找到字体，候选框只能画个空框"),
+                None => eprintln!("pliers: 没找到字体，候选框只能画个空框"),
             }
         }
         Self { font }
@@ -130,7 +130,7 @@ impl Painter {
             .map(|(index, text)| self.item(index, text, index == preedit.selected, scale))
             .collect();
         if items.is_empty() {
-            // 没在组词。调用方本来就不该画（见 ime-wayland 的 sync_popup），
+            // 没在组词。调用方本来就不该画（见 pliers-wayland 的 sync_popup），
             // 真调到了就交张空图，免得算出 0 宽还去建缓冲区
             return Image {
                 width: 0,
@@ -251,7 +251,7 @@ pub fn write(file: &File, offset: u64, image: &Image) -> io::Result<()> {
 /// `/dev/shm` 是 tmpfs，性能最好；沙箱/容器里没有就退回临时目录。
 /// 返回的 fd 一直开着，所以路径当场就删掉了，不会留垃圾文件。
 pub fn shm_file(size: usize) -> io::Result<File> {
-    let name = format!("ime-aa-popup-{}", std::process::id());
+    let name = format!("pliers-popup-{}", std::process::id());
     let mut last_err = None;
     for dir in ["/dev/shm", "/tmp"] {
         let path = std::path::Path::new(dir).join(&name);

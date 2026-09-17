@@ -1,10 +1,10 @@
 [package]
-name = "ime-dict"
-description = "导入工具：把拼音词表 + 词频表导成 ime-aa 用的 SQLite 词库"
+name = "pliers-dict"
+description = "词库导入工具：拼音词表 + 词频表 → SQLite（带权重）"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 turso = { version = "0.7.2", default-features = false }
 pollster = "1.0.1"
-ime-engine.workspace = true
+pliers-engine.workspace = true

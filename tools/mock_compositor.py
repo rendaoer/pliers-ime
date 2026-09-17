@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A tiny mock Wayland compositor for exercising ime-aa's live mode.
+"""A tiny mock Wayland compositor for exercising pliers's live mode.
 
 It implements just enough of the wire protocol -- wl_display / wl_registry /
 wl_seat / wl_compositor / wl_shm / zwp_input_method_v2 / zwp_virtual_keyboard_v1
@@ -61,7 +61,7 @@ EVDEV = {
 # 方向键 ↓（组词时用来翻候选）
 EVDEV_DOWN = 108
 
-# 候选框高度（逻辑像素）：ime_popup 的版面高度，mock 这边没有 wl_output 所以缩放是 1
+# 候选框高度（逻辑像素）：pliers_popup 的版面高度，mock 这边没有 wl_output 所以缩放是 1
 POPUP_HEIGHT = 42
 
 # Request signatures. "H" is a file descriptor: it consumes no message body
@@ -565,7 +565,7 @@ def main():
             flush=True,
         )
     elif mode == "hidpi":
-        # 高分屏（IME_AA_SCALE=2）：候选框要按 2 倍像素画（高 84），
+        # 高分屏（PLIERS_SCALE=2）：候选框要按 2 倍像素画（高 84），
         # 并且用 set_buffer_scale 告诉合成器"这块 buffer 是 2 倍密度"，
         # 不然 1.5x/2x 的屏幕上字是糊的
         ok = (

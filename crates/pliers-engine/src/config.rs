@@ -1,14 +1,14 @@
 //! 配置文件：输入法的"功能"都在这里定义，改行为不用改代码。
 //!
-//! 放在 `~/.config/ime-aa/config.toml`（也认 `$XDG_CONFIG_HOME` 和 `$IME_AA_CONFIG`），
-//! 没有这个文件就用默认值跑。完整示例见仓库根目录的 `ime-aa.example.toml`。
+//! 放在 `~/.config/pliers/config.toml`（也认 `$XDG_CONFIG_HOME` 和 `$PLIERS_CONFIG`），
+//! 没有这个文件就用默认值跑。完整示例见仓库根目录的 `pliers.example.toml`。
 //!
 //! ```toml
 //! [scheme]
 //! kind = "full-pinyin"          # full-pinyin | double-pinyin | table
 //!
 //! [dict]
-//! path = "~/.local/share/ime-aa/dict.db"
+//! path = "~/.local/share/pliers/dict.db"
 //! max_candidates = 9
 //! ```
 
@@ -21,13 +21,13 @@ use crate::scheme::{DoublePinyin, FullPinyin, Layout, Scheme, Table};
 
 /// 默认配置文件路径（找不到就用内置默认值）
 pub fn config_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("IME_AA_CONFIG") {
+    if let Some(path) = std::env::var_os("PLIERS_CONFIG") {
         return PathBuf::from(path);
     }
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home().join(".config"));
-    base.join("ime-aa").join("config.toml")
+    base.join("pliers").join("config.toml")
 }
 
 /// 默认词库路径
@@ -35,7 +35,7 @@ pub fn default_dict_path() -> PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home().join(".local").join("share"));
-    base.join("ime-aa").join("dict.db")
+    base.join("pliers").join("dict.db")
 }
 
 fn home() -> PathBuf {
@@ -86,7 +86,7 @@ fn default_layout() -> String {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DictConfig {
-    /// 词库文件（`ime-dict` 导入出来的那个 SQLite）
+    /// 词库文件（`pliers-dict` 导入出来的那个 SQLite）
     #[serde(default = "default_dict")]
     pub path: String,
     /// 候选框最多显示几个
@@ -129,9 +129,9 @@ impl Config {
     }
 
     /// 词库文件路径（展开过 `~`）。
-    /// `IME_AA_DICT` 环境变量优先级最高 —— 临时换个库看看效果时很方便
+    /// `PLIERS_DICT` 环境变量优先级最高 —— 临时换个库看看效果时很方便
     pub fn dict_path(&self) -> PathBuf {
-        match std::env::var_os("IME_AA_DICT") {
+        match std::env::var_os("PLIERS_DICT") {
             Some(path) => PathBuf::from(path),
             None => expand(&self.dict.path),
         }
@@ -160,9 +160,9 @@ impl Config {
     }
 }
 
-/// 一份带注释的配置模板（`ime-aa --init-config` 会写到配置文件路径）
-pub const EXAMPLE: &str = r#"# ime-aa 配置
-# 放在 ~/.config/ime-aa/config.toml 就会生效；删掉它就用默认值
+/// 一份带注释的配置模板（`pliers --init-config` 会写到配置文件路径）
+pub const EXAMPLE: &str = r#"# pliers 配置
+# 放在 ~/.config/pliers/config.toml 就会生效；删掉它就用默认值
 
 [scheme]
 # 用哪套输入方案：
@@ -179,8 +179,8 @@ kind = "full-pinyin"
 # name = "wubi"
 
 [dict]
-# 词库文件（cargo run -p ime-dict --release -- --help 看怎么生成）
-# path = "~/.local/share/ime-aa/dict.db"
+# 词库文件（cargo run -p pliers-dict --release -- --help 看怎么生成）
+# path = "~/.local/share/pliers/dict.db"
 # 候选框最多显示几个
 # max_candidates = 9
 "#;

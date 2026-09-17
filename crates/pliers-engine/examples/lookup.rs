@@ -1,15 +1,15 @@
 //! 命令行试打：不进合成器、不用键盘，直接看某个输入会出哪些候选、每个键花多久。
 //!
 //! ```text
-//! cargo run -p ime-engine --release --example lookup -- shijian
-//! cargo run -p ime-engine --example lookup -- nihao --config ~/.config/ime-aa/config.toml
+//! cargo run -p pliers-engine --release --example lookup -- shijian
+//! cargo run -p pliers-engine --example lookup -- nihao --config ~/.config/pliers/config.toml
 //! ```
 //!
 //! 调词库、加词之后用它看效果最快 —— 比开输入法在输入框里打字快多了。
 
 use std::time::Instant;
 
-use ime_engine::{Action, Config, Engine, KeyInput};
+use pliers_engine::{Action, Config, Engine, KeyInput};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
@@ -73,7 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 空格上屏第一个
     let action = engine.on_key(KeyInput {
         keycode: 57,
-        keysym: ime_engine::KEY_SPACE,
+        keysym: pliers_engine::KEY_SPACE,
         pressed: true,
         shortcut: false,
         active: true,

@@ -2,7 +2,7 @@
 resolver = "3"
 members = ["crates/*"]
 # 直接 `cargo run` 就跑主程序，不用写 -p
-default-members = ["crates/ime-aa"]
+default-members = ["crates/pliers-ime"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,6 +13,6 @@ wayland-client = "0.31"
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 xkbcommon = "0.7"
 
-ime-engine = { path = "crates/ime-engine" }
-ime-popup = { path = "crates/ime-popup" }
-ime-wayland = { path = "crates/ime-wayland" }
+pliers-engine = { path = "crates/pliers-engine" }
+pliers-popup = { path = "crates/pliers-popup" }
+pliers-wayland = { path = "crates/pliers-wayland" }

@@ -1,9 +1,0 @@
-[package]
-name = "ime-aa"
-description = "最小可用的 Wayland 中文输入法（组装 ime-engine + ime-wayland）"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-ime-engine.workspace = true
-ime-wayland.workspace = true

@@ -910,54 +910,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ime-aa"
-version = "0.1.0"
-dependencies = [
- "ime-engine",
- "ime-wayland",
-]
-
-[[package]]
-name = "ime-dict"
-version = "0.1.0"
-dependencies = [
- "ime-engine",
- "pollster",
- "turso",
-]
-
-[[package]]
-name = "ime-engine"
-version = "0.1.0"
-dependencies = [
- "pollster",
- "serde",
- "toml",
- "turso",
-]
-
-[[package]]
-name = "ime-popup"
-version = "0.1.0"
-dependencies = [
- "ab_glyph",
- "fontdb",
- "ime-engine",
- "png",
-]
-
-[[package]]
-name = "ime-wayland"
-version = "0.1.0"
-dependencies = [
- "ime-engine",
- "ime-popup",
- "wayland-client",
- "wayland-protocols-misc",
- "xkbcommon",
-]
-
-[[package]]
 name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1350,6 +1302,54 @@ name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
+
+[[package]]
+name = "pliers-dict"
+version = "0.1.0"
+dependencies = [
+ "pliers-engine",
+ "pollster",
+ "turso",
+]
+
+[[package]]
+name = "pliers-engine"
+version = "0.1.0"
+dependencies = [
+ "pollster",
+ "serde",
+ "toml",
+ "turso",
+]
+
+[[package]]
+name = "pliers-ime"
+version = "0.1.0"
+dependencies = [
+ "pliers-engine",
+ "pliers-wayland",
+]
+
+[[package]]
+name = "pliers-popup"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "fontdb",
+ "pliers-engine",
+ "png",
+]
+
+[[package]]
+name = "pliers-wayland"
+version = "0.1.0"
+dependencies = [
+ "pliers-engine",
+ "pliers-popup",
+ "wayland-client",
+ "wayland-protocols-misc",
+ "xkbcommon",
+]
 
 [[package]]
 name = "png"

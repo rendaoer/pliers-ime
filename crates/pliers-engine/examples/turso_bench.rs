@@ -1,11 +1,11 @@
 //! 基准：turso 能不能扛住"每敲一个键查一次库"。
 //!
 //! ```text
-//! cargo run -p ime-engine --example turso_bench
+//! cargo run -p pliers-engine --example turso_bench
 //! ```
 //!
 //! 结论（20 万行的合成词库）：精确匹配 64µs，宽前缀 `LIKE 'ni%'` 要 **280ms**。
-//! 所以拼音切分必须在内存里做 —— 见 `crates/ime-engine/src/dict.rs` 文件头。
+//! 所以拼音切分必须在内存里做 —— 见 `crates/pliers-engine/src/dict.rs` 文件头。
 //!
 //! 要回答三件事：
 //! 1. 建库/批量插入有多快（1.5M 行的导入要多久）

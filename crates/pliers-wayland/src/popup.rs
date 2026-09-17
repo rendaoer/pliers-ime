@@ -5,7 +5,7 @@
 //! 自己挪；能控制的只有"画多大、画什么"。大小 = 你 attach 的 buffer 大小，
 //! 而 `attach(None, 0, 0)` 就是隐藏。
 //!
-//! "画什么" 在 `ime-popup` crate 里，这里只管怎么贴上去，外加两件事：
+//! "画什么" 在 `pliers-popup` crate 里，这里只管怎么贴上去，外加两件事：
 //!
 //! * **缓冲区轮换**：内容每敲一个字就变，不能一边被合成器显示一边改写，
 //!   所以只在收到 `wl_buffer.release`（合成器用完了）之后才重用那块内存
@@ -16,8 +16,8 @@ use std::error::Error;
 use std::fs::File;
 use std::os::fd::AsFd;
 
-use ime_engine::Preedit;
-use ime_popup::Painter;
+use pliers_engine::Preedit;
+use pliers_popup::Painter;
 use wayland_client::protocol::{wl_buffer, wl_compositor, wl_shm, wl_shm_pool, wl_surface};
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
 use wayland_protocols_misc::zwp_input_method_v2::client::{
@@ -91,8 +91,8 @@ impl PopupSurface {
         let Some(index) = self.pick(image.width, image.height) else {
             return; // pick 里已经打过日志了
         };
-        if let Err(e) = ime_popup::write(&self.slots[index].file, 0, &image) {
-            eprintln!("ime-aa: 写候选框像素失败：{e}");
+        if let Err(e) = pliers_popup::write(&self.slots[index].file, 0, &image) {
+            eprintln!("pliers: 写候选框像素失败：{e}");
             return;
         }
         self.slots[index].busy = true;
@@ -133,7 +133,7 @@ impl PopupSurface {
         match self.create_slot(width, height) {
             Ok(index) => Some(index),
             Err(e) => {
-                eprintln!("ime-aa: 建候选框缓冲区失败：{e}");
+                eprintln!("pliers: 建候选框缓冲区失败：{e}");
                 None
             }
         }
@@ -144,7 +144,7 @@ impl PopupSurface {
     fn create_slot(&mut self, width: i32, height: i32) -> Result<usize, Box<dyn Error>> {
         self.evict(width);
         let size = (width * height * 4) as usize;
-        let file = ime_popup::shm_file(size)?;
+        let file = pliers_popup::shm_file(size)?;
         let pool = self
             .shm
             .create_pool(file.as_fd(), size as i32, &self.qh, ());
@@ -205,7 +205,7 @@ impl Dispatch<popup::ZwpInputPopupSurfaceV2, ()> for State {
         {
             state.caret = (x, y, width, height);
             if state.debug {
-                eprintln!("ime-aa: 光标矩形 {width}x{height} @ ({x},{y})（相对候选框左上角）");
+                eprintln!("pliers: 光标矩形 {width}x{height} @ ({x},{y})（相对候选框左上角）");
             }
         }
     }

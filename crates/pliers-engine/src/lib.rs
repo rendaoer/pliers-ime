@@ -898,6 +898,21 @@ mod tests {
     }
 
     #[test]
+    fn 小鹤双拼打不能() {
+        // 回归：以前 `ng` 这个码被「嗯」占着，bung 解成 `bu ng`，怎么打都出不来「不能」
+        let dict = dict::testing::sample_dict();
+        let scheme = DoublePinyin::new(Layout::preset("flypy").unwrap(), dict.syllables());
+        let mut engine = Engine::new(dict, Box::new(scheme), Settings::default());
+        type_letters(&mut engine, "bung");
+        assert!(
+            engine.preedit().candidates.contains(&"不能".to_string()),
+            "候选是：{:?}",
+            engine.preedit().candidates
+        );
+        assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Commit("不能".into()));
+    }
+
+    #[test]
     fn 用户选过的词下次排前面() {
         let mut engine = engine();
         type_letters(&mut engine, "ni");

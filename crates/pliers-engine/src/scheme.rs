@@ -389,6 +389,12 @@ impl DoublePinyin {
         let mut by_first: HashMap<char, Vec<String>> = HashMap::new();
         let mut semicolon = false;
         for syllable in syllables {
+            // 感叹词音节（嗯 ng / 呣 m）要跳过：它们的码会跟正常音节撞车 ——
+            // 小鹤里 `ng` 既是「嗯」也是「能」(neng)，被「嗯」占了之后打 bung 就出不来「不能」。
+            // 反正双拼里也没人用两键打「嗯」（都打 en）
+            if UNENCODABLE.contains(&syllable.as_str()) {
+                continue;
+            }
             let Some(code) = layout.encode(syllable) else {
                 continue; // 这套键位没给这个音节安排位置
             };
@@ -588,6 +594,40 @@ mod tests {
         // 小鹤：hao = h+c
         let flypy = DoublePinyin::new(Layout::preset("flypy").unwrap(), &syllables());
         assert_eq!(flypy.lookup_codes("nihc"), ["ni hao"]);
+    }
+
+    #[test]
+    fn 每个音节的码都解回自己() {
+        // 撞车的后果是"某个音节永远打不出来"：`ng` 这个码被「嗯」占了之后，
+        // 小鹤用户打 bung 就再也出不来「不能」
+        for name in ["natural", "flypy", "mspy"] {
+            let layout = Layout::preset(name).unwrap();
+            let double = DoublePinyin::new(layout.clone(), &syllables());
+            for syllable in syllables() {
+                if UNENCODABLE.contains(&syllable.as_str()) {
+                    continue; // 感叹词双拼打不出来（嗯 打 en），不算
+                }
+                let code = layout.encode(&syllable).unwrap();
+                assert_eq!(
+                    double.decode_syllable(&code),
+                    Some(syllable.as_str()),
+                    "{name}：码 {code:?} 解出来不是 {syllable}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn 双拼能打出不能() {
+        // 用户报的那个 bug：小鹤 bung = bu + neng = 不能
+        let layout = Layout::preset("flypy").unwrap();
+        let double = DoublePinyin::new(layout, &syllables());
+        assert_eq!(double.lookup_codes("bung"), ["bu neng"]);
+        // 自然码和微软的 neng 也在 g 上
+        for name in ["natural", "mspy"] {
+            let double = DoublePinyin::new(Layout::preset(name).unwrap(), &syllables());
+            assert_eq!(double.lookup_codes("bung"), ["bu neng"], "{name}");
+        }
     }
 
     #[test]

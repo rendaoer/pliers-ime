@@ -363,6 +363,7 @@ pub(crate) mod testing {
                 ("ni hao", "你好", 3_000_000),
                 ("ni hao", "妮好", 20),
                 ("ni ha", "你哈", 30),
+                ("bu neng", "不能", 4_000_000),
             ] {
                 pollster::block_on(conn.execute(
                     "INSERT INTO word (scheme, code, text, weight) VALUES ('pinyin', ?1, ?2, ?3)",

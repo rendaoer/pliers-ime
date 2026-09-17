@@ -68,12 +68,15 @@ fn merge(dict: &Dict, scheme: &str, codes: &[String], limit: usize) -> Vec<Strin
     out
 }
 
-/// 整串匹配的那批候选
-fn whole(input: &str, words: Vec<String>) -> Vec<Candidate> {
-    words
+/// 整串匹配的那批候选。`dict_words` 是词库里真有的词，`built` 是整句拼出来的 ——
+/// 两者的区别在"能不能被 Del 删掉"上（词库里的删不了）
+fn whole(input: &str, dict_words: Vec<String>, built: Vec<String>) -> Vec<Candidate> {
+    let mut out: Vec<Candidate> = dict_words
         .into_iter()
-        .map(|text| Candidate::whole(text, input))
-        .collect()
+        .map(|text| Candidate::whole(text, input).from_dict())
+        .collect();
+    out.extend(built.into_iter().map(|text| Candidate::whole(text, input)));
+    out
 }
 
 /// 把整句候选接到精确候选后面（去重、不超 `limit`）。
@@ -100,9 +103,11 @@ fn push_sentences(
 /// 分段匹配：把输入按音节边界切成"前面一段 + 剩下的一截"，
 /// 前面那段照常查词（整词 + 整句），候选只吃前面那几个字符。
 ///
-/// 从最长的前缀往短了试，**第一段有候选就收手** —— 这跟老式输入法一个思路：
-/// `nihaoma` 先给「你好」相关的候选，选完 `ma` 接着来。前缀最多试 [`MAX_PREFIX_TRIES`] 个，
-/// 免得长句子把查询数炸掉
+/// 从长到短**找第一个查得到词的分段**（那就是"前面一整段"），再补上最短的单音节那段。
+///
+/// 为什么不是"只看最长的两段"：`tmqizfmeyh`（天气怎么样）里 `tmqizfme`、`tmqizfm`
+/// 都查不到词，而「天气」在再短一档的位置上 —— 只看头两档的话就只剩单字「天」了。
+/// 往下试的档数由 [`MAX_PREFIX_TRIES`] 兜底，找到就停，一般也就查两三次
 fn prefix_candidates(
     dict: &Dict,
     scheme: &str,
@@ -110,20 +115,35 @@ fn prefix_candidates(
     limit: usize,
 ) -> Vec<Candidate> {
     let per_prefix = limit.max(4);
+    let mut out: Vec<Candidate> = Vec::new();
+
+    // 1) "前面一整段"：从长到短，第一个查得到词的
     for (code, consumed) in prefix_codes.iter().take(MAX_PREFIX_TRIES) {
         let words = merge(dict, scheme, std::slice::from_ref(code), per_prefix);
         if !words.is_empty() {
-            return words
-                .into_iter()
-                .map(|text| Candidate::partial(text, *consumed))
-                .collect();
+            out.extend(
+                words
+                    .into_iter()
+                    .map(|text| Candidate::partial(text, *consumed).from_dict()),
+            );
+            break;
         }
     }
-    Vec::new()
+
+    // 2) 最短的那段（一个音节）：让用户能一个字一个字地走 ——
+    //    不然长句子只能整词整词地选，细不到单字
+    if let Some((code, consumed)) = prefix_codes.last() {
+        for text in merge(dict, scheme, std::slice::from_ref(code), per_prefix) {
+            if !out.iter().any(|old| old.text == text) {
+                out.push(Candidate::partial(text, *consumed).from_dict());
+            }
+        }
+    }
+    out
 }
 
-/// 分段匹配最多试几个前缀
-const MAX_PREFIX_TRIES: usize = 3;
+/// 分段匹配最多往下试几个前缀（找到有词的就停，一般用不到这么多）
+const MAX_PREFIX_TRIES: usize = 6;
 
 // ---- 全拼 -------------------------------------------------------------------
 
@@ -149,20 +169,22 @@ impl Scheme for FullPinyin {
     }
 
     fn candidates(&self, dict: &Dict, input: &str, limit: usize) -> Vec<Candidate> {
-        let mut words = merge(
+        // 词库里真有的词（整串命中）
+        let words = merge(
             dict,
             self.name(),
             &self.segmenter.lookup_codes(input),
             limit,
         );
+        // 整句候选：库里没有整词时按词拼出来的，不是词库里的词条
+        let mut built = Vec::new();
         if self.sentence
             && let Some(syllables) = self.segmenter.complete_segmentations(input).first()
         {
-            push_sentences(&mut words, dict, self.name(), syllables, limit);
+            push_sentences(&mut built, dict, self.name(), syllables, limit);
         }
 
-        let mut out = whole(input, words);
-        // 整串没匹配上（或者匹配得少）时，给"只吃前面一段"的候选
+        let mut out = whole(input, words, built);
         out.extend(prefix_candidates(
             dict,
             self.name(),
@@ -548,10 +570,11 @@ impl DoublePinyin {
         let mut out = Vec::new();
         let chars = input.chars().count();
         let mut cut = chars.saturating_sub(1);
-        while cut >= 4 {
+        // 一路切到 2 个键（一个音节）—— 分词最低到单字
+        while cut >= 2 {
             let head: String = input.chars().take(cut).collect();
             if let Some((syllables, None)) = self.decode_pairs(&head)
-                && syllables.len() >= 2
+                && !syllables.is_empty()
             {
                 out.push((syllables.join(" "), cut));
             }
@@ -597,16 +620,17 @@ impl Scheme for DoublePinyin {
     }
 
     fn candidates(&self, dict: &Dict, input: &str, limit: usize) -> Vec<Candidate> {
-        let mut words = merge(dict, self.name(), &self.lookup_codes(input), limit);
+        let words = merge(dict, self.name(), &self.lookup_codes(input), limit);
         // 整句候选：键正好两两解完（一组一个音节）时才有得拼
+        let mut built = Vec::new();
         if self.sentence
             && let Some((syllables, None)) = self.decode_pairs(input)
             && syllables.len() >= 2
         {
-            push_sentences(&mut words, dict, self.name(), &syllables, limit);
+            push_sentences(&mut built, dict, self.name(), &syllables, limit);
         }
 
-        let mut out = whole(input, words);
+        let mut out = whole(input, words, built);
         // 分段匹配：双拼两键一个音节，所以前缀只切在偶数位置上
         out.extend(prefix_candidates(
             dict,
@@ -661,7 +685,7 @@ impl Scheme for Table {
             }
         }
         // 码表方案没有"分段"这回事：码就是码，一次打完
-        whole(input, out)
+        whole(input, out, Vec::new())
     }
 }
 
@@ -738,6 +762,19 @@ mod tests {
         // 小鹤：hao = h+c
         let flypy = DoublePinyin::new(Layout::preset("flypy").unwrap(), &syllables(), true);
         assert_eq!(flypy.lookup_codes("nihc"), ["ni hao"]);
+    }
+
+    #[test]
+    fn 双拼长输入的分段前缀到单音节() {
+        let flypy = DoublePinyin::new(Layout::preset("flypy").unwrap(), &syllables(), true);
+        let codes = flypy.prefix_codes("wouiyigextug");
+        assert!(!codes.is_empty(), "分段前缀不该是空的");
+        assert_eq!(
+            codes.last().unwrap().1,
+            2,
+            "最短的该是两键一个音节：{codes:?}"
+        );
+        assert!(codes[0].1 > codes.last().unwrap().1, "{codes:?}");
     }
 
     #[test]

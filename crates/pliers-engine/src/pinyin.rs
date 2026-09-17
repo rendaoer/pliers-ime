@@ -162,8 +162,8 @@ impl Segmenter {
             let Some(syllables) = self.segmentations(head, 1).into_iter().next() else {
                 continue;
             };
-            if syllables.len() < 2 {
-                continue; // 只切出一个音节的分段没意义（打 ni 不该出「你」当分段候选）
+            if syllables.is_empty() {
+                continue;
             }
             // 尾巴是"感叹词音节"（呣 m、嗯 ng）的不算分段点：
             // 不然 `nihaom` 会切出 `ni hao m`，白白占掉一个前缀名额
@@ -327,14 +327,17 @@ mod tests {
     }
 
     #[test]
-    fn 前缀码从长到短() {
-        // nihaoma 的分段前缀：先「ni hao」(吃 5 个字符)，再「ni」(吃 2 个)
+    fn 前缀码从长到短_最后到单字() {
+        // nihaoma 的分段前缀：先「ni hao」(吃 5 个字符)，再「ni ha」(吃 4 个)，
+        // 最后是单音节的「ni」(吃 2 个)—— 分词最低到单字
         let codes = segmenter().prefix_codes("nihaoma");
-        // 先「ni hao」(吃 5 个字符)，再「ni ha」(吃 4 个)
         assert_eq!(codes[0], ("ni hao".to_string(), 5), "{codes:?}");
         assert!(codes.contains(&("ni ha".to_string(), 4)), "{codes:?}");
-        // 单个音节不算分段点：打 ni 不该把「你」当"分段候选"塞进来
-        assert!(codes.iter().all(|(code, _)| code != "ni"), "{codes:?}");
+        assert_eq!(codes.last(), Some(&("ni".to_string(), 2)), "{codes:?}");
+        assert!(
+            codes.windows(2).all(|pair| pair[0].1 > pair[1].1),
+            "长的在前短的在后：{codes:?}"
+        );
         // 整串本身不算"前缀"
         assert!(
             codes.iter().all(|(code, _)| code != "ni hao ma"),
@@ -352,10 +355,11 @@ mod tests {
     }
 
     #[test]
-    fn 切不出两个音节就没有前缀() {
-        // nih 的尾巴 h 切不动，只有「ni」这一个音节 → 不给分段候选
-        assert!(segmenter().prefix_codes("nih").is_empty());
+    fn 短输入不做分段() {
+        // 一个字母：本来就是单字候选，没什么好分的
         assert!(segmenter().prefix_codes("n").is_empty());
+        // nih：尾巴 h 切不动，但前面「ni」是完整音节 —— 单字分段还是给
+        assert_eq!(segmenter().prefix_codes("nih"), [("ni".to_string(), 2)]);
     }
 
     #[test]

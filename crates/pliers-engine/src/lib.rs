@@ -226,6 +226,10 @@ pub struct Candidate {
     pub consumed: usize,
     /// 这是"用户自己拼过的话"（`user_phrase` 里的），不是词库里的词 —— 按 Del 能删
     pub learned: bool,
+    /// 词库里**本来就有**这个词条（`word` 表命中）。
+    /// 黑名单（`user_hidden`）只对"不是词库里的"候选生效 ——
+    /// 词库里的词再怎么删也删不掉，不然一次误操作就永久少一个正常候选
+    pub from_dict: bool,
 }
 
 impl Candidate {
@@ -235,6 +239,7 @@ impl Candidate {
             text: text.into(),
             consumed: input.chars().count(),
             learned: false,
+            from_dict: false,
         }
     }
 
@@ -244,12 +249,19 @@ impl Candidate {
             text: text.into(),
             consumed,
             learned: false,
+            from_dict: false,
         }
     }
 
     /// 用户自己拼出来的整句（按 Del 能删掉）
     pub fn learned(mut self) -> Self {
         self.learned = true;
+        self
+    }
+
+    /// 词库里本来就有这个词条（Del 删不掉）
+    pub fn from_dict(mut self) -> Self {
+        self.from_dict = true;
         self
     }
 }
@@ -445,6 +457,14 @@ impl Engine {
             if !self.pool.iter().any(|old| old.text == candidate.text) {
                 self.pool.push(candidate);
             }
+        }
+        // 用户按 Del 删过的：这串键上不再出现。
+        // 但**词库里本来就有**的候选不受影响 —— 那些删不掉（早先版本误删留下的黑名单
+        // 也就自动失效了，不用手工清库）
+        let hidden = self.dict.hidden(&self.buffer);
+        if !hidden.is_empty() {
+            self.pool
+                .retain(|candidate| candidate.from_dict || !hidden.contains(&candidate.text));
         }
         self.pool.truncate(self.pool_size);
     }
@@ -648,12 +668,12 @@ impl Engine {
             KEY_1..=KEY_9 if composing => {
                 let index = (key.keysym - KEY_1) as usize;
                 self.consumed.push(key.keycode);
-                // 数字选的是**这一页**的第几个（不是池子里的第几个）
-                if self.pool.get(self.page_start() + index).is_some() {
+                // 数字选的是**这一页**的第几个：超出一页（`limit`）或者这一页没那么多个，
+                // 都当没按过 —— 池子里后面的候选得先翻页才轮得到
+                if index < self.limit && self.pool.get(self.page_start() + index).is_some() {
                     self.cursor = self.page_start() + index;
                     self.commit_candidate(key.keycode)
                 } else {
-                    // 候选没那么多却按了这个数字：当没按过（但也不把数字塞进拼音）
                     Action::Swallow
                 }
             }
@@ -744,36 +764,43 @@ impl Engine {
         }
     }
 
-    /// Del：忘掉选中的候选（用户自己拼的整句直接删；词库里的词只清偏好）
+    /// Del：删掉选中的候选 —— **只删"自己拼出来的"**（`user_phrase` 里的）。
+    ///
+    /// 词库里原本就有的词、以及整句候选拼出来的词，都不动（回一句"删不了"）：
+    /// 词库是导入出来的，那是别人整理的数据。
+    ///
+    /// 删的时候做三件事：
+    /// 1. `user_phrase` 里那一行真删掉；
+    /// 2. 清掉"我用过它"的偏好（`user_word`）；
+    /// 3. 记进黑名单（`user_hidden`）—— 不然整句候选会立刻把同一个词拼回来，看着像没删掉。
+    ///
+    /// 删完把候选列表**重新显示出来**（选中回到第一个）：删没删掉一眼就能看见，
+    /// 也不用担心"接着按 Del 又把下一个删了"
     fn forget(&mut self) -> Action {
         let Some(candidate) = self.pool.get(self.cursor).cloned() else {
-            return Action::Forward; // 没候选的时候 Del 照旧给应用（删它自己的字）
+            // 组词当中 Del 一律吃掉，**绝不转发**：不然它会漏给应用，
+            // 在终端里就是一串 `^[[3~`（Del 的转义序列）
+            return Action::Notice("没有能删的候选".to_string());
         };
         let text = candidate.text.clone();
-        let result = if candidate.learned {
-            self.dict.forget_phrase(&self.buffer, &text)
-        } else {
-            self.dict.forget_boost(&text)
-        };
-        let removed = match result {
-            Ok(removed) => removed,
-            Err(e) => {
-                eprintln!("pliers: 删词失败：{e}");
-                false
-            }
-        };
+        if !candidate.learned {
+            return Action::Notice(format!("「{text}」不是自己拼的，删不了"));
+        }
 
-        // 列表照着新的库重排，光标尽量停在原地
-        let cursor = self.cursor;
+        if let Err(e) = self.dict.forget_phrase(&self.buffer, &text) {
+            eprintln!("pliers: 删整句失败：{e}");
+        }
+        if let Err(e) = self.dict.forget_boost(&text) {
+            eprintln!("pliers: 清偏好失败：{e}");
+        }
+        if let Err(e) = self.dict.hide(&self.buffer, &text) {
+            eprintln!("pliers: 记黑名单失败：{e}");
+        }
+
+        // 列表按新的库重排，选中回到第一个，然后**把候选框贴回来**
         self.refresh_pool();
-        self.cursor = cursor.min(self.pool.len().saturating_sub(1));
-        Action::Notice(if !removed {
-            format!("「{text}」不是自己加的，删不了")
-        } else if candidate.learned {
-            format!("删掉了「{text}」")
-        } else {
-            format!("「{text}」回到默认排序")
-        })
+        self.cursor = 0;
+        Action::UpdatePreedit(self.preedit())
     }
 
     /// 把**整串**收掉再上屏：符号、大写字母走这条路时不能留半截拼音在预编辑里
@@ -988,6 +1015,76 @@ mod tests {
     }
 
     #[test]
+    fn 分段可以一直细到单字() {
+        // nihaoma：除了一整段「你好」，也该给单字的「你」——
+        // 挑它就上屏「你」，剩下的 haoma 接着组
+        let mut engine = engine();
+        type_letters(&mut engine, "nihaoma");
+        let candidates = engine.preedit().candidates.clone();
+        assert!(candidates.contains(&"你好".to_string()), "{candidates:?}");
+        assert!(candidates.contains(&"你".to_string()), "{candidates:?}");
+
+        let Action::CommitAndContinue(text, rest) = pick(&mut engine, "你") else {
+            panic!("该是分段上屏");
+        };
+        assert_eq!(text, "你");
+        assert_eq!(rest.text, "haoma", "剩下的接着组");
+        // 剩下的还能继续一个字一个字挑
+        assert!(
+            rest.candidates.contains(&"好".to_string()),
+            "{:?}",
+            rest.candidates
+        );
+    }
+
+    #[test]
+    fn 分段要找得到中间那一段的词() {
+        // 回归：`nihaomaneng` 里 `ni hao ma ne`、`ni hao man` 都查不到词，
+        // 「你好」在再短一档 —— 以前只看最长的两档，结果只剩单字「你」
+        let mut engine = engine();
+        type_letters(&mut engine, "nihaomaneng");
+        let candidates = engine.preedit().candidates.clone();
+        assert!(candidates.contains(&"你好".to_string()), "{candidates:?}");
+        assert!(candidates.contains(&"你".to_string()), "{candidates:?}");
+
+        // 挑「你好」：上屏两个字符，剩下的接着组
+        let Action::CommitAndContinue(text, rest) = pick(&mut engine, "你好") else {
+            panic!("该是分段上屏");
+        };
+        assert_eq!(text, "你好");
+        assert_eq!(rest.text, "maneng");
+    }
+
+    #[test]
+    fn 黑名单不该盖住词库里的词() {
+        // 模拟老版本误删留下的黑名单：词库里的「你好」被记了一笔 ——
+        // 现在的规则是"词库里的词删不掉"，所以这一笔不该生效
+        let mut engine = engine();
+        engine.dict.hide("nihao", "你好").unwrap();
+        engine.set_text("nihao");
+        assert!(
+            engine.preedit().candidates.contains(&"你好".to_string()),
+            "词库里的词不该被黑名单挡住：{:?}",
+            engine.preedit().candidates
+        );
+    }
+
+    #[test]
+    fn 长串输入也能细到第一个字() {
+        // 四个音节：整句/整词候选再长，也总得给"第一个字"，不然只能整词整词地选
+        let mut engine = engine();
+        type_letters(&mut engine, "nihaobuneng");
+        let candidates = engine.preedit().candidates.clone();
+        assert!(candidates.contains(&"你".to_string()), "{candidates:?}");
+
+        let Action::CommitAndContinue(text, rest) = pick(&mut engine, "你") else {
+            panic!("该是分段上屏");
+        };
+        assert_eq!(text, "你");
+        assert_eq!(rest.text, "haobuneng", "后面的原样留着");
+    }
+
+    #[test]
     fn 分段拼出来的句子记进词库() {
         let mut engine = engine();
         type_letters(&mut engine, "nihaoma");
@@ -1010,54 +1107,80 @@ mod tests {
         let mut engine = engine();
         // 先拼出「你好马」（挑两段），它会记进 user_phrase
         type_letters(&mut engine, "nihaoma");
-        assert!(matches!(pick(&mut engine, "你好"), Action::CommitAndContinue(..)));
+        assert!(matches!(
+            pick(&mut engine, "你好"),
+            Action::CommitAndContinue(..)
+        ));
         assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Commit("吗".into()));
         assert_eq!(engine.dict.phrases("nihaoma", 9), ["你好吗"]);
 
         // 再打一遍：第一条就是它，按 Del 删掉
         engine.set_text("nihaoma");
         assert_eq!(engine.preedit().candidates[0], "你好吗");
-        let Action::Notice(message) = engine.on_key(key(KEY_DELETE)) else {
-            panic!("该回一句提示");
+        let Action::UpdatePreedit(preedit) = engine.on_key(key(KEY_DELETE)) else {
+            panic!("删完该把候选列表贴回来");
         };
-        assert!(message.contains("删掉了"), "{message}");
+        assert_eq!(preedit.text, "nihaoma", "预编辑不受影响");
+        assert_eq!(preedit.selected, 0, "选中回到第一个");
         assert!(engine.dict.phrases("nihaoma", 9).is_empty(), "库里该没了");
+        // 关键：整句候选会拼出同一个词，所以还得进黑名单，列表里才真的看不到它
         assert!(
-            !engine.preedit().candidates.contains(&"你好吗".to_string()),
-            "候选里也该没了：{:?}",
-            engine.preedit().candidates
+            !preedit.candidates.contains(&"你好吗".to_string()),
+            "删掉之后不该再出现：{:?}",
+            preedit.candidates
         );
-        assert_eq!(engine.text(), "nihaoma", "预编辑不受影响");
+        assert_eq!(engine.dict.hidden("nihaoma"), ["你好吗"]);
     }
 
     #[test]
-    fn 按_del_删不掉词库里的词只清偏好() {
+    fn 组词时_del_绝不转发() {
+        // Del 漏给应用的话，终端里会冒出一串 `^[[3~`
+        let mut typing = engine();
+        type_letters(&mut typing, "qqq"); // 一个候选都没有
+        assert!(matches!(typing.on_key(key(KEY_DELETE)), Action::Notice(_)));
+        // 没在组词时照旧是应用的键
+        let mut idle = engine();
+        assert_eq!(idle.on_key(key(KEY_DELETE)), Action::Forward);
+    }
+
+    #[test]
+    fn 按_del_删不掉词库里的词() {
         let mut engine = engine();
         type_letters(&mut engine, "nihao");
-        // 没选过它：Del 只回一句"删不了"，候选还在
         let Action::Notice(message) = engine.on_key(key(KEY_DELETE)) else {
             panic!("该回一句提示");
         };
         assert!(message.contains("删不了"), "{message}");
+        // 候选一个不少、库里也没记黑名单
         assert_eq!(engine.preedit().candidates[0], "你好");
-
-        // 选过一次（有了偏好）→ Del 清掉偏好，词本身留着
-        assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Commit("你好".into()));
-        engine.set_text("nihao");
-        let Action::Notice(message) = engine.on_key(key(KEY_DELETE)) else {
-            panic!("该回一句提示");
-        };
-        assert!(message.contains("默认排序"), "{message}");
-        assert_eq!(engine.preedit().candidates[0], "你好", "词库里的词不能删");
+        assert!(engine.dict.hidden("nihao").is_empty());
     }
 
     #[test]
-    fn 没候选时_del_照旧转发() {
+    fn 删完的句子换一次输入还是不再出现() {
         let mut engine = engine();
-        // 没在组词：Del 是应用的键（删它自己的字）
-        assert_eq!(engine.on_key(key(KEY_DELETE)), Action::Forward);
-        // 在组词但一个候选都没有（`qqq`）：也没得删，转发
-        type_letters(&mut engine, "qqq");
+        type_letters(&mut engine, "nihaoma");
+        assert!(matches!(
+            pick(&mut engine, "你好"),
+            Action::CommitAndContinue(..)
+        ));
+        assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Commit("吗".into()));
+
+        engine.set_text("nihaoma");
+        assert_eq!(engine.preedit().candidates[0], "你好吗");
+        assert!(matches!(
+            engine.on_key(key(KEY_DELETE)),
+            Action::UpdatePreedit(_)
+        ));
+        // 重新打一遍（相当于重新查库）：黑名单还在，整句候选也拼不回来
+        engine.set_text("nihaoma");
+        assert!(!engine.preedit().candidates.contains(&"你好吗".to_string()));
+    }
+
+    #[test]
+    fn 没在组词时_del_是应用的键() {
+        // 这个时候 Del 归应用（删它自己的字）；组词当中则一律吃掉，见上一个测试
+        let mut engine = engine();
         assert_eq!(engine.on_key(key(KEY_DELETE)), Action::Forward);
     }
 
@@ -1279,12 +1402,17 @@ mod tests {
 
     #[test]
     fn 候选不够一页就没有页码() {
-        let mut engine = engine();
-        type_letters(&mut engine, "nihao");
+        // 一页放 20 个：`ni` 的候选（单字 + 分段）也就十来个，够一页
+        let settings = Settings {
+            limit: 20,
+            ..Settings::default()
+        };
+        let mut engine = engine_with(settings);
+        type_letters(&mut engine, "ni");
         let preedit = engine.preedit();
         assert_eq!(preedit.pages, 1);
         assert_eq!(preedit.page, 0);
-        assert_eq!(preedit.candidates[0], "你好");
+        assert_eq!(preedit.candidates[0], "你");
     }
 
     #[test]
@@ -1298,12 +1426,16 @@ mod tests {
 
     #[test]
     fn 数字超出候选范围就什么都别发生() {
-        let mut engine = engine();
-        // nihao 只有 2 个候选，按 9 应该当没按过
-        type_letters(&mut engine, "nihao");
-        assert!(engine.preedit().candidates.len() < 9);
+        // 一页只放 3 个：`ni` 的候选不止 3 个，按 9 该当没按过
+        let settings = Settings {
+            limit: 3,
+            ..Settings::default()
+        };
+        let mut engine = engine_with(settings);
+        type_letters(&mut engine, "ni");
+        assert_eq!(engine.preedit().candidates.len(), 3);
         assert_eq!(engine.on_key(key(0x39)), Action::Swallow); // '9'
-        assert_eq!(engine.text(), "nihao"); // 没被提交，也没混进拼音
+        assert_eq!(engine.text(), "ni"); // 没被提交，也没混进拼音
     }
 
     #[test]

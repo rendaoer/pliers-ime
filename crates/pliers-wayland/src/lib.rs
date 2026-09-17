@@ -491,7 +491,10 @@ impl State {
             self.show_notice(mode_now.label());
         } else if let Some(text) = notice {
             self.show_notice(&text);
-        } else if self.notice {
+        } else if pressed && self.notice {
+            // 提示要等**下一次按下**才收 —— 不能看"下一个事件"：
+            // 触发提示那个键自己的抬起紧跟其后，会把刚弹出来的提示直接收掉
+            //（表现就是"按了 Del 之后候选框没了"，切中英文的「中」/「英」也一闪而过）
             self.hide_notice();
         }
     }

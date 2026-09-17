@@ -192,10 +192,16 @@ run() { # run <名字> <按键> <期望提交> <模式> [额外环境变量]
     local png=""
     [ "$name" = "active" ] && png="${PNG_ARG:-}"
 
+    # 记性的两个场景要"干净词库"（前面场景会把拼过的句子记进去），各用一份自己的副本
+    local dict="$DICT"
+    case "$name" in
+        segment|forget) dict="$LOGS/$name.db"; cp "$DICT" "$dict" ;;
+    esac
+
     MOCK_PNG="$png" python3 tools/mock_compositor.py "$SOCK" "$keys" "$expect" "$mode" >"$log" 2>&1 &
     local mock=$!
     sleep 0.4
-    env PLIERS_DICT="$DICT" PLIERS_CONFIG="$CFG" $extra WAYLAND_DISPLAY="$SOCK" timeout 30 ./target/debug/pliers >>"$log" 2>&1
+    env PLIERS_DICT="$dict" PLIERS_CONFIG="$CFG" $extra WAYLAND_DISPLAY="$SOCK" timeout 30 ./target/debug/pliers >>"$log" 2>&1
     wait "$mock"
 
     if grep -q "PASS" "$log"; then
@@ -230,6 +236,10 @@ run symbol         "nihao"   你好  symbol        # 符号必须排在文字后
 
 echo "== 分段上屏 + 记忆 =="
 run segment        "nihaoma" ""    segment       # 挑两段拼出「你好马」，再打一遍直接出
+run forget         "nihaoma" ""    forget        # 再打一遍时按 Del 删掉它，退回「你好吗」
+# Del 在组词当中一律吃掉：`nihaoma` 之后连按 Del，一个键都不该漏给应用
+# （漏出去在终端里就是 `^[[3~` 那串东西）
+run del_swallow    "n,i,h,a,o,m,a,del,del,del,space" "你好吗" script
 
 echo "== 高分屏 =="
 run hidpi          "nihao "  你好  hidpi  "PLIERS_SCALE=2"

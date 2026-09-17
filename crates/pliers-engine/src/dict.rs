@@ -52,6 +52,13 @@ pub const SCHEMA: &[&str] = &[
         last_used INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (code, text)
     )",
+    // 用户在候选框里按 Del"删掉"的词：这个词/这句话以后不再出现在这串键的候选里。
+    // 词库里的词条不动（那是导入出来的），所以另开一张"黑名单"
+    "CREATE TABLE IF NOT EXISTS user_hidden (
+        code TEXT NOT NULL,
+        text TEXT NOT NULL,
+        PRIMARY KEY (code, text)
+    )",
     "CREATE TABLE IF NOT EXISTS syllable (syl TEXT PRIMARY KEY)",
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
 ];
@@ -247,13 +254,33 @@ impl Dict {
         Ok(changed > 0)
     }
 
+    /// 这串键上"用户删掉过"的词（候选框里按 Del）。查候选时要按它过滤
+    pub fn hidden(&self, code: &str) -> Vec<String> {
+        self.query(
+            "SELECT text, 0 FROM user_hidden WHERE code = ?1",
+            &[code.into()],
+        )
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect()
+    }
+
+    /// 记下"这串键上别再给我这个词"（`Del` 用）。返回是不是新记的
+    pub fn hide(&self, code: &str, text: &str) -> Result<bool> {
+        let changed = pollster::block_on(self.conn.execute(
+            "INSERT OR IGNORE INTO user_hidden (code, text) VALUES (?1, ?2)",
+            turso::params![code, text],
+        ))?;
+        Ok(changed > 0)
+    }
+
     /// 清掉"我用过这个词"的偏好（`user_word` 里那笔）。词条本身留着 ——
     /// 词库里真有的词不该因为一次误操作就消失
     pub fn forget_boost(&self, text: &str) -> Result<bool> {
-        let changed = pollster::block_on(
-            self.conn
-                .execute("DELETE FROM user_word WHERE text = ?1", turso::params![text]),
-        )?;
+        let changed = pollster::block_on(self.conn.execute(
+            "DELETE FROM user_word WHERE text = ?1",
+            turso::params![text],
+        ))?;
         Ok(changed > 0)
     }
 
@@ -357,6 +384,17 @@ mod tests {
         assert!(dict.forget_boost("泥").unwrap());
         assert!(!dict.forget_boost("泥").unwrap(), "第二次就没得清了");
         assert_eq!(words(dict.exact("pinyin", "ni", 3)), ["你", "尼", "泥"]);
+    }
+
+    #[test]
+    fn 删掉的词记进黑名单() {
+        let dict = sample_dict();
+        assert!(dict.hidden("nihaoma").is_empty());
+        assert!(dict.hide("nihaoma", "你好马").unwrap());
+        assert!(!dict.hide("nihaoma", "你好马").unwrap(), "第二次就没得记了");
+        assert_eq!(dict.hidden("nihaoma"), ["你好马"]);
+        // 只对"这串键"生效，别的键不受影响
+        assert!(dict.hidden("nihao").is_empty());
     }
 
     #[test]

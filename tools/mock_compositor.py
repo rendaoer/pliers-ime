@@ -31,7 +31,8 @@ Modes: active | inactive | shortcut | shift | mixed | enter | escape | caps |
        pick (数字选词) | nav (方向键换候选) | page (翻页) | symbol (组词中敲符号) |
        switch (组词中切中英文) | control (先等一会儿再打字，留给 `pliers set` 用) |
        watch (等 6 秒，留给"改配置文件看它自动重读"用) |
-       segment (分段上屏 + 记住拼出来的句子),
+       segment (分段上屏 + 记住拼出来的句子) | forget (Del 忘掉自己拼的句子) |
+       script (KEYS 写成"按键脚本"：字母照写，特殊键写 down/up/del/space/enter/esc，逗号分隔),
        each optionally with a _nomods suffix.
 """
 import array
@@ -66,7 +67,10 @@ EVDEV = {
 }
 # 方向键（组词时用来翻候选）
 EVDEV_DOWN = 108
+EVDEV_UP = 103
 EVDEV_RIGHT = 106
+# Del（候选框里按它 = 忘掉自己拼的句子）
+EVDEV_DELETE = 111
 
 # 候选框高度（逻辑像素）：pliers_popup 的版面高度，mock 这边没有 wl_output 所以缩放是 1
 POPUP_HEIGHT = 42
@@ -253,7 +257,13 @@ def main():
     server.listen(1)
     print(f"mock: listening on {SOCK_PATH}, will type {KEYS!r}", flush=True)
 
-    client, _ = server.accept()
+    # 客户端迟迟不来（比如它启动就失败了）别把测试挂死：等 20 秒就走
+    server.settimeout(20)
+    try:
+        client, _ = server.accept()
+    except TimeoutError:
+        print("mock: 20 秒了还没有客户端连上来，退出", flush=True)
+        return 2
     conn = Conn(client)
 
     objects = {}
@@ -459,6 +469,55 @@ def main():
                         tap(EVDEV[ch], 0.03)
                     time.sleep(0.1)
                     tap(EVDEV[" "], 0.06)  # 这次该直接上屏「你好马」
+                elif base_mode == "script":
+                    # KEYS 当成按键脚本：`n,i,h,c,a,a,del,space`
+                    # 字母照写；特殊键写 down/up/del/space/enter/esc
+                    named = {
+                        "down": EVDEV_DOWN,
+                        "up": EVDEV_UP,
+                        "del": EVDEV_DELETE,
+                        "space": EVDEV[" "],
+                        "enter": EVDEV["\n"],
+                        "esc": EVDEV["\x1b"],
+                    }
+
+                    def tap(code, pause=0.04):
+                        for state in (1, 0):
+                            conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, code, state))
+                            time.sleep(pause)
+
+                    for name in KEYS.split(","):
+                        name = name.strip()
+                        if not name:
+                            continue
+                        if name in named:
+                            tap(named[name], 0.06)
+                        else:
+                            for ch in name:
+                                tap(EVDEV[ch], 0.03)
+                elif base_mode == "forget":
+                    # 和 segment 一样先拼出「你好马」并让它记住，
+                    # 但第二遍按的是 Del + 空格：删掉之后该回到「你好吗」
+                    def tap(code, pause=0.04):
+                        for state in (1, 0):
+                            conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, code, state))
+                            time.sleep(pause)
+
+                    for ch in KEYS:
+                        tap(EVDEV[ch], 0.03)
+                    for _ in range(2):  # ↓↓ 到「你好」
+                        tap(EVDEV_DOWN, 0.03)
+                    tap(EVDEV[" "], 0.06)
+                    time.sleep(0.1)
+                    tap(EVDEV_DOWN, 0.03)  # ma 的候选里「马」是第 2 个
+                    tap(EVDEV[" "], 0.06)
+                    time.sleep(0.1)
+                    for ch in KEYS:  # 再打一遍：这时第一条是记住的「你好马」
+                        tap(EVDEV[ch], 0.03)
+                    time.sleep(0.1)
+                    tap(EVDEV_DELETE, 0.06)  # Del：删掉它
+                    time.sleep(0.1)
+                    tap(EVDEV[" "], 0.06)  # 空格：这次该上屏「你好吗」
                 elif base_mode == "symbol":
                     # 组词当中敲符号（/）：应该先把选中的候选上屏，再把符号转过来。
                     # 顺序反了的话，应用里会先冒出符号、文字跟在后面（",你好"）
@@ -714,6 +773,30 @@ def main():
         print(
             f"mock: {'PASS' if ok else 'FAIL'}: commits {commits} "
             f"(期望 ['你好', '马', '你好马']), 预编辑 {nonempty}, forwarded {len(forwards)} keys",
+            flush=True,
+        )
+    elif mode == "script":
+        ok = grab_id is not None and committed == EXPECT and not forwards
+        print(
+            f"mock: {'PASS' if ok else 'FAIL'}: committed {committed!r}, expected {EXPECT!r}, "
+            f"forwarded {len(forwards)} keys（期望 0）",
+            flush=True,
+        )
+    elif mode == "forget":
+        # 前两次提交是分段挑的，第三次是"记住的那句"上屏前被 Del 删掉 → 退回「你好吗」。
+        # 另外：Del 之后弹的那句提示不能被"Del 自己的抬起"收掉（不然候选框就没了），
+        # 所以最后两次候选框事件必须是 show → hide
+        tail_ok = len(popup_events) >= 2 and popup_events[-1][0] == "hide" and popup_events[-2][0] == "show"
+        ok = (
+            grab_id is not None
+            and commits == ["你好", "马", "你好吗"]
+            and not forwards
+            and tail_ok
+        )
+        print(
+            f"mock: {'PASS' if ok else 'FAIL'}: commits {commits} "
+            f"(期望 ['你好', '马', '你好吗']), forwarded {len(forwards)} keys, "
+            f"候选框最后两次 {[e[0] for e in popup_events[-2:]]}（期望 show → hide）",
             flush=True,
         )
     elif mode == "symbol":

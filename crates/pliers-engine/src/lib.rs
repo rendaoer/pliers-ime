@@ -288,6 +288,22 @@ impl Engine {
         self.mode
     }
 
+    /// 直接定模式（换配置重建引擎之后，把用户原来在用的模式接上）。
+    /// 顺手清掉组词状态 —— 换了方案，旧的拼音串已经没有意义
+    pub fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
+        self.clear_composing();
+    }
+
+    /// 把"正在打的这串"塞回来（改配置重建引擎之后用：`pliers set` 不该把打到一半的拼音弄丢）。
+    /// 候选会按当前方案重新查一遍
+    pub fn set_text(&mut self, text: &str) {
+        self.buffer.clear();
+        self.buffer.push_str(text);
+        self.cursor = 0;
+        self.refresh_pool();
+    }
+
     /// 切换模式时要不要弹个提示（协议层问它）
     pub fn indicator(&self) -> bool {
         self.indicator

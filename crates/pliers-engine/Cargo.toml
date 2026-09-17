@@ -8,4 +8,5 @@ edition.workspace = true
 pollster = "1.0.1"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.6"
+toml_edit = { version = "0.25.15", default-features = false, features = ["parse", "display"] }
 turso = { version = "0.7.2", default-features = false }

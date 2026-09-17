@@ -29,7 +29,9 @@ Usage: mock_compositor.py <socket-path> [keys] [expected-committed-text] [mode]
 
 Modes: active | inactive | shortcut | shift | mixed | enter | escape | caps |
        pick (数字选词) | nav (方向键换候选) | page (翻页) | symbol (组词中敲符号) |
-       switch (组词中切中英文), each optionally with a _nomods suffix.
+       switch (组词中切中英文) | control (先等一会儿再打字，留给 `pliers set` 用) |
+       watch (等 6 秒，留给"改配置文件看它自动重读"用),
+       each optionally with a _nomods suffix.
 """
 import array
 import mmap
@@ -490,6 +492,14 @@ def main():
                         conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[" "], st))
                         time.sleep(0.03)
                 else:
+                    if base_mode == "watch":
+                        # 自动重读配置文件的测试用：留 6 秒给外面的测试改文件、看 status
+                        time.sleep(6)
+                    if base_mode == "control":
+                        # 在线改配置的测试用：先等 1.5 秒，让外面那套
+                        # `pliers set scheme.kind double-pinyin` / `set scheme.layout flypy`
+                        # 先把方案换掉 —— 之后喂进来的键就该按**新方案**解
+                        time.sleep(1.5)
                     if base_mode == "caps":
                         # Caps Lock 打开：真键盘是按一下 Caps Lock 键（keycode 58），
                         # xkb 靠这个按键事件翻转 Lock 位，合成器随后再补一个 modifiers 事件。

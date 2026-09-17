@@ -12,3 +12,5 @@ path = "src/main.rs"
 [dependencies]
 pliers-engine.workspace = true
 pliers-wayland.workspace = true
+# 交互式设置要动 termios（原始模式），还有 poll 等 fd
+libc = "0.2"

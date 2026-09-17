@@ -35,6 +35,14 @@ const BATCH: usize = 50_000;
 /// 词频表里的次数乘个系数，让它跟"没词频的兜底权重"（个位数）拉开档次
 const FREQ_SCALE: i64 = 10;
 
+/// 次要读音要占这个字**条目数**的多少才收（见下面单字那段的说明）
+const SECONDARY_MIN_SHARE: f64 = 0.07;
+
+/// 次要读音的权重再打个折（除以几）：它毕竟不是这个读音的"本家"，
+/// 但也不能打太狠 —— 打 `hang` 第一个候选就该是「行」（它是这个音最常见的字），
+/// 除以 2 的话会被「杭」压住
+const SECONDARY_DISCOUNT: f64 = 1.5;
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("导入失败：{e}");
@@ -166,9 +174,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // 为什么非要收次要读音：只留主读音的话，长=zhang（77% 条目）被留下、chang 被扔掉，
     // 打 chang 就永远出不来「长」。
     //
-    // 门槛（条目占比 + 用量占比都要 ≥ 1/5）是拿「的」校准出来的：的=de 占 95% 条目、
-    // 65% 用量，要是把 di 也当常用读音，打 di 第一个候选就成了「的」（错的）；
-    // 而长=chang 占 23% 条目、38% 用量，正好该收
+    // 门槛（**条目占比 ≥ 7%**）是拿真数据校准出来的，两头都要卡住：
+    //
+    // * 该收的：长=chang 23%、行=hang 9%、重=chong 11%、还=huan 12%、乐=yue 8%
+    //   —— 都是"打这个音也该出这个字"的常用读音
+    // * 不该收的：的=di 5%、了=liao 5%、着=zhao 6%、给=ji 5%
+    //   —— 收了打 di 第一个候选就是「的」（错的）
+    //
+    // 光看用量占比分不开这两类：的=di 的用量占比有 35%（「目的」「的确」都是高频词），
+    // 比行=hang 的 10% 还高 —— 因为「的」当助词的用量根本不在词表里。
+    // 条目占比反而干净：的=di 只有 31 条，行=hang 有 88 条
     let mut stmt = pollster::block_on(conn.prepare(
         "INSERT OR IGNORE INTO word (scheme, code, text, weight) VALUES (?1, ?2, ?3, ?4)",
     ))?;
@@ -201,11 +216,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     0.0
                 };
-                if entry_share < 0.2 || usage_share < 0.2 {
+                if entry_share < SECONDARY_MIN_SHARE {
                     continue; // 不常用的读音不收：收了会把别的字挤下去
                 }
-                // 打折：它毕竟不是这个读音的"本家"，别压过本来就读这个音的字
-                (base as f64 * usage_share / 2.0) as i64
+                (base as f64 * usage_share / SECONDARY_DISCOUNT) as i64
             };
             pollster::block_on(stmt.execute(turso::params![
                 "pinyin",

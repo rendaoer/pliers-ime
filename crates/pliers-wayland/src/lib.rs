@@ -14,11 +14,13 @@
 //! * `wl_output`
 //!   只为了问一句"屏幕缩放多少"：1.5x/2x 的屏幕得按倍数多画几倍像素，不然字是糊的
 
+pub mod control;
 mod keyboard;
+mod poll;
 mod popup;
 
 use std::error::Error;
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, AsRawFd};
 
 use wayland_client::protocol::{
     wl_buffer, wl_compositor, wl_keyboard, wl_output, wl_registry, wl_seat, wl_shm, wl_shm_pool,
@@ -34,8 +36,9 @@ use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
 };
 use xkbcommon::xkb;
 
+use control::Control;
 use keyboard::Keyboard;
-use pliers_engine::{Action, Engine, KeyInput, Mode, Preedit};
+use pliers_engine::{Action, Config, Engine, KeyInput, Mode, Preedit};
 use pliers_popup::Painter;
 use popup::PopupSurface;
 
@@ -53,14 +56,20 @@ pub struct Options {
 }
 
 /// 起一个输入法，一直跑到合成器把协议收回去为止
-pub fn run(engine: Engine, options: Options) -> Result<(), Box<dyn Error>> {
+///
+/// `config` 也留一份在手里：`pliers set ...` / `pliers reload` 改的就是它，
+/// 改完按它重建引擎（见 [`State::apply_config`]）
+pub fn run(config: Config, engine: Engine, options: Options) -> Result<(), Box<dyn Error>> {
     let debug = options.debug || std::env::var_os("PLIERS_DEBUG").is_some();
 
     let conn = Connection::connect_to_env()?;
     let mut queue = conn.new_event_queue();
     let qh = queue.handle();
     let mut state = State {
+        config_stamp: config_stamp(),
         engine: Some(engine),
+        config,
+        control: bind_control(),
         debug,
         // 找字体要扫系统字体目录（几十毫秒），放启动时做，别卡在第一次敲键上
         painter: Some(Painter::new()),
@@ -91,13 +100,76 @@ pub fn run(engine: Engine, options: Options) -> Result<(), Box<dyn Error>> {
     // 第二次往返：等这两个对象在合成器那边建好，之后它才会给我们 activate
     queue.roundtrip(&mut state)?;
 
-    // 主循环：没事件就睡在 blocking_dispatch 里。它内部会先 flush 再读 socket，
-    // 所以事件处理中发出的请求（预编辑、提交、转发按键、贴候选框）不用自己 flush。
+    run_loop(&mut state, &mut queue)
+}
+
+/// 建命令 socket。建不上（比如 /tmp 满了、$XDG_RUNTIME_DIR 有问题）不该影响打字，
+/// 所以只吼一声，输入法照常跑
+fn bind_control() -> Option<Control> {
+    let path = control::socket_path();
+    match Control::bind(&path) {
+        Ok(control) => {
+            if std::env::var_os("PLIERS_DEBUG").is_some() {
+                eprintln!("pliers: 命令 socket 在 {}", path.display());
+            }
+            Some(control)
+        }
+        Err(e) => {
+            eprintln!(
+                "pliers: 命令 socket {} 建不起来（{e}）：pliers status/reload/set 这次用不了",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+/// 主循环。
+///
+/// 要同时等两个东西：合成器的事件（Wayland socket）和 `pliers ...` 发过来的命令
+/// （命令 socket）。所以不能再用 `blocking_dispatch()`（它只等 Wayland），
+/// 改成标准的"两源事件循环"：
+///
+/// 1. 先把攒着的请求 flush 出去，再派发已经收到的事件；
+/// 2. 真没活干了，`poll(2)` 两个 fd 一起等（不设超时，睡到有人叫醒为止）；
+/// 3. 谁可读处理谁。
+///
+/// `prepare_read()` 拿到的守卫如果没读就要 drop 掉 —— 那表示"这次不读 socket 了"，
+/// 连接会退回可写状态（不然下次发请求会被挡住）
+///
+/// poll 带超时（`WATCH_INTERVAL`）是为了**自动重读配置文件**：文件被改了不会有人来叫醒我们，
+/// 只能隔一会儿自己看一眼 mtime
+fn run_loop(
+    state: &mut State,
+    queue: &mut wayland_client::EventQueue<State>,
+) -> Result<(), Box<dyn Error>> {
     while !state.quit {
-        queue.blocking_dispatch(&mut state)?;
+        queue.flush()?;
+        if queue.dispatch_pending(state)? == 0 {
+            let Some(guard) = queue.prepare_read() else {
+                continue; // 还有没派发的，回到循环开头
+            };
+            let wayland = guard.connection_fd().as_raw_fd();
+            let fds: Vec<std::os::fd::RawFd> = match state.control.as_ref() {
+                Some(control) => vec![wayland, control.fd()],
+                None => vec![wayland],
+            };
+            let ready = poll::readable(&fds, Some(WATCH_INTERVAL))?;
+            if ready[0] {
+                guard.read()?;
+            } else {
+                drop(guard); // 是命令来了（或者只是超时）：取消这次读，下一轮再派发
+            }
+        }
+        state.serve_control();
+        state.reload_if_config_changed();
     }
     Ok(())
 }
+
+/// 多久看一眼配置文件有没有被改。人保存文件到生效最多等这么久；
+/// 1 秒的 stat 一次，代价可以忽略
+const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(700);
 
 #[derive(Default)]
 struct State {
@@ -153,6 +225,13 @@ struct State {
     /// Option 只是为了 State::default() 能编译 —— 引擎要开词库、找字体，没法 Default；
     /// run() 一定会把它塞进来
     engine: Option<Engine>,
+    /// 现在生效的配置。`pliers set` 改它、`pliers reload` 从磁盘重新读它，
+    /// 然后按它重建引擎
+    config: Config,
+    /// 命令行遥控用的监听 socket（建不起来就是 None）
+    control: Option<Control>,
+    /// 配置文件上次被改是什么时候（(mtime, 大小)）：变了就自动重读
+    config_stamp: Option<(std::time::SystemTime, u64)>,
     debug: bool,
     quit: bool,
 }
@@ -161,6 +240,189 @@ impl State {
     /// 引擎（run() 之前不该有人调用）
     fn engine(&mut self) -> &mut Engine {
         self.engine.as_mut().expect("引擎还没放进来")
+    }
+
+    // ---- 命令行遥控（`pliers status` / `reload` / `set ...`）----------------
+
+    /// 命令 socket 上来的请求：收一条办一条。
+    /// 一轮尽量把排队的都办完（accept 到 WouldBlock 为止）
+    fn serve_control(&mut self) {
+        while let Some(mut stream) = self.control.as_ref().and_then(Control::accept) {
+            let answer = match control::read_request(&stream) {
+                Ok(request) if request.is_empty() => {
+                    "ERR 空命令（试试 status / reload）".to_string()
+                }
+                Ok(request) => self.run_command(&request),
+                Err(e) => format!("ERR 读请求失败：{e}"),
+            };
+            if self.debug {
+                eprintln!("pliers: 命令回话：{answer}");
+            }
+            if let Err(e) = control::reply(&mut stream, &answer) {
+                eprintln!("pliers: 回命令失败：{e}");
+            }
+        }
+    }
+
+    /// 执行一条命令，返回给命令行看的一行（`OK ...` / `ERR ...`）
+    fn run_command(&mut self, request: &str) -> String {
+        let mut parts = request.splitn(3, ' ');
+        let (command, rest) = (parts.next().unwrap_or(""), parts.next());
+        match command {
+            // 状态是一堆 tab 分隔的 `名=值`：怎么排版（换行、对齐）是命令行的事，
+            // 这样 `socat` 之类自己接上来也能一眼看懂
+            "status" => format!("OK\t{}", self.status_fields()),
+
+            // 重新读配置文件：读坏了、写得不对，都保持原样继续跑（正在打字的人不该被打断）
+            "reload" => match Config::load() {
+                Ok(config) => match self.apply_config(config) {
+                    Ok(()) => format!("OK\t{}", self.status_fields()),
+                    Err(e) => format!("ERR 配置有问题，保持原样：{e}"),
+                },
+                Err(e) => format!("ERR 读配置失败，保持原样：{e}"),
+            },
+
+            // 改一项：先改内存里的配置，重建失败就整个回滚
+            "set" => {
+                let (Some(key), Some(value)) = (rest, parts.next()) else {
+                    return "ERR 用法：pliers set <项> <值>（pliers --help 看能改哪些）"
+                        .to_string();
+                };
+                let before = self.config.clone();
+                if let Err(e) = self.config.set(key, value) {
+                    return format!("ERR {e}");
+                }
+                match self.apply_config(self.config.clone()) {
+                    Ok(()) => format!(
+                        "OK\tchanged={key} = {value}{}\t{}",
+                        self.status_note(key),
+                        self.status_fields()
+                    ),
+                    Err(e) => {
+                        self.config = before;
+                        format!("ERR {e}（没改成）")
+                    }
+                }
+            }
+
+            other => {
+                format!("ERR 不认识的命令 {other:?}（能用的：status / reload / set <项> <值>）")
+            }
+        }
+    }
+
+    /// 配置文件被改了就自动重读（`pliers config set` 和手动编辑都走这条路）。
+    ///
+    /// 改坏了不慌：新配置建不出引擎就保持原样，只在 stderr 上吼一声
+    fn reload_if_config_changed(&mut self) {
+        let stamp = config_stamp();
+        if stamp.is_none() || stamp == self.config_stamp {
+            return;
+        }
+        self.config_stamp = stamp;
+        match Config::load() {
+            Ok(config) => match self.apply_config(config) {
+                Ok(()) => {
+                    if self.debug {
+                        eprintln!("pliers: 配置文件变了，已经重读");
+                    }
+                }
+                Err(e) => eprintln!("pliers: 配置文件有问题，继续用旧的：{e}"),
+            },
+            Err(e) => eprintln!("pliers: 重读配置失败，继续用旧的：{e}"),
+        }
+    }
+
+    /// 按配置重建引擎。失败就把错误原样返回，**不动**现有的引擎 ——
+    /// 配置写错了不该把正在跑的输入法弄挂
+    fn apply_config(&mut self, config: Config) -> Result<(), Box<dyn Error>> {
+        // 正在打的这串和当前模式都得先记下来：`pliers set dict.max_candidates 5`
+        // 不该把打到一半的拼音吃掉
+        let mode = self.engine().mode();
+        let composing = self.engine().text().to_string();
+
+        let engine = Engine::from_config(&config)?;
+        self.engine = Some(engine);
+        // 新引擎从 start_mode 开始，这里把用户正在用的模式接上（切到英文之后 reload 不该跳回中文）
+        self.engine().set_mode(mode);
+        self.config = config;
+
+        if composing.is_empty() {
+            self.set_preedit(&Preedit::default());
+        } else {
+            // 塞回去并按新方案重查候选（换了方案的话，同一串键解出来的词会变）
+            self.engine().set_text(&composing);
+            let preedit = self.engine().preedit();
+            self.set_preedit(&preedit);
+        }
+        Ok(())
+    }
+
+    /// 现状：tab 分隔的 `名=值`，排版（换行、对齐）交给命令行
+    fn status_fields(&mut self) -> String {
+        // 先把要用的几样读出来，再借引擎（不然同时可变 + 不可变借用 self）
+        let mode = self.engine().mode().label();
+        let config = &self.config;
+        // 给两种用法：`dict` 是给人看的（带大小），`dict_path` 是原文（编辑框预填要用）
+        let dict_path = config.dict_path();
+        let dict = match std::fs::metadata(&dict_path) {
+            Ok(meta) => format!("{}（{} MB）", dict_path.display(), meta.len() / 1024 / 1024),
+            Err(_) => format!("{}（打不开？）", dict_path.display()),
+        };
+        let (kind, layout, name, sentence) = match &config.scheme {
+            pliers_engine::SchemeConfig::FullPinyin { sentence } => {
+                ("full-pinyin", String::new(), String::new(), *sentence)
+            }
+            pliers_engine::SchemeConfig::DoublePinyin {
+                layout, sentence, ..
+            } => ("double-pinyin", layout.clone(), String::new(), *sentence),
+            pliers_engine::SchemeConfig::Table { name } => {
+                ("table", String::new(), name.clone(), false)
+            }
+        };
+        [
+            format!("kind={kind}"),
+            format!("layout={layout}"),
+            format!("name={name}"),
+            // 字段给 true/false（命令行要拿它跟选项比对），给人看的"开/关"由命令行渲染
+            format!("sentence={sentence}"),
+            format!("dict={dict}"),
+            format!("dict_path={}", dict_path.display()),
+            format!("candidates={}", config.dict.max_candidates),
+            format!("pool={}", config.dict.pool_size),
+            format!("toggle={}", config.engine.toggle_keys.join(",")),
+            format!(
+                "start={}",
+                match config.engine.start_mode {
+                    Mode::Chinese => "chinese",
+                    Mode::English => "english",
+                }
+            ),
+            format!("indicator={}", config.engine.indicator),
+            format!("mode={mode}"),
+            format!("config={}", pliers_engine::config::config_path().display()),
+            format!(
+                "socket={}",
+                match &self.control {
+                    Some(control) => control.path().display().to_string(),
+                    None => "（没建起来）".to_string(),
+                }
+            ),
+        ]
+        .join("\t")
+    }
+
+    /// 改完某一项之后，补一句"这项什么时候生效 / 有什么前提"
+    fn status_note(&self, key: &str) -> String {
+        match key {
+            "engine.start_mode" => "；start_mode 下次启动才生效".to_string(),
+            // PLIERS_DICT 的优先级比配置文件高，指了它的话改 dict.path 是白改
+            "dict.path" if std::env::var_os("PLIERS_DICT").is_some() => {
+                "；但 PLIERS_DICT 环境变量优先级更高，实际用的还是它".to_string()
+            }
+            "dict.path" => "；词库已经重新打开了，用户词频还在库里".to_string(),
+            _ => String::new(),
+        }
     }
 
     // ---- 把引擎的决定翻译成协议请求 ----------------------------------------
@@ -615,3 +877,10 @@ ignore!(
     wl_shm::WlShm,
     wl_shm_pool::WlShmPool,
 );
+
+/// 配置文件的"版本号"：修改时间 + 大小。文件不在就是 None
+fn config_stamp() -> Option<(std::time::SystemTime, u64)> {
+    let meta = std::fs::metadata(pliers_engine::config::config_path()).ok()?;
+    let mtime = meta.modified().ok()?;
+    Some((mtime, meta.len()))
+}

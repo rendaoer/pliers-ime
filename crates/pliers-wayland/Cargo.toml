@@ -10,3 +10,5 @@ wayland-protocols-misc.workspace = true
 xkbcommon.workspace = true
 pliers-engine.workspace = true
 pliers-popup.workspace = true
+# poll(2)：主循环要同时等 Wayland socket 和命令 socket
+libc = "0.2"

@@ -14,7 +14,7 @@
 //! ```
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -63,6 +63,10 @@ pub struct Config {
     pub dict: DictConfig,
     #[serde(default)]
     pub engine: EngineConfig,
+    /// 上一次用过的双拼键位（`pliers set scheme.kind double-pinyin` 切回来时接着用）。
+    /// `serde(skip)`：这只是运行期的记忆，配置文件里没这一项
+    #[serde(skip)]
+    pub last_double_pinyin: Option<(String, BTreeMap<String, String>)>,
 }
 
 /// 引擎行为：中英文怎么切之类
@@ -266,6 +270,234 @@ impl Config {
         let scheme = self.build_scheme(&dict)?;
         Ok((dict, scheme))
     }
+
+    /// 改一项配置（`pliers set <项> <值>` 用），值是命令行上那一串原文。
+    ///
+    /// 只认下面这些"能在线改"的项，别的项得改配置文件 + `pliers reload`：
+    ///
+    /// | 项 | 值 |
+    /// | --- | --- |
+    /// | `scheme.kind` | `full-pinyin` / `double-pinyin` / `table` |
+    /// | `scheme.layout` | `natural` / `flypy` / `mspy` / `none`（双拼键位） |
+    /// | `scheme.sentence` | `true` / `false`（整句候选） |
+    /// | `scheme.name` | 码表名（`kind = "table"` 时用） |
+    /// | `dict.path` | 词库文件 |
+    /// | `dict.max_candidates` | 1–9（数字键选词） |
+    /// | `dict.pool_size` | 候选池深度 |
+    /// | `engine.toggle_keys` | 逗号分隔，如 `ctrl+space,shift` |
+    /// | `engine.start_mode` | `chinese` / `english` |
+    /// | `engine.indicator` | `true` / `false` |
+    ///
+    /// 换 `kind` 时会把另一套方案的字段带过去（比如全拼 → 双拼保留原来的键位），
+    /// 省得每换一次都要重设一遍。报错信息是给用户看的，所以都说人话
+    pub fn set(&mut self, key: &str, value: &str) -> std::result::Result<(), String> {
+        let bad = |what: &str| format!("{key} 只认 {what}，给的是 {value:?}");
+        match key {
+            "scheme.kind" => {
+                let sentence = self.sentence();
+                // 现在是双拼的话，把它这套键位记下来：切走再切回来不用重设
+                if let SchemeConfig::DoublePinyin { layout, keys, .. } = &self.scheme {
+                    self.last_double_pinyin = Some((layout.clone(), keys.clone()));
+                }
+                let (layout, keys) = self
+                    .last_double_pinyin
+                    .clone()
+                    .unwrap_or_else(|| (default_layout(), BTreeMap::new()));
+                self.scheme = match value {
+                    "full-pinyin" => SchemeConfig::FullPinyin { sentence },
+                    "double-pinyin" => SchemeConfig::DoublePinyin {
+                        layout,
+                        keys,
+                        sentence,
+                    },
+                    "table" => {
+                        // 码表方案要个名字（词库里 scheme 字段用哪个）：
+                        // 从别的方案切过来先默认 wubi，要改就用 scheme.name
+                        let name = match &self.scheme {
+                            SchemeConfig::Table { name } => name.clone(),
+                            _ => "wubi".to_string(),
+                        };
+                        SchemeConfig::Table { name }
+                    }
+                    _ => return Err(bad("full-pinyin / double-pinyin / table")),
+                };
+            }
+            "scheme.layout" => {
+                if Layout::preset(value).is_none() {
+                    return Err(bad("natural（自然码）/ flypy（小鹤）/ mspy（微软）/ none"));
+                }
+                match &mut self.scheme {
+                    SchemeConfig::DoublePinyin { layout, keys, .. } => {
+                        *layout = value.to_string();
+                        let remembered = (layout.clone(), keys.clone());
+                        self.last_double_pinyin = Some(remembered);
+                    }
+                    _ => {
+                        return Err(
+                            "现在不是双拼方案。先 `pliers set scheme.kind double-pinyin`".into(),
+                        );
+                    }
+                }
+            }
+            "scheme.sentence" => {
+                let flag = parse_bool(value).ok_or_else(|| bad("true / false"))?;
+                match &mut self.scheme {
+                    SchemeConfig::FullPinyin { sentence }
+                    | SchemeConfig::DoublePinyin { sentence, .. } => *sentence = flag,
+                    SchemeConfig::Table { .. } => {
+                        return Err("码表方案是「键本身就是码」，没有整句候选".into());
+                    }
+                }
+            }
+            "scheme.name" => match &mut self.scheme {
+                SchemeConfig::Table { name } => *name = value.to_string(),
+                _ => return Err("scheme.name 只在码表方案（kind = \"table\"）里有意义".into()),
+            },
+            "dict.path" => {
+                if value.trim().is_empty() {
+                    return Err("词库路径不能是空的".into());
+                }
+                self.dict.path = value.to_string();
+            }
+            "dict.max_candidates" => {
+                let count: usize = value
+                    .parse()
+                    .map_err(|_| bad("一个 1-9 的数字（数字键 1-9 选词）"))?;
+                if !(1..=9).contains(&count) {
+                    return Err(bad("1-9 之间的数字（数字键 1-9 选词）"));
+                }
+                self.dict.max_candidates = count;
+            }
+            "dict.pool_size" => {
+                let size: usize = value.parse().map_err(|_| bad("一个正整数"))?;
+                if size < self.dict.max_candidates {
+                    return Err(format!(
+                        "池子（{size}）得比一页（{}）大，不然翻页翻不动",
+                        self.dict.max_candidates
+                    ));
+                }
+                self.dict.pool_size = size;
+            }
+            "engine.toggle_keys" => {
+                let keys: Vec<String> = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|k| !k.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                ToggleKeys::parse(&keys)?; // 先验一遍，报错信息它写得更清楚
+                self.engine.toggle_keys = keys;
+            }
+            "engine.start_mode" => {
+                self.engine.start_mode = match value {
+                    "chinese" | "中" | "中文" => Mode::Chinese,
+                    "english" | "英" | "英文" => Mode::English,
+                    _ => return Err(bad("chinese / english")),
+                };
+            }
+            "engine.indicator" => {
+                self.engine.indicator = parse_bool(value).ok_or_else(|| bad("true / false"))?;
+            }
+            other => {
+                return Err(format!(
+                    "不认识的配置项 {other:?}（能改的：scheme.kind / scheme.layout / \
+                     scheme.sentence / scheme.name / dict.path / dict.max_candidates / \
+                     dict.pool_size / engine.toggle_keys / engine.start_mode / engine.indicator）"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// 现在这套方案要不要整句候选（换 kind 时把它带过去）
+    fn sentence(&self) -> bool {
+        match &self.scheme {
+            SchemeConfig::FullPinyin { sentence } | SchemeConfig::DoublePinyin { sentence, .. } => {
+                *sentence
+            }
+            SchemeConfig::Table { .. } => false,
+        }
+    }
+}
+
+/// 命令行上的 true/false（也认 1/0、on/off、yes/no，敲着顺手）
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "1" | "on" | "yes" | "开" => Some(true),
+        "false" | "0" | "off" | "no" | "关" => Some(false),
+        _ => None,
+    }
+}
+
+/// 把一项配置**写回配置文件**（`pliers config set` 用）。
+///
+/// 用 `toml_edit` 而不是"读出结构再整个序列化"：注释、空行、自己排的顺序都留着 ——
+/// 手写的配置文件被工具洗一遍是最气人的。写之前先拿 [`Config::set`] 验一遍，
+/// 所以不存在"写进去一个跑不起来的配置"
+pub fn write_setting(path: &Path, key: &str, value: &str) -> std::result::Result<(), String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("读不了 {}：{e}", path.display())),
+    };
+
+    // 先验值：解析失败 / 值不合法都在这儿拦住
+    let mut check = if text.trim().is_empty() {
+        Config::default()
+    } else {
+        Config::parse(&text).map_err(|e| format!("现在的配置文件有问题，先修好它：{e}"))?
+    };
+    check.set(key, value)?;
+
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|e| format!("现在的配置文件解析不了：{e}"))?;
+    let (section, name) = key
+        .split_once('.')
+        .ok_or_else(|| format!("配置项要写成 `[段].名字`，比如 scheme.kind，给的是 {key:?}"))?;
+    if doc.get(section).is_none() {
+        doc[section] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let table = doc[section]
+        .as_table_mut()
+        .ok_or_else(|| format!("配置文件里的 [{section}] 不是一张表"))?;
+    // 换值的时候把原来那行的"装饰"接过来 —— 行尾注释、缩进都挂在 Value 的 decor 上，
+    // 不接的话 `kind = "full-pinyin"   # 说明` 里的注释就没了
+    let mut item = toml_value(key, value);
+    if let (Some(old), Some(new)) = (table.get(name), item.as_value_mut())
+        && let Some(old) = old.as_value()
+    {
+        *new.decor_mut() = old.decor().clone();
+    }
+    table[name] = item;
+
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("建不了目录 {}：{e}", dir.display()))?;
+    }
+    std::fs::write(path, doc.to_string()).map_err(|e| format!("写不了 {}：{e}", path.display()))?;
+    Ok(())
+}
+
+/// 值按配置项的类型写：数字写成整数、开关写成 true/false、切换键写成数组，别的都是字符串
+fn toml_value(key: &str, value: &str) -> toml_edit::Item {
+    match key {
+        "dict.max_candidates" | "dict.pool_size" => match value.parse::<i64>() {
+            Ok(number) => toml_edit::value(number),
+            Err(_) => toml_edit::value(value),
+        },
+        "scheme.sentence" | "engine.indicator" => match parse_bool(value) {
+            Some(flag) => toml_edit::value(flag),
+            None => toml_edit::value(value),
+        },
+        "engine.toggle_keys" => {
+            let mut array = toml_edit::Array::new();
+            for key in value.split(',').map(str::trim).filter(|k| !k.is_empty()) {
+                array.push(key);
+            }
+            toml_edit::value(array)
+        }
+        _ => toml_edit::value(value),
+    }
 }
 
 /// 一份带注释的配置模板。
@@ -280,6 +512,136 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    #[test]
+    fn 在线改方案_换_kind_会带走键位和整句开关() {
+        let mut config = Config::default();
+        config.set("scheme.kind", "double-pinyin").unwrap();
+        config.set("scheme.layout", "flypy").unwrap();
+        config.set("scheme.sentence", "false").unwrap();
+        assert!(matches!(
+            &config.scheme,
+            SchemeConfig::DoublePinyin { layout, sentence, .. } if layout == "flypy" && !*sentence
+        ));
+
+        // 切到全拼再切回双拼：键位和整句开关都还在，不用重设
+        config.set("scheme.kind", "full-pinyin").unwrap();
+        assert!(matches!(
+            config.scheme,
+            SchemeConfig::FullPinyin { sentence: false }
+        ));
+        config.set("scheme.kind", "double-pinyin").unwrap();
+        assert!(matches!(
+            &config.scheme,
+            SchemeConfig::DoublePinyin { layout, sentence, .. } if layout == "flypy" && !*sentence
+        ));
+    }
+
+    #[test]
+    fn 在线改配置_值不对就报错而且不改动() {
+        let mut config = Config::default();
+        assert!(
+            config
+                .set("scheme.layout", "flpy")
+                .unwrap_err()
+                .contains("flypy")
+        );
+        assert!(config.set("dict.max_candidates", "99").is_err());
+        assert!(config.set("dict.max_candidates", "x").is_err());
+        assert!(
+            config.set("dict.pool_size", "3").is_err(),
+            "池子比一页小，翻页就翻不动了"
+        );
+        assert!(config.set("engine.toggle_keys", "ctrl+alt").is_err());
+        assert!(config.set("engine.indicator", "maybe").is_err());
+        assert!(config.set("engine.start_mode", "火星文").is_err());
+        assert!(
+            config
+                .set("nosuch.key", "1")
+                .unwrap_err()
+                .contains("不认识的配置项")
+        );
+        // 报错的那几项都没生效
+        assert_eq!(config.dict.max_candidates, 9);
+        assert_eq!(config.dict.pool_size, 90);
+    }
+
+    #[test]
+    fn 在线改配置_词库和开关() {
+        let mut config = Config::default();
+        config.set("dict.path", "/tmp/别的库.db").unwrap();
+        config.set("dict.max_candidates", "5").unwrap();
+        config.set("dict.pool_size", "50").unwrap();
+        config
+            .set("engine.toggle_keys", "ctrl+space, shift")
+            .unwrap();
+        config.set("engine.indicator", "off").unwrap();
+        config.set("engine.start_mode", "english").unwrap();
+        assert_eq!(config.dict.path, "/tmp/别的库.db");
+        assert_eq!(config.dict.max_candidates, 5);
+        assert_eq!(config.dict.pool_size, 50);
+        assert_eq!(config.engine.toggle_keys, ["ctrl+space", "shift"]);
+        assert!(!config.engine.indicator);
+        assert_eq!(config.engine.start_mode, Mode::English);
+    }
+
+    #[test]
+    fn 写回配置文件_注释和别的项都留着() {
+        let path = std::env::temp_dir().join(format!(
+            "pliers-config-test-{}-{:?}.toml",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(
+            &path,
+            "# 我手写的注释\n[scheme]\nkind = \"full-pinyin\"   # 行尾也要留着\n\n[dict]\nmax_candidates = 9\n",
+        )
+        .unwrap();
+
+        write_setting(&path, "scheme.kind", "double-pinyin").unwrap();
+        write_setting(&path, "scheme.layout", "flypy").unwrap();
+        write_setting(&path, "dict.max_candidates", "5").unwrap();
+        write_setting(&path, "engine.toggle_keys", "ctrl+space,shift").unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# 我手写的注释"), "注释没了：\n{text}");
+        assert!(text.contains("# 行尾也要留着"), "行尾注释没了：\n{text}");
+        let config = Config::parse(&text).unwrap();
+        assert!(matches!(
+            &config.scheme,
+            SchemeConfig::DoublePinyin { layout, .. } if layout == "flypy"
+        ));
+        assert_eq!(config.dict.max_candidates, 5);
+        assert_eq!(config.engine.toggle_keys, ["ctrl+space", "shift"]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn 写回配置文件_值和项都要先验过() {
+        let path = std::env::temp_dir().join(format!(
+            "pliers-config-test-bad-{}-{:?}.toml",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        assert!(write_setting(&path, "scheme.layout", "flpy").is_err());
+        assert!(write_setting(&path, "nosuch.key", "1").is_err());
+        assert!(!path.exists(), "验不过就不该写文件");
+    }
+
+    #[test]
+    fn 在线改配置_码表才有名字() {
+        let mut config = Config::default();
+        assert!(config.set("scheme.name", "wubi").is_err(), "全拼没有码表名");
+        config.set("scheme.kind", "table").unwrap();
+        assert!(matches!(&config.scheme, SchemeConfig::Table { name } if name == "wubi"));
+        config.set("scheme.name", "cangjie").unwrap();
+        assert!(matches!(&config.scheme, SchemeConfig::Table { name } if name == "cangjie"));
+        assert!(
+            config.set("scheme.layout", "flypy").is_err(),
+            "码表没有键位"
+        );
+    }
 
     #[test]
     fn 默认就是全拼() {

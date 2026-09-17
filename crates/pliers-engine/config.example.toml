@@ -2,6 +2,9 @@
 #
 # 复制到 ~/.config/pliers/config.toml 就会生效（也可以放在别处，
 # 用 PLIERS_CONFIG=/path/to/config.toml 指过去）。删掉这个文件也能跑，用内置默认值。
+#
+# 改完不用重启：`pliers reload` 让正在跑的实例重新读一遍。
+# 想临时试试某项（不写文件）：`pliers set scheme.kind double-pinyin`、`pliers status` 看现状。
 
 # ---- 输入方案 ---------------------------------------------------------------
 [scheme]

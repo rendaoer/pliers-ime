@@ -57,6 +57,130 @@ LOGS="$(mktemp -d)"
 pass=0
 fail=0
 
+# 在线改配置：mock 用 control 场景（先等 1.5 秒再打字），趁这段时间说话
+run_control() {
+    local log="$LOGS/control.log"
+    local sock="/tmp/pliers-ctl-$$.sock"
+    local ctl="/tmp/pliers-cmd-$$.sock"
+    local bad=0
+
+    python3 tools/mock_compositor.py "$sock" "nihc " 你好 control >"$log" 2>&1 &
+    local mock=$!
+    sleep 0.4
+    env PLIERS_DICT="$DICT" PLIERS_CONFIG="$CFG" PLIERS_SOCKET="$ctl" \
+        WAYLAND_DISPLAY="$sock" timeout 30 ./target/debug/pliers >>"$log" 2>&1 &
+    local ime=$!
+    sleep 0.4
+
+    say() { # say <输出里该出现的内容> <命令...>
+        local want="$1"; shift
+        local out
+        out=$(PLIERS_SOCKET="$ctl" ./target/debug/pliers "$@" 2>&1)
+        case "$out" in
+            *"$want"*) echo "        \$ pliers $* → 有「$want」✓" ;;
+            *) echo "        \$ pliers $* → 没有「$want」：$out"; bad=1 ;;
+        esac
+    }
+
+    # 输出的排版在命令行这边：一项一行
+    say "全拼（整句候选开）" status
+    say "重新读了配置文件" reload
+    say "改好了：scheme.kind = double-pinyin" set scheme.kind double-pinyin
+    say "改好了：scheme.layout = flypy" set scheme.layout flypy
+    say "scheme.layout 只认" set scheme.layout flpy   # 键位名写错：报错，而且不能改坏正在跑的
+    say "双拼（小鹤）" status
+
+    # 交互模式（真终端才有上下选；这里用 script 开个 pty）
+    # ↓↓↓↓↓ 到第 6 项「一页候选数」→ 回车 →（值列表里）按 2 选第二个值 → 回车 → q
+    if command -v script >/dev/null 2>&1; then
+        out=$(printf '\033[B\033[B\033[B\033[B\033[B\r2\rq' |
+            timeout 15 script -qec "PLIERS_SOCKET=$ctl ./target/debug/pliers set" /dev/null 2>&1)
+        case "$out" in
+            *"❯"*) echo "        \$ pliers set（上下选）→ 列表带选中箭头 ✓" ;;
+            *) echo "        \$ pliers set（上下选）→ 没看到列表"; bad=1 ;;
+        esac
+        say "一页 2 个" status
+    fi
+
+    # 管道（没终端）时退回行式：输编号、再输值
+    out=$(printf '3\nfalse\nq\n' | PLIERS_SOCKET="$ctl" ./target/debug/pliers set 2>&1)
+    case "$out" in
+        *"改好了：scheme.sentence = false"*) echo "        \$ pliers set（管道/行式）→ 改好了 scheme.sentence ✓" ;;
+        *) echo "        \$ pliers set（管道/行式）→ 没改成：$out"; bad=1 ;;
+    esac
+
+    wait "$ime" 2>/dev/null
+    wait "$mock" 2>/dev/null
+    rm -f "$ctl"
+
+    if [ "$bad" -eq 0 ] && grep -q "PASS" "$log"; then
+        pass=$((pass + 1))
+        printf '  \033[32mPASS\033[0m %-16s %s\n' control "$(grep -o 'mock: PASS.*' "$log" | head -1 | cut -c13-)"
+    else
+        fail=$((fail + 1))
+        printf '  \033[31mFAIL\033[0m %-16s 见日志\n' control
+        cp "$log" "target/mock-control.log"
+        echo "       日志：target/mock-control.log"
+    fi
+}
+
+# 自动重读：跑着的时候直接改配置文件（没人通知它），一秒内该生效；改坏了要继续用旧的
+run_watch() {
+    local log="$LOGS/watch.log"
+    local sock="/tmp/pliers-watchm-$$.sock"
+    local ctl="/tmp/pliers-watchc-$$.sock"
+    local cfg="$LOGS/watch.toml"
+    local bad=0
+
+    cat >"$cfg" <<TOML
+[scheme]
+kind = "double-pinyin"   # 小鹤，跟下面喂的 nihc 对得上
+layout = "flypy"
+
+[dict]
+max_candidates = 9
+TOML
+
+    python3 tools/mock_compositor.py "$sock" "nihc " 你好 watch >"$log" 2>&1 &
+    local mock=$!
+    sleep 0.4
+    env PLIERS_DICT="$DICT" PLIERS_CONFIG="$cfg" PLIERS_SOCKET="$ctl" \
+        WAYLAND_DISPLAY="$sock" timeout 30 ./target/debug/pliers >>"$log" 2>&1 &
+    local ime=$!
+    sleep 0.5
+
+    check() { # check <说明> <输出里该有的>
+        local out
+        out=$(PLIERS_SOCKET="$ctl" ./target/debug/pliers status 2>&1)
+        case "$out" in
+            *"$2"*) echo "        $1 → 有「$2」✓" ;;
+            *) echo "        $1 → 没看到「$2」：$out"; bad=1 ;;
+        esac
+    }
+
+    sed -i 's/max_candidates = 9/max_candidates = 3/' "$cfg"   # 只改文件，不通知实例
+    sleep 1.2
+    check "改了文件（没人通知它）" "一页 3 个"
+
+    printf '[scheme]\nkind = "双拼"\n' >>"$cfg"                # 写坏了
+    sleep 1.2
+    check "文件写坏了，继续用旧的" "一页 3 个"
+
+    wait "$ime" 2>/dev/null
+    wait "$mock" 2>/dev/null
+    rm -f "$ctl"
+
+    if [ "$bad" -eq 0 ] && grep -q "PASS" "$log"; then
+        pass=$((pass + 1))
+        printf '  \033[32mPASS\033[0m %-16s %s\n' watch "$(grep -o 'mock: PASS.*' "$log" | head -1 | cut -c13-)"
+    else
+        fail=$((fail + 1))
+        printf '  \033[31mFAIL\033[0m %-16s 见日志\n' watch
+        cp "$log" "target/mock-watch.log"
+        echo "       日志：target/mock-watch.log"
+    fi
+}
+
 run() { # run <名字> <按键> <期望提交> <模式> [额外环境变量]
     local name="$1" keys="$2" expect="$3" mode="$4" extra="${5:-}"
     local log="$LOGS/$name.log"
@@ -101,6 +225,13 @@ run symbol         "nihao"   你好  symbol        # 符号必须排在文字后
 
 echo "== 高分屏 =="
 run hidpi          "nihao "  你好  hidpi  "PLIERS_SCALE=2"
+
+echo "== 在线改配置（pliers set / status / reload）=="
+# 客户端跑着的时候把方案换成小鹤双拼，之后 mock 才喂 `nihc`：
+# 提交的必须还是「你好」—— 说明真的换了引擎，不只是回了一句话
+run_control
+# 自动重读：改配置文件不用通知它，保存后一秒内生效
+run_watch
 
 echo "== 快捷键 / 焦点 =="
 run shortcut       "a"       ""    shortcut

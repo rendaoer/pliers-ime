@@ -93,11 +93,21 @@ cargo run -p pliers-dict --release -- --source ~/Downloads/CustomPinyinDictionar
 | jieba 词频表 | 权重 | 词表本身**没有词频**，不给权重就只能按拼音字典序排 |
 | 词表自己 | 单字 | 表里全是 2 字以上的词，单字靠"字↔音节"对齐推出来 |
 
-单字那行有个坑：一个字在不同词里读音可能不一样（长 = zhang/chang）。导入时**每个字只挑一个主读音**当单字，
-另外把"常用"的次要读音也补上 —— 两条证据都要过 20% 才算常用：这个读音在字典里占多少条目、
-按词频加权又占多少用量。门槛是拿「的」校准的：的=de 占 95% 条目、65% 用量，
-要是把 di 也收进去，打 `di` 第一个候选就成了「的」（错的）；而长=chang 占 23% 条目、38% 用量，
-正好该收 —— 不然打 `chang` 永远出不来「长」。
+单字那行有个坑：一个字在不同词里读音可能不一样（长 = zhang/chang）。导入时**每个字挑一个主读音**
+（给全权重），另外把"常用"的次要读音也补上（权重按用量打折）。门槛是"这个读音要占该字条目数的 7% 以上"，
+拿真数据校准出来的：
+
+| 该收 | 条目占比 | | 不该收 | 条目占比 |
+| --- | --- | --- | --- | --- |
+| 长 = chang | 23% | | 的 = di | 5% |
+| 还 = huan | 12% | | 了 = liao | 5% |
+| 重 = chong | 11% | | 给 = ji | 5% |
+| 行 = hang | 9% | | 着 = zhao | 6% |
+| 乐 = yue | 8% | | | |
+
+为什么看**条目数**而不是"用量"：的=di 的用量占比有 35%（「目的」「的确」都是高频词），
+比行=hang 的 10% 还高 —— 因为「的」当助词的用量根本不在任何词表里，光看词频分不开这两类。
+条目数反而干净：的=di 只有 31 条，行=hang 有 88 条。收进来的一共 284 个次要读音。
 
 导入一次大概几分钟（`--release` 快很多），生成的库 ~130 MB。之后想加词就直接写 SQL ——
 **但得先把输入法退掉**：turso 开着的时候会一直占着这个库，别的进程连只读连接都进不去
@@ -145,6 +155,9 @@ PLIERS_DEBUG=1 cargo run
 # pliers: 收到 keycode=30 keysym=0x0061 按下（shift=false caps=false ctrl/alt/super=false 预编辑=""）
 # pliers:   → 预编辑 "a"
 ```
+
+改配置不用重启：另开一个终端 `pliers status` 看现状、`pliers set scheme.kind double-pinyin`
+直接切方案 —— 见下面「跑着的时候改配置（不用重启）」。
 
 注意**同一个 seat 上只能有一个输入法**：起第二个实例时，合成器会给旧的那个发
 `unavailable`（smithay 的 `InputMethodHandle::add_instance`），旧实例会打印
@@ -266,6 +279,93 @@ name = "wubi"             # 词库里 word.scheme 用哪个名字
 码表用 pliers-dict 的 `--table` 导入：`--table wubi.txt --table-scheme wubi`
 （每行 `词<TAB>码[<TAB>权重]`，rime 那种 .txt 码表就是这个格式）。仓库里**没有**带码表数据，
 所以这条路目前只有骨架。
+
+### 跑着的时候改配置（不用重启）
+
+输入法起来之后会在 `$XDG_RUNTIME_DIR/pliers.sock` 上听命令，另开一个终端就能问它、改它：
+
+```bash
+pliers status                             # 现在什么方案、哪个词库、几个候选、中还是英
+pliers set                                # 交互模式：上下选着改（最省事）
+pliers set scheme.kind double-pinyin      # 只改**正在跑的实例**（重启就回去了）
+pliers config set scheme.layout flypy      # 改**配置文件**（保留注释，跑着的实例自动重读）
+pliers config show | path | edit           # 看内容 / 看路径 / 用 $EDITOR 打开
+pliers reload                             # 手动让它重读一遍配置文件
+```
+
+**`set` 和 `config set` 是两条路**，想清楚再敲：
+
+| | 改哪儿 | 什么时候失效 | 用途 |
+| --- | --- | --- | --- |
+| `pliers set …` | 只改内存里那份配置 | 重启就回去 | 试手感（"小鹤换微软试试"） |
+| `pliers config set …` | 写进 `~/.config/pliers/config.toml` | 不会失效 | 定下来（写的时候注释、空行、行尾注释都留着） |
+
+**配置文件改了就自动生效**：跑着的实例每 0.7 秒看一眼文件的 mtime，发现变了就重读
+（`pliers config set`、`$EDITOR` 里保存、`echo >>` 都算），不用重启、也不用敲 `reload`。
+改坏了不慌：新配置建不出引擎就**继续用旧的**，只在 stderr 上吼一句
+（`pliers: 配置文件有问题，继续用旧的：…`）。
+
+`pliers status` 一项一行（服务端给的是 tab 分隔的 `名=值`，排版在命令行这边做的，
+所以 `socat` 接上去也是一眼看懂的数据）：
+
+```
+方案      双拼（小鹤）
+词库      /home/dao/.local/share/pliers/dict.db（131 MB）
+候选      一页 9 个，池子 90 个
+中英切换  ctrl+space
+中英提示  开
+模式      中（启动时 chinese）
+配置文件  /home/dao/.config/pliers/config.toml
+socket    /run/user/1000/pliers.sock
+```
+
+`pliers set` 不带参数就是交互模式 —— 上下选的列表，跟那些前端脚手架 CLI 一个手感
+（↑↓ 或 j/k 挪、Enter 确认、数字键直达、q/Esc 退出）：
+
+```
+$ pliers set
+现在跑着的是：
+方案         双拼（小鹤）
+…
+
+? 要改哪一项？
+    输入方案     double-pinyin      full-pinyin / double-pinyin / table
+❯   双拼键位     flypy              natural / flypy / mspy / none
+    整句候选     开                 true / false
+    码表名       —                  手输
+    词库文件     /home/dao/.local/share/pliers/dict.db   手输
+    一页候选数   9                  1 / 2 / 3 / 4 / 5 / 6 / 7 / 8 / 9
+    …
+    重新读配置文件
+    看完整现状
+  ↑↓ 选择 · Enter 确认 · 数字键直达 · q 退出
+```
+
+选中一项之后：**有固定选项的**再给一个列表上下选，光标先停在现在这个值上（带绿点 ●）；
+**要手输的**（词库路径、池子深度、码表名）给一行输入框、预填现在的值。
+中文按两列算宽度，所以列是对齐的；`NO_COLOR=1` 或重定向到文件时自动不上色。
+
+改完把结果和新的现状打在滚动历史里，回到列表时**光标停在你刚改的那项上** —— 连着调几项不用重新挪。
+
+没终端时（管道、脚本、CI）自动退回行式：把项列出来（带 `<项>` 名字），输编号或直接
+`<项> <值>` —— 这样交互模式也能自动化测（mock 那套测试就是两边都跑一遍）。
+
+几个要点：
+
+* **`set` 只改正在跑的那个实例，不写配置文件** —— 下次启动还是配置文件里的值。
+  想让它长期生效，就把同样的值抄进 `~/.config/pliers/config.toml`。
+* 改完**立刻**生效：`set scheme.kind double-pinyin` + `set scheme.layout flypy` 之后，
+  下一个键就按小鹤解。mock 测试验的就是这个：客户端跑着的时候切方案，再喂 `nihc` → 提交「你好」。
+* 值写错了会**整个退回**，正在跑的实例不受影响：`scheme.layout 只认 natural（自然码）/
+  flypy（小鹤）/ mspy（微软）/ none，给的是 "flpy"`（退出码 1）。`config set` 同一个校验，
+  验不过**不写文件**。
+* 中/英模式在 `reload`/`set` 之后**保持不变**（不会跳回 `start_mode`）；
+  打到一半的拼音也留着 —— 重建引擎时会把它塞回去、按新方案重查候选。
+* `pliers set` 不连合成器 —— 它只跟已经跑着的那个实例说话，不会抢 seat。
+
+实现就一条 Unix socket 上的一问一答（纯文本，`socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/pliers.sock`
+也能直接跟它说话）。主循环用 `poll(2)` 同时等 Wayland socket 和它，所以没开线程、也没加定时器 ——
+见 `crates/pliers-wayland/src/control.rs` 和 `poll.rs`。socket 路径可以用 `PLIERS_SOCKET` 改。
 
 ### 用 Nushell？
 
@@ -468,9 +568,10 @@ ORDER BY score DESC LIMIT ?3
 
 * **没有简拼**（`nh` → 你好）、**没有模糊音**（zh=z、an=ang）、**没有联想**（上屏之后猜下一个词）。
   这三样都得再动 `scheme.rs` 和词库索引。
-* **多音字只收"常用"的次要读音**（两条证据都过 20%，见上面「先导入词库」）：长=chang 现在有了，
-  但行=hang、乐=yue、重=chong 这些还没收进来 —— 打它们的**词**不受影响（银行、音乐、重复都是词条）。
-  真要全，得用带读音标注的字典（pypinyin / Unihan 那种），而不是从词表里数。
+* **多音字收的是"常用"次要读音**（条目占比 ≥ 7%，见上面「先导入词库」）：长=chang、行=hang、
+  乐=yue、重=chong、还=huan 都有了；但 的=di、了=liao、着=zhao、给=ji（给予）、和=huo（暖和）
+  这些**故意没收** —— 收了打 `di` 第一个候选就变成「的」。要多全，得用带读音标注的字典
+  （pypinyin / Unihan 那种），而不是从词表里数条目。
 * **整句候选是词频一元模型，没有语言模型**：同一个拼音串可能先给一个不太对的切法
   （干净词库里 `nihaoma` 的「你号码」会排在「你好吗」前面，因为 jieba 里「号码」9800 比「你好」7250 还高）。
   选过一次正确的之后 `user_word` 会把它顶上去（自己试过：`你好` 选过一次，`nihaoma` 就变成「你好吗」第一）。

@@ -83,8 +83,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         started.elapsed().as_secs_f32()
     );
 
-    // 单字读音：字 → (音节 → 出现次数)
+    // 单字读音：字 → (音节 → 出现次数)，以及字 → (音节 → 这些词的词频之和)
     let mut readings: HashMap<char, HashMap<String, u32>> = HashMap::new();
+    let mut reading_weight: HashMap<char, HashMap<String, i64>> = HashMap::new();
     let mut syllables: HashMap<String, ()> = HashMap::new();
     let mut words = 0usize;
     let mut with_freq = 0usize;
@@ -117,7 +118,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             None => synthetic_weight(word.chars().count()),
         };
-        // 顺手记下"字 → 读音"：只用双字词，对齐最干净
+        // 顺手记下"字 → 读音"：只用双字词，对齐最干净。
+        // 次数用来算"这个读音在字典里有多少条目"，词频之和用来算"实际用量"——
+        // 两个都得看：字典里条目多的读音未必常用（的=de 602 条 / di 只有 31 条），
+        // 而条目少的也可能很常用（长=chang 只有 273 条，可「长期」「长度」天天用）
         let chars: Vec<char> = word.chars().collect();
         let syls: Vec<&str> = code.split(' ').collect();
         if chars.len() == 2 && syls.len() == 2 {
@@ -127,6 +131,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .or_default()
                     .entry(syl.to_string())
                     .or_default() += 1;
+                *reading_weight
+                    .entry(ch)
+                    .or_default()
+                    .entry(syl.to_string())
+                    .or_default() += weight;
             }
         }
 
@@ -152,27 +161,67 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // ---- 单字 ----
+    //
+    // 主读音给全权重（跟以前一样），**常用**的次要读音也收进来，权重按实际用量打折。
+    // 为什么非要收次要读音：只留主读音的话，长=zhang（77% 条目）被留下、chang 被扔掉，
+    // 打 chang 就永远出不来「长」。
+    //
+    // 门槛（条目占比 + 用量占比都要 ≥ 1/5）是拿「的」校准出来的：的=de 占 95% 条目、
+    // 65% 用量，要是把 di 也当常用读音，打 di 第一个候选就成了「的」（错的）；
+    // 而长=chang 占 23% 条目、38% 用量，正好该收
     let mut stmt = pollster::block_on(conn.prepare(
         "INSERT OR IGNORE INTO word (scheme, code, text, weight) VALUES (?1, ?2, ?3, ?4)",
     ))?;
     pollster::block_on(conn.execute("BEGIN", ()))?;
     let mut singles = 0usize;
+    let mut secondaries = 0usize;
     for (ch, counts) in &readings {
         // 出现最多的读音就是主读音；打平取字典序小的，保证结果稳定
-        let Some((syl, _)) = counts.iter().max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0))) else {
+        let Some((primary, _)) = counts.iter().max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+        else {
             continue;
         };
         let text = ch.to_string();
-        let weight = match freq.get(&text) {
+        let base = match freq.get(&text) {
             Some(&count) => count * FREQ_SCALE,
             None => synthetic_weight(1),
         };
-        pollster::block_on(stmt.execute(turso::params!["pinyin", syl.as_str(), text, weight]))?;
-        singles += 1;
+        let total_count: u32 = counts.values().sum();
+        let empty = HashMap::new();
+        let weights = reading_weight.get(ch).unwrap_or(&empty);
+        let total_weight: i64 = weights.values().sum();
+
+        for (syl, count) in counts {
+            let weight = if syl == primary {
+                base
+            } else {
+                let entry_share = f64::from(*count) / f64::from(total_count.max(1));
+                let usage_share = if total_weight > 0 {
+                    *weights.get(syl).unwrap_or(&0) as f64 / total_weight as f64
+                } else {
+                    0.0
+                };
+                if entry_share < 0.2 || usage_share < 0.2 {
+                    continue; // 不常用的读音不收：收了会把别的字挤下去
+                }
+                // 打折：它毕竟不是这个读音的"本家"，别压过本来就读这个音的字
+                (base as f64 * usage_share / 2.0) as i64
+            };
+            pollster::block_on(stmt.execute(turso::params![
+                "pinyin",
+                syl.as_str(),
+                text.as_str(),
+                weight.max(1)
+            ]))?;
+            singles += 1;
+            if syl != primary {
+                secondaries += 1;
+            }
+        }
     }
     drop(stmt);
     pollster::block_on(conn.execute("COMMIT", ()))?;
-    println!("单字补充：{singles} 个（从双字词的读音推出来的）");
+    println!("单字补充：{singles} 个（从双字词的读音推出来的，其中 {secondaries} 个是次要读音）");
 
     // ---- 码表（五笔之类）：`词<TAB>码[<TAB>权重]` ----
     if let (Some(path), Some(scheme)) = (&args.table, &args.table_scheme) {

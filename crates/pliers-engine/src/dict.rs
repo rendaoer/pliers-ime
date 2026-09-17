@@ -381,6 +381,13 @@ pub(crate) mod testing {
                 ("ni hao", "妮好", 20),
                 ("ni ha", "你哈", 30),
                 ("bu neng", "不能", 4_000_000),
+                // 整句候选要用：单字 + 词，让"库里没有整词也能拼出来"有得测
+                ("bu", "不", 1_900_000),
+                ("ma", "吗", 212_450),
+                ("shi", "是", 7_969_910),
+                ("jian", "见", 589_650),
+                ("shi jian", "时间", 332_880),
+                ("hao ma", "号码", 9_800),
             ] {
                 pollster::block_on(conn.execute(
                     "INSERT INTO word (scheme, code, text, weight) VALUES ('pinyin', ?1, ?2, ?3)",

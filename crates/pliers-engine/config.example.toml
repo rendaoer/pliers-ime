@@ -25,6 +25,10 @@ kind = "full-pinyin"
 # 码表要用 pliers-dict 导进去：--table 码表.txt --table-scheme wubi
 # name = "wubi"
 
+# 整句候选：库里没有整词时，把音节切成词拼一句（nihaoma → 你好吗）。
+# 全拼、双拼都有，默认开。想要"只出词库里真有的词"就设 false
+# sentence = true
+
 # ---- 中英文切换 -------------------------------------------------------------
 [engine]
 # 切换键，可以写多个：

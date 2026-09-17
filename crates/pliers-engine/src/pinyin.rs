@@ -134,6 +134,12 @@ impl Segmenter {
         codes
     }
 
+    /// 所有能把整串切完的切法（音节数少的排前面）。
+    /// 整句候选要用它拿到"音节序列"，不是拼好的码
+    pub fn complete_segmentations(&self, input: &str) -> Vec<Vec<String>> {
+        self.segmentations(input, MAX_SEGMENTATIONS)
+    }
+
     /// 所有能把整串切完的切法（最多 `max` 种），音节数少的排前面
     fn segmentations(&self, input: &str, max: usize) -> Vec<Vec<String>> {
         let mut out = Vec::new();

@@ -21,6 +21,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::dict::Dict;
 use crate::pinyin::Segmenter;
+use crate::sentence;
 
 /// 输入方案
 pub trait Scheme {
@@ -63,17 +64,41 @@ fn merge(dict: &Dict, scheme: &str, codes: &[String], limit: usize) -> Vec<Strin
     out
 }
 
+/// 把整句候选接到精确候选后面（去重、不超 `limit`）。
+///
+/// 顺序是有意的：整词命中永远排在拼出来的句子前面 ——「你好」这种库里真有的词
+/// 不该被「你」+「好」拼出来的同一个句子挤掉（文字一样，但前者是"查到的"）
+fn push_sentences(
+    out: &mut Vec<String>,
+    dict: &Dict,
+    scheme: &str,
+    syllables: &[String],
+    limit: usize,
+) {
+    for text in sentence::candidates(dict, scheme, syllables, limit) {
+        if !out.contains(&text) {
+            out.push(text);
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+}
+
 // ---- 全拼 -------------------------------------------------------------------
 
 /// 全拼：`nihao` → 切词 → 查 `ni hao`
 pub struct FullPinyin {
     segmenter: Segmenter,
+    /// 要不要给"整句"候选（`nihaoma` → 你好吗）
+    sentence: bool,
 }
 
 impl FullPinyin {
-    pub fn new(syllables: &[String]) -> Self {
+    pub fn new(syllables: &[String], sentence: bool) -> Self {
         Self {
             segmenter: Segmenter::new(syllables),
+            sentence,
         }
     }
 }
@@ -84,12 +109,18 @@ impl Scheme for FullPinyin {
     }
 
     fn candidates(&self, dict: &Dict, input: &str, limit: usize) -> Vec<String> {
-        merge(
+        let mut out = merge(
             dict,
             self.name(),
             &self.segmenter.lookup_codes(input),
             limit,
-        )
+        );
+        if self.sentence
+            && let Some(syllables) = self.segmenter.complete_segmentations(input).first()
+        {
+            push_sentences(&mut out, dict, self.name(), syllables, limit);
+        }
+        out
     }
 }
 
@@ -381,10 +412,12 @@ pub struct DoublePinyin {
     by_first: HashMap<char, Vec<String>>,
     /// 这套键位用到分号吗（微软双拼的 ing 在分号上）
     semicolon: bool,
+    /// 要不要给"整句"候选（`nihcma` → 你好吗）
+    sentence: bool,
 }
 
 impl DoublePinyin {
-    pub fn new(layout: Layout, syllables: &[String]) -> Self {
+    pub fn new(layout: Layout, syllables: &[String], sentence: bool) -> Self {
         let mut by_code = HashMap::with_capacity(syllables.len() * 2);
         let mut by_first: HashMap<char, Vec<String>> = HashMap::new();
         let mut semicolon = false;
@@ -413,6 +446,7 @@ impl DoublePinyin {
             by_code,
             by_first,
             semicolon,
+            sentence,
         }
     }
 
@@ -421,8 +455,11 @@ impl DoublePinyin {
         self.by_code.get(code).map(String::as_str)
     }
 
-    /// 输入 → 要查的拼音码
-    fn lookup_codes(&self, input: &str) -> Vec<String> {
+    /// 把输入两个一组解成音节。
+    ///
+    /// 返回 `None` 表示这串键里有解不出音节的组（整个输入作废）；
+    /// 否则是「已经解出来的音节」+「最后剩下的那半截键」
+    fn decode_pairs(&self, input: &str) -> Option<(Vec<String>, Option<char>)> {
         let chars: Vec<char> = input.chars().collect();
         let mut complete: Vec<String> = Vec::new();
 
@@ -430,22 +467,24 @@ impl DoublePinyin {
         let mut index = 0;
         while index + 1 < chars.len() {
             let pair: String = chars[index..index + 2].iter().collect();
-            match self.decode_syllable(&pair) {
-                Some(syllable) => {
-                    complete.push(syllable.to_string());
-                    index += 2;
-                }
-                None => return Vec::new(), // 这组键解不出音节，整个输入作废
-            }
+            let syllable = self.decode_syllable(&pair)?;
+            complete.push(syllable.to_string());
+            index += 2;
         }
+        Some((complete, chars.get(index).copied()))
+    }
 
-        if index == chars.len() {
+    /// 输入 → 要查的拼音码
+    fn lookup_codes(&self, input: &str) -> Vec<String> {
+        let Some((complete, tail)) = self.decode_pairs(input) else {
+            return Vec::new();
+        };
+        let Some(first) = tail else {
             // 正好解完，不再往后联想（跟全拼一个规矩：打 ni 就只查 ni）
             return vec![complete.join(" ")];
-        }
+        };
 
         // 剩一个键：把它当作某个音节的第一个键，枚举可能的音节
-        let first = chars[index];
         let mut codes = Vec::new();
         for syllable in self.by_first.get(&first).into_iter().flatten() {
             let mut code = complete.join(" ");
@@ -472,7 +511,15 @@ impl Scheme for DoublePinyin {
     }
 
     fn candidates(&self, dict: &Dict, input: &str, limit: usize) -> Vec<String> {
-        merge(dict, self.name(), &self.lookup_codes(input), limit)
+        let mut out = merge(dict, self.name(), &self.lookup_codes(input), limit);
+        // 整句候选：键正好两两解完（一组一个音节）时才有得拼
+        if self.sentence
+            && let Some((syllables, None)) = self.decode_pairs(input)
+            && syllables.len() >= 2
+        {
+            push_sentences(&mut out, dict, self.name(), &syllables, limit);
+        }
+        out
     }
 }
 
@@ -588,11 +635,11 @@ mod tests {
 
     #[test]
     fn 双拼打你好() {
-        let double = DoublePinyin::new(Layout::preset("natural").unwrap(), &syllables());
+        let double = DoublePinyin::new(Layout::preset("natural").unwrap(), &syllables(), true);
         // 自然码：ni = n+i，hao = h+k
         assert_eq!(double.lookup_codes("nihk"), ["ni hao"]);
         // 小鹤：hao = h+c
-        let flypy = DoublePinyin::new(Layout::preset("flypy").unwrap(), &syllables());
+        let flypy = DoublePinyin::new(Layout::preset("flypy").unwrap(), &syllables(), true);
         assert_eq!(flypy.lookup_codes("nihc"), ["ni hao"]);
     }
 
@@ -602,7 +649,7 @@ mod tests {
         // 小鹤用户打 bung 就再也出不来「不能」
         for name in ["natural", "flypy", "mspy"] {
             let layout = Layout::preset(name).unwrap();
-            let double = DoublePinyin::new(layout.clone(), &syllables());
+            let double = DoublePinyin::new(layout.clone(), &syllables(), true);
             for syllable in syllables() {
                 if UNENCODABLE.contains(&syllable.as_str()) {
                     continue; // 感叹词双拼打不出来（嗯 打 en），不算
@@ -621,18 +668,18 @@ mod tests {
     fn 双拼能打出不能() {
         // 用户报的那个 bug：小鹤 bung = bu + neng = 不能
         let layout = Layout::preset("flypy").unwrap();
-        let double = DoublePinyin::new(layout, &syllables());
+        let double = DoublePinyin::new(layout, &syllables(), true);
         assert_eq!(double.lookup_codes("bung"), ["bu neng"]);
         // 自然码和微软的 neng 也在 g 上
         for name in ["natural", "mspy"] {
-            let double = DoublePinyin::new(Layout::preset(name).unwrap(), &syllables());
+            let double = DoublePinyin::new(Layout::preset(name).unwrap(), &syllables(), true);
             assert_eq!(double.lookup_codes("bung"), ["bu neng"], "{name}");
         }
     }
 
     #[test]
     fn 双拼的半截音节也补全() {
-        let double = DoublePinyin::new(Layout::preset("natural").unwrap(), &syllables());
+        let double = DoublePinyin::new(Layout::preset("natural").unwrap(), &syllables(), true);
         // 只打了 h：所有 h 开头的音节都该试一遍，包括 hao
         let codes = double.lookup_codes("nih");
         assert!(codes.contains(&"ni hao".to_string()), "{codes:?}");
@@ -715,10 +762,10 @@ mod tests {
 
     #[test]
     fn 微软双拼收分号() {
-        let mspy = DoublePinyin::new(Layout::preset("mspy").unwrap(), &syllables());
+        let mspy = DoublePinyin::new(Layout::preset("mspy").unwrap(), &syllables(), true);
         assert!(mspy.accepts(';'));
         assert!(mspy.accepts('z'));
-        let natural = DoublePinyin::new(Layout::preset("natural").unwrap(), &syllables());
+        let natural = DoublePinyin::new(Layout::preset("natural").unwrap(), &syllables(), true);
         assert!(!natural.accepts(';'));
     }
 }

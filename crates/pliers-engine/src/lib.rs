@@ -17,6 +17,7 @@ pub mod config;
 pub mod dict;
 mod pinyin;
 mod scheme;
+mod sentence;
 
 pub use config::{Config, EXAMPLE as EXAMPLE_CONFIG, SchemeConfig};
 pub use dict::Dict;
@@ -637,7 +638,7 @@ mod tests {
     /// 小词库 + 全拼方案
     fn engine_with(settings: Settings) -> Engine {
         let dict = dict::testing::sample_dict();
-        let scheme = FullPinyin::new(dict.syllables());
+        let scheme = FullPinyin::new(dict.syllables(), true);
         Engine::new(dict, Box::new(scheme), settings)
     }
 
@@ -718,6 +719,47 @@ mod tests {
         assert_eq!(preedit.candidates[0], "你好");
         assert_eq!(preedit.selected, 0);
         assert_eq!(preedit.current(), Some("你好"));
+    }
+
+    #[test]
+    fn 整句候选_库里的词拼出长句() {
+        // nihaoma：词库里没有「你好吗」这个词，靠「你好」+「吗」拼出来
+        let mut engine = engine();
+        type_letters(&mut engine, "nihaoma");
+        assert!(
+            engine.preedit().candidates.contains(&"你好吗".to_string()),
+            "{:?}",
+            engine.preedit().candidates
+        );
+    }
+
+    #[test]
+    fn 小鹤双拼也能整句() {
+        // ni=nihc？不：小鹤里 ni 就是 `ni`，hao 是 `hc`，ma 是 `ma`
+        let dict = dict::testing::sample_dict();
+        let scheme = DoublePinyin::new(Layout::preset("flypy").unwrap(), dict.syllables(), true);
+        let mut engine = Engine::new(dict, Box::new(scheme), Settings::default());
+        type_letters(&mut engine, "nihcma");
+        assert!(
+            engine.preedit().candidates.contains(&"你好吗".to_string()),
+            "{:?}",
+            engine.preedit().candidates
+        );
+    }
+
+    #[test]
+    fn 整句候选可以关掉() {
+        let config = Config::parse("[scheme]\nkind = \"full-pinyin\"\nsentence = false\n").unwrap();
+        let dict = dict::testing::sample_dict();
+        let scheme = config.build_scheme(&dict).unwrap();
+        let got = scheme.candidates(&dict, "nihaoma", 9);
+        assert!(!got.contains(&"你好吗".to_string()), "{got:?}");
+
+        // 开着的时候有（对照，免得哪天默默失效）
+        let config = Config::parse("[scheme]\nkind = \"full-pinyin\"\n").unwrap();
+        let scheme = config.build_scheme(&dict).unwrap();
+        let got = scheme.candidates(&dict, "nihaoma", 9);
+        assert!(got.contains(&"你好吗".to_string()), "{got:?}");
     }
 
     #[test]
@@ -1310,7 +1352,7 @@ mod tests {
     fn 小鹤双拼打不能() {
         // 回归：以前 `ng` 这个码被「嗯」占着，bung 解成 `bu ng`，怎么打都出不来「不能」
         let dict = dict::testing::sample_dict();
-        let scheme = DoublePinyin::new(Layout::preset("flypy").unwrap(), dict.syllables());
+        let scheme = DoublePinyin::new(Layout::preset("flypy").unwrap(), dict.syllables(), true);
         let mut engine = Engine::new(dict, Box::new(scheme), Settings::default());
         type_letters(&mut engine, "bung");
         assert!(

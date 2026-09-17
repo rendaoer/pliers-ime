@@ -98,12 +98,15 @@ fn default_true() -> bool {
 }
 
 /// 用哪套输入方案。`kind` 决定后面跟哪些字段
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum SchemeConfig {
     /// 全拼：`nihao` + 空格 → 你好
-    #[default]
-    FullPinyin,
+    FullPinyin {
+        /// 要不要"整句"候选：库里没有整词时按词拼一句（`nihaoma` → 你好吗）
+        #[serde(default = "default_sentence")]
+        sentence: bool,
+    },
     /// 双拼：两键一个音节
     DoublePinyin {
         /// 预设键位：`natural`(自然码) / `flypy`(小鹤) / `mspy`(微软双拼) /
@@ -115,6 +118,9 @@ pub enum SchemeConfig {
         /// 键名 `zh`/`ch`/`sh` 是声母，别的都当韵母
         #[serde(default)]
         keys: BTreeMap<String, String>,
+        /// 同全拼：要不要整句候选
+        #[serde(default = "default_sentence")]
+        sentence: bool,
     },
     /// 码表方案：五笔、郑码、仓颉这类"键本身就是码"的
     Table {
@@ -123,8 +129,19 @@ pub enum SchemeConfig {
     },
 }
 
+impl Default for SchemeConfig {
+    fn default() -> Self {
+        // 全拼 + 整句候选（`#[default]` 不能标在带字段的变体上，只好手写）
+        Self::FullPinyin { sentence: true }
+    }
+}
+
 fn default_layout() -> String {
     "natural".to_string()
+}
+
+fn default_sentence() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -192,8 +209,14 @@ impl Config {
     pub fn build_scheme(&self, dict: &Dict) -> Result<Box<dyn Scheme>> {
         let syllables = dict.syllables();
         Ok(match &self.scheme {
-            SchemeConfig::FullPinyin => Box::new(FullPinyin::new(syllables)),
-            SchemeConfig::DoublePinyin { layout, keys } => {
+            SchemeConfig::FullPinyin { sentence } => {
+                Box::new(FullPinyin::new(syllables, *sentence))
+            }
+            SchemeConfig::DoublePinyin {
+                layout,
+                keys,
+                sentence,
+            } => {
                 let base = if layout == "none" {
                     Layout::empty()
                 } else {
@@ -220,7 +243,7 @@ impl Config {
                     )
                     .into());
                 }
-                Box::new(DoublePinyin::new(layout, syllables))
+                Box::new(DoublePinyin::new(layout, syllables, *sentence))
             }
             SchemeConfig::Table { name } => Box::new(Table::new(name)),
         })
@@ -261,7 +284,7 @@ mod tests {
     #[test]
     fn 默认就是全拼() {
         let config = Config::parse("").unwrap();
-        assert!(matches!(config.scheme, SchemeConfig::FullPinyin));
+        assert!(matches!(config.scheme, SchemeConfig::FullPinyin { .. }));
         assert_eq!(config.dict.max_candidates, 9);
     }
 
@@ -455,6 +478,6 @@ mod tests {
     #[test]
     fn 模板本身必须是合法配置() {
         let config = Config::parse(EXAMPLE).expect("仓库里那份示例配置要能解析");
-        assert!(matches!(config.scheme, SchemeConfig::FullPinyin));
+        assert!(matches!(config.scheme, SchemeConfig::FullPinyin { .. }));
     }
 }

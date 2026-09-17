@@ -45,6 +45,108 @@ pub const KEY_DOWN: u32 = 0xff54;
 const KEY_1: u32 = 0x31;
 const KEY_9: u32 = 0x39;
 
+/// 中英文模式
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// 中文：字母进组词 buffer，空格上屏候选
+    #[default]
+    Chinese,
+    /// 英文：什么都不拦，按键原样转发（等于这台机器上没装输入法）
+    English,
+}
+
+impl Mode {
+    pub fn toggle(self) -> Mode {
+        match self {
+            Mode::Chinese => Mode::English,
+            Mode::English => Mode::Chinese,
+        }
+    }
+
+    /// 切换提示上显示的那个字
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Chinese => "中",
+            Mode::English => "英",
+        }
+    }
+}
+
+/// 哪些按键用来切中英文
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToggleKeys {
+    /// Ctrl + 空格（中文输入法的老习惯）
+    pub ctrl_space: bool,
+    /// 轻按一下 Shift（按下到抬起之间没按别的键）
+    pub shift_tap: bool,
+}
+
+impl Default for ToggleKeys {
+    fn default() -> Self {
+        // 默认只开 Ctrl+空格：Shift 太容易误触了，想要的人自己开
+        Self {
+            ctrl_space: true,
+            shift_tap: false,
+        }
+    }
+}
+
+impl ToggleKeys {
+    /// 解析配置里的写法。写空数组就是不想要切换键
+    pub fn parse(keys: &[String]) -> Result<Self, String> {
+        let mut parsed = ToggleKeys {
+            ctrl_space: false,
+            shift_tap: false,
+        };
+        for key in keys {
+            match key.trim().to_ascii_lowercase().as_str() {
+                "ctrl+space" => parsed.ctrl_space = true,
+                "shift" => parsed.shift_tap = true,
+                other => {
+                    return Err(format!(
+                        "不认识的切换键 {other:?}：可以写 \"ctrl+space\" 或 \"shift\"，                         不想要切换键就写空数组"
+                    ));
+                }
+            }
+        }
+        Ok(parsed)
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.ctrl_space || self.shift_tap
+    }
+}
+
+/// 引擎的行为开关（都来自配置文件）
+#[derive(Debug, Clone)]
+pub struct Settings {
+    /// 候选最多取几个
+    pub limit: usize,
+    /// 用哪些键切中英文
+    pub toggle_keys: ToggleKeys,
+    /// 启动时是中文还是英文
+    pub start_mode: Mode,
+    /// 切换模式时在光标处弹一下"中/英"
+    pub indicator: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            limit: 9,
+            toggle_keys: ToggleKeys::default(),
+            start_mode: Mode::Chinese,
+            indicator: true,
+        }
+    }
+}
+
+/// Shift 的 keysym（左右两个）
+fn is_shift(keysym: u32) -> bool {
+    keysym == 0xffe1 || keysym == 0xffe2
+}
+
 /// 协议层翻译好的一个按键事件（keycode + keysym + 修饰键状态）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyInput {
@@ -56,6 +158,8 @@ pub struct KeyInput {
     pub pressed: bool,
     /// Ctrl/Alt/Super 之一按着：这是快捷键，不能拿去组词
     pub shortcut: bool,
+    /// 具体是 Ctrl 按着（用来认 Ctrl+空格；Alt+空格得留给应用）
+    pub ctrl: bool,
     /// 现在有输入框在用吗（没有的话按键只能原样转发）
     pub active: bool,
 }
@@ -103,6 +207,14 @@ pub struct Engine {
     scheme: Box<dyn Scheme>,
     /// 候选最多取几个
     limit: usize,
+    /// 现在中文还是英文
+    mode: Mode,
+    /// 切换键
+    toggle: ToggleKeys,
+    /// 切换时要不要弹提示（协议层问它）
+    indicator: bool,
+    /// Shift 按下之后还没抬起来，且中间没按别的键（"轻按 Shift"用）
+    shift_tap: bool,
 
     /// 攒着的东西：拼音，或者用户用 Shift/Caps Lock 敲出来的大写英文
     buffer: String,
@@ -114,11 +226,15 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(dict: Dict, scheme: Box<dyn Scheme>, limit: usize) -> Self {
+    pub fn new(dict: Dict, scheme: Box<dyn Scheme>, settings: Settings) -> Self {
         Self {
             dict,
             scheme,
-            limit: limit.max(1),
+            limit: settings.limit.max(1),
+            mode: settings.start_mode,
+            toggle: settings.toggle_keys,
+            indicator: settings.indicator,
+            shift_tap: false,
             buffer: String::new(),
             selected: 0,
             consumed: Vec::new(),
@@ -128,7 +244,17 @@ impl Engine {
     /// 按配置文件建引擎：打开词库、装上方案
     pub fn from_config(config: &Config) -> dict::Result<Self> {
         let (dict, scheme) = config.build_engine_parts()?;
-        Ok(Self::new(dict, scheme, config.dict.max_candidates))
+        Ok(Self::new(dict, scheme, config.settings()?))
+    }
+
+    /// 现在中文还是英文
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    /// 切换模式时要不要弹个提示（协议层问它）
+    pub fn indicator(&self) -> bool {
+        self.indicator
     }
 
     /// 现在用的是哪套方案（日志用）
@@ -160,10 +286,19 @@ impl Engine {
             .candidates(&self.dict, &self.buffer.to_ascii_lowercase(), self.limit)
     }
 
-    /// 输入框失焦：按住没放的键不会再有抬起事件了，账本一起清掉
+    /// 输入框失焦：按住没放的键不会再有抬起事件了，账本一起清掉。
+    /// 注意**不动 mode** —— 切到英文之后换个窗口，还是英文
     pub fn reset(&mut self) {
         self.clear_composing();
         self.consumed.clear();
+        self.shift_tap = false;
+    }
+
+    /// 切中英文：顺手把正在组的词取消掉（不然预编辑会挂在应用里）,
+    /// 协议层看到 mode 变了会去清预编辑、弹提示
+    fn switch_mode(&mut self) {
+        self.mode = self.mode.toggle();
+        self.clear_composing();
     }
 
     /// 组词结束（上屏 / 取消）：只清组词状态，按键账本留着 ——
@@ -182,6 +317,30 @@ impl Engine {
             return Action::Forward;
         }
 
+        // ---- 中英文切换：放在最前面，两种模式下都得能用 ----
+        //
+        // 轻按 Shift：Shift 的按下和抬起之间没按过别的键，才算"轻按"。
+        // Shift 自己照旧转发给应用（大写得靠它），只是抬起的时候顺手切个模式
+        if self.toggle.shift_tap {
+            if is_shift(key.keysym) {
+                if key.pressed {
+                    self.shift_tap = true;
+                } else if std::mem::take(&mut self.shift_tap) {
+                    self.switch_mode();
+                }
+            } else if key.pressed {
+                self.shift_tap = false; // 中间按了别的键 → 是 Shift+A 这种组合，不是轻按
+            }
+        }
+
+        // Ctrl+空格：切换模式，这个键谁都不给（它是输入法的热键）。
+        // 注意必须认准 Ctrl：Alt+空格在很多应用里是窗口菜单
+        if key.pressed && self.toggle.ctrl_space && key.ctrl && key.keysym == KEY_SPACE {
+            self.switch_mode();
+            self.consumed.push(key.keycode);
+            return Action::Swallow;
+        }
+
         // 抬起事件：账本里有的继续吃掉（一次清光，长按会重复记账），
         // 账本里没有的原样转发给应用
         if !key.pressed {
@@ -189,6 +348,12 @@ impl Engine {
                 self.consumed.retain(|k| *k != key.keycode);
                 return Action::Swallow;
             }
+            return Action::Forward;
+        }
+
+        // 英文模式：什么都不拦。输入法这时候等于不存在，按键全部原样转发 ——
+        // 打英文、写代码、按快捷键都不希望被组词吃掉
+        if self.mode == Mode::English {
             return Action::Forward;
         }
 
@@ -330,15 +495,30 @@ mod tests {
             keysym,
             pressed: true,
             shortcut: false,
+            ctrl: false,
             active: true,
         }
     }
 
     /// 小词库 + 全拼方案
-    fn engine() -> Engine {
+    fn engine_with(settings: Settings) -> Engine {
         let dict = dict::testing::sample_dict();
         let scheme = FullPinyin::new(dict.syllables());
-        Engine::new(dict, Box::new(scheme), 9)
+        Engine::new(dict, Box::new(scheme), settings)
+    }
+
+    fn engine() -> Engine {
+        engine_with(Settings::default())
+    }
+
+    /// 造一个 Ctrl+空格（中英文切换键）
+    fn ctrl_space() -> KeyInput {
+        KeyInput {
+            keysym: KEY_SPACE,
+            ctrl: true,
+            shortcut: true,
+            ..key(KEY_SPACE)
+        }
     }
 
     /// 动作里的预编辑串（不是这个动作就 None）
@@ -621,6 +801,100 @@ mod tests {
             }),
             Action::Forward
         );
+    }
+
+    #[test]
+    fn ctrl_空格切到英文() {
+        let mut engine = engine();
+        assert_eq!(engine.mode(), Mode::Chinese);
+
+        // 切到英文：切换键本身不给应用
+        assert_eq!(engine.on_key(ctrl_space()), Action::Swallow);
+        assert_eq!(engine.mode(), Mode::English);
+
+        // 英文模式下打什么都原样转发，一个字都不进组词
+        for ch in "hello".chars() {
+            assert_eq!(engine.on_key(key(ch as u32)), Action::Forward);
+        }
+        assert_eq!(engine.text(), "");
+        assert!(engine.preedit().candidates.is_empty());
+        assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Forward);
+
+        // 再按一次切回中文，照常组词
+        assert_eq!(engine.on_key(ctrl_space()), Action::Swallow);
+        assert_eq!(engine.mode(), Mode::Chinese);
+        type_letters(&mut engine, "ni");
+        assert_eq!(engine.preedit().candidates[0], "你");
+    }
+
+    #[test]
+    fn 切换的时候把正在组的词取消掉() {
+        let mut engine = engine();
+        type_letters(&mut engine, "nihao");
+        engine.on_key(ctrl_space());
+        assert_eq!(engine.text(), "", "切到英文时预编辑要清干净");
+        assert!(engine.preedit().candidates.is_empty());
+    }
+
+    #[test]
+    fn 切换键的抬起也吃掉() {
+        let mut engine = engine();
+        let mut pressed = ctrl_space();
+        pressed.keycode = 57;
+        assert_eq!(engine.on_key(pressed), Action::Swallow);
+        assert_eq!(
+            engine.on_key(KeyInput {
+                pressed: false,
+                ..pressed
+            }),
+            Action::Swallow,
+            "不然应用会收到没按下过的空格抬起"
+        );
+    }
+
+    #[test]
+    fn alt_空格不算切换键() {
+        let mut engine = engine();
+        // Alt+空格在很多应用里是窗口菜单，不能抢
+        let alt_space = KeyInput {
+            shortcut: true,
+            ctrl: false,
+            ..key(KEY_SPACE)
+        };
+        assert_eq!(engine.on_key(alt_space), Action::Forward);
+        assert_eq!(engine.mode(), Mode::Chinese);
+    }
+
+    #[test]
+    fn 轻按_shift_切换但组合键不算() {
+        let settings = Settings {
+            toggle_keys: ToggleKeys::parse(&["shift".to_string()]).unwrap(),
+            ..Default::default()
+        };
+        let mut engine = engine_with(settings);
+        let shift_up = KeyInput {
+            pressed: false,
+            ..key(0xffe1)
+        };
+
+        // 轻按一下：按下和抬起之间没别的东西 → 切换
+        engine.on_key(key(0xffe1));
+        engine.on_key(shift_up);
+        assert_eq!(engine.mode(), Mode::English);
+
+        // Shift+A 这种组合：中间按了 a → 不算轻按
+        engine.on_key(key(0xffe1));
+        engine.on_key(key(0x61));
+        engine.on_key(shift_up);
+        assert_eq!(engine.mode(), Mode::English, "组合键不该切成中文");
+    }
+
+    #[test]
+    fn 切到英文之后换窗口还是英文() {
+        let mut engine = engine();
+        engine.on_key(ctrl_space());
+        engine.reset(); // 焦点换到别的应用
+        assert_eq!(engine.mode(), Mode::English, "模式不该被失焦重置");
     }
 
     #[test]

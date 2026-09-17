@@ -119,16 +119,32 @@ impl Painter {
     /// （合成器那边配 `wl_surface.set_buffer_scale`，不然会被当成两倍大）
     pub fn render(&self, preedit: &Preedit, scale: i32) -> Image {
         let scale = scale.clamp(1, 4) as f32;
-        let px = |logical: f32| logical * scale;
-
-        // 1. 排版：每个候选是"序号 + 词"，各自量宽度
         let items: Vec<Item> = preedit
             .candidates
             .iter()
             .take(MAX_ITEMS)
             .enumerate()
-            .map(|(index, text)| self.item(index, text, index == preedit.selected, scale))
+            .map(|(index, text)| {
+                self.item(
+                    &(index + 1).to_string(),
+                    text,
+                    index == preedit.selected,
+                    scale,
+                )
+            })
             .collect();
+        self.draw(items, scale)
+    }
+
+    /// 中英文模式提示（就一个「中」/「英」）：不带序号，别让它看着像个候选
+    pub fn render_notice(&self, label: &str, scale: i32) -> Image {
+        let scale = scale.clamp(1, 4) as f32;
+        self.draw(vec![self.item("", label, true, scale)], scale)
+    }
+
+    /// 把排好版的候选画成像素
+    fn draw(&self, items: Vec<Item>, scale: f32) -> Image {
+        let px = |logical: f32| logical * scale;
         if items.is_empty() {
             // 没在组词。调用方本来就不该画（见 pliers-wayland 的 sync_popup），
             // 真调到了就交张空图，免得算出 0 宽还去建缓冲区
@@ -166,9 +182,17 @@ impl Painter {
                 );
             }
             canvas.glyphs(&item.index, x + px(ITEM_PAD), baseline, DIM);
+            let text_x = x
+                + px(ITEM_PAD)
+                + item.index_width
+                + if item.index_width > 0.0 {
+                    px(INDEX_GAP)
+                } else {
+                    0.0
+                };
             canvas.glyphs(
                 &item.text,
-                x + px(ITEM_PAD + INDEX_GAP) + item.index_width,
+                text_x,
                 baseline,
                 if item.selected { SEL_FG } else { FG },
             );
@@ -182,15 +206,19 @@ impl Painter {
         }
     }
 
-    /// 排一个候选：`[序号] [词]`
-    fn item(&self, index: usize, text: &str, selected: bool, scale: f32) -> Item {
+    /// 排一个候选：`[序号] [词]`。`number` 给空串就是不带序号（模式提示用）
+    fn item(&self, number: &str, text: &str, selected: bool, scale: f32) -> Item {
         // 词太长就砍掉：候选框不该因为词库里有个怪物词就横穿整个屏幕
         let text: String = text.chars().take(MAX_CHARS).collect();
-        let number = (index + 1).to_string();
 
-        let (number_rasters, number_width) = self.rasterize(&number, INDEX_SIZE, scale);
+        let (number_rasters, number_width) = self.rasterize(number, INDEX_SIZE, scale);
         let (text_rasters, text_width) = self.rasterize(&text, FONT_SIZE, scale);
-        let width = 2.0 * ITEM_PAD * scale + number_width + INDEX_GAP * scale + text_width;
+        let gap = if number.is_empty() {
+            0.0
+        } else {
+            INDEX_GAP * scale
+        };
+        let width = 2.0 * ITEM_PAD * scale + number_width + gap + text_width;
         // 序号和词的墨迹范围并起来，供整行竖直居中
         let ink = union(ink_bounds(&number_rasters), ink_bounds(&text_rasters));
         Item {

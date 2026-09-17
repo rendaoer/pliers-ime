@@ -44,10 +44,21 @@ fn main() {
         ),
     ];
 
-    let images: Vec<Image> = cases
+    let mut images: Vec<Image> = cases
         .iter()
         .map(|(_, preedit)| painter.render(preedit, 1))
         .collect();
+    // 最后两行是中英文切换提示（不带序号的那种）
+    let images_notice: Vec<(&str, Image)> = vec![
+        ("切到中文的提示", painter.render_notice("中", 1)),
+        ("切到英文的提示", painter.render_notice("英", 1)),
+    ];
+    let labels: Vec<&str> = cases
+        .iter()
+        .map(|(label, _)| *label)
+        .chain(images_notice.iter().map(|(label, _)| *label))
+        .collect();
+    images.extend(images_notice.into_iter().map(|(_, image)| image));
 
     let width = images.iter().map(|i| i.width as u32).max().unwrap_or(1) * ZOOM + 2 * MARGIN;
     let height = images.iter().map(|i| i.height as u32).sum::<u32>() * ZOOM
@@ -55,7 +66,7 @@ fn main() {
 
     let mut canvas = checkerboard(width, height);
     let mut y = MARGIN;
-    for (image, (label, _)) in images.iter().zip(&cases) {
+    for (image, label) in images.iter().zip(&labels) {
         composite(&mut canvas, width, MARGIN, y, image);
         println!("{label}: {}x{} 逻辑像素", image.width, image.height);
         y += image.height as u32 * ZOOM + MARGIN;

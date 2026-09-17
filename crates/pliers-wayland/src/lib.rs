@@ -35,7 +35,7 @@ use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
 use xkbcommon::xkb;
 
 use keyboard::Keyboard;
-use pliers_engine::{Action, Engine, KeyInput, Preedit};
+use pliers_engine::{Action, Engine, KeyInput, Mode, Preedit};
 use pliers_popup::Painter;
 use popup::PopupSurface;
 
@@ -132,6 +132,10 @@ struct State {
     time: u32,
     /// Ctrl/Alt/Super 按着吗：引擎靠它区分"打字"和"快捷键"
     shortcut_mods: bool,
+    /// 具体是 Ctrl 按着吗（认 Ctrl+空格切中英文用）
+    ctrl_held: bool,
+    /// 屏幕上现在挂的是不是那个模式提示（下一个键一来就收掉）
+    notice: bool,
     /// Shift / Caps Lock 按着吗（只用于调试日志，大小写已经在 keysym 里了）
     shift_held: bool,
     caps_lock: bool,
@@ -169,8 +173,10 @@ impl State {
             keysym,
             pressed,
             shortcut: self.shortcut_mods,
+            ctrl: self.ctrl_held,
             active: self.active,
         };
+        let mode_before = self.engine().mode();
         let action = self.engine().on_key(input);
         if self.debug {
             match &action {
@@ -194,6 +200,42 @@ impl State {
             Action::Forward => self.forward(keycode, pressed),
             // 被吃掉的键什么都不用做（连它的抬起也吃掉）
             Action::Swallow => {}
+        }
+
+        // 中英文切换：把应用里挂着的预编辑清掉，再弹一下「中」/「英」；
+        // 别的按键一来就把提示收掉（候选框得跟引擎的当前状态一致）
+        let mode_now = self.engine().mode();
+        if mode_now != mode_before {
+            self.set_preedit(&Preedit::default());
+            self.show_notice(mode_now);
+        } else if self.notice {
+            self.hide_notice();
+        }
+    }
+
+    /// 在光标处弹一个小方块显示「中」/「英」（复用候选框：就一个候选，不带序号）
+    fn show_notice(&mut self, mode: Mode) {
+        self.notice = false;
+        if !self.engine().indicator() {
+            return;
+        }
+        let scale = self.scale();
+        let State {
+            popup: Some(popup),
+            painter: Some(painter),
+            ..
+        } = self
+        else {
+            return;
+        };
+        popup.show_notice(painter, mode.label(), scale);
+        self.notice = true;
+    }
+
+    fn hide_notice(&mut self) {
+        self.notice = false;
+        if let Some(popup) = &mut self.popup {
+            popup.hide();
         }
     }
 
@@ -222,6 +264,9 @@ impl State {
 
     /// 候选框跟着组词状态走：有候选就贴一帧，没有就收起来
     fn sync_popup(&mut self, preedit: &Preedit) {
+        // 候选框贴的是真状态，那个「中」/「英」提示就不算数了 ——
+        // 不然下一个按键会把正在显示的候选一起收掉
+        self.notice = false;
         let scale = self.scale();
         // 分开借 State 里的两个字段：一个要改，一个只读
         let State {
@@ -308,10 +353,12 @@ impl State {
             return;
         };
         let shortcut = keyboard.shortcut_mods();
+        let ctrl = keyboard.ctrl_held();
         let (shift, caps) = keyboard.shift_and_caps();
         let masks = keyboard.masks();
         // 上面借用了 self.keyboard，到这里结束，后面才能改 self
         self.shortcut_mods = shortcut;
+        self.ctrl_held = ctrl;
         self.shift_held = shift;
         self.caps_lock = caps;
         self.sync_mods_to_vk(masks);

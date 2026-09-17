@@ -46,6 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             keysym: ch as u32,
             pressed: true,
             shortcut: false,
+            ctrl: false,
             active: true,
         });
         let spent = t0.elapsed();
@@ -76,6 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         keysym: pliers_engine::KEY_SPACE,
         pressed: true,
         shortcut: false,
+        ctrl: false,
         active: true,
     });
     println!("\n空格 → {action:?}");

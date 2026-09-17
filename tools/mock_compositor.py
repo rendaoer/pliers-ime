@@ -408,6 +408,24 @@ def main():
                     conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, shift, 0))
                     if send_mods:
                         conn.send(grab_id, 2, struct.pack("<IIIII", 0, 0, 0, 0, 0))
+                elif base_mode == "english":
+                    # Ctrl+空格 切到英文，再打一句英文。切完之后所有键都该原样转发：
+                    # 不进组词、不提交、也不该有非空的预编辑
+                    ctrl = 29
+                    conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, ctrl, 1))
+                    if send_mods:
+                        conn.send(grab_id, 2, struct.pack("<IIIII", 0, 4, 0, 0, 0))
+                    for st in (1, 0):
+                        conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[" "], st))
+                        time.sleep(0.05)
+                    conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, ctrl, 0))
+                    if send_mods:
+                        conn.send(grab_id, 2, struct.pack("<IIIII", 0, 0, 0, 0, 0))
+                    time.sleep(0.1)
+                    for ch in KEYS:
+                        for st in (1, 0):
+                            conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[ch], st))
+                            time.sleep(0.03)
                 elif base_mode == "nav":
                     # 组词之后按 ↓（keycode 108）换候选，再空格上屏选中的那个。
                     # ↓ 不该改动预编辑串，也不该漏给应用
@@ -577,6 +595,24 @@ def main():
         print(
             f"mock: {'PASS' if ok else 'FAIL'}: committed {committed!r}, "
             f"缩放 {buffer_scale}（期望 2）, popup {'ok' if popup_ok else 'BAD'}",
+            flush=True,
+        )
+    elif mode == "english":
+        # 切到英文之后：Ctrl 的按下抬起照旧转发、空格的按下抬起被吃掉（它是热键），
+        # 英文按键全部原样转发；没有提交、没有非空预编辑，而且弹过一次「英」提示
+        want = 2 + 2 * len(KEYS)
+        ok = (
+            grab_id is not None
+            and not commits
+            and not nonempty
+            # 转发出去的空格只有英文里那一个（按下+抬起）：切换用的那个被吃掉
+            and sum(1 for _, key, _ in forwards if key == EVDEV[" "]) == 2
+            and len(forwards) == want
+            and len(shows) >= 1
+        )
+        print(
+            f"mock: {'PASS' if ok else 'FAIL'}: forwarded {len(forwards)}/{want} keys, "
+            f"commits {commits}, 非空预编辑 {nonempty}, 提示弹了 {len(shows)} 次",
             flush=True,
         )
     elif mode == "pick":

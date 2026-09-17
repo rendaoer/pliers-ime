@@ -26,6 +26,19 @@ done
 
 cargo build -q || exit 1
 
+# 测试自己的配置：不吃 ~/.config/pliers/config.toml 里用户改过的东西
+# （不然你把方案改成双拼，这套断言就全变了）
+CFG="$(mktemp)"
+cat >"$CFG" <<'TOML'
+[scheme]
+kind = "full-pinyin"
+
+[engine]
+toggle_keys = ["ctrl+space"]
+start_mode = "chinese"
+indicator = true
+TOML
+
 SOCK="/tmp/pliers-mock-$$.sock"
 # 词库：默认用仓库里导入好的那份（装到 ~/.local/share/pliers/ 之后就不用设了）
 DICT="${DICT_ARG:-${PLIERS_DICT:-}}"
@@ -53,7 +66,7 @@ run() { # run <名字> <按键> <期望提交> <模式> [额外环境变量]
     MOCK_PNG="$png" python3 tools/mock_compositor.py "$SOCK" "$keys" "$expect" "$mode" >"$log" 2>&1 &
     local mock=$!
     sleep 0.4
-    env PLIERS_DICT="$DICT" $extra WAYLAND_DISPLAY="$SOCK" timeout 30 ./target/debug/pliers >>"$log" 2>&1
+    env PLIERS_DICT="$DICT" PLIERS_CONFIG="$CFG" $extra WAYLAND_DISPLAY="$SOCK" timeout 30 ./target/debug/pliers >>"$log" 2>&1
     wait "$mock"
 
     if grep -q "PASS" "$log"; then
@@ -77,6 +90,9 @@ run enter          "nihao"   nihao enter         # 回车提交原文
 run escape         "nihao"   ""    escape        # Esc 取消
 run mixed          "aaa"     aaaA  mixed         # 组词当中 Shift+A
 run shift          "a"       ""    shift         # 纯 Shift+A
+
+echo "== 中英文切换 =="
+run english        "hello "   ""    english       # Ctrl+空格 切英文后打英文
 
 echo "== 高分屏 =="
 run hidpi          "nihao "  你好  hidpi  "PLIERS_SCALE=2"

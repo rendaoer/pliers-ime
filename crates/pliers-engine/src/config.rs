@@ -20,6 +20,7 @@ use serde::Deserialize;
 
 use crate::dict::{Dict, Result};
 use crate::scheme::{DoublePinyin, FullPinyin, Layout, Scheme, Table};
+use crate::{Mode, Settings, ToggleKeys};
 
 /// 默认配置文件路径（找不到就用内置默认值）
 pub fn config_path() -> PathBuf {
@@ -60,6 +61,40 @@ pub struct Config {
     pub scheme: SchemeConfig,
     #[serde(default)]
     pub dict: DictConfig,
+    #[serde(default)]
+    pub engine: EngineConfig,
+}
+
+/// 引擎行为：中英文怎么切之类
+#[derive(Debug, Clone, Deserialize)]
+pub struct EngineConfig {
+    /// 中英文切换键，可以写多个：`"ctrl+space"`、`"shift"`。空数组 = 不要切换键
+    #[serde(default = "default_toggle_keys")]
+    pub toggle_keys: Vec<String>,
+    /// 启动时用哪种模式：`"chinese"` / `"english"`
+    #[serde(default)]
+    pub start_mode: Mode,
+    /// 切换时在光标处弹一下「中」/「英」
+    #[serde(default = "default_true")]
+    pub indicator: bool,
+}
+
+impl Default for EngineConfig {
+    fn default() -> Self {
+        Self {
+            toggle_keys: default_toggle_keys(),
+            start_mode: Mode::default(),
+            indicator: true,
+        }
+    }
+}
+
+fn default_toggle_keys() -> Vec<String> {
+    vec!["ctrl+space".to_string()]
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// 用哪套输入方案。`kind` 决定后面跟哪些字段
@@ -180,6 +215,16 @@ impl Config {
                 Box::new(DoublePinyin::new(layout, syllables))
             }
             SchemeConfig::Table { name } => Box::new(Table::new(name)),
+        })
+    }
+
+    /// 合成引擎设置：候选个数在 `[dict]` 里，切换键在 `[engine]` 里
+    pub fn settings(&self) -> Result<Settings> {
+        Ok(Settings {
+            limit: self.dict.max_candidates,
+            toggle_keys: ToggleKeys::parse(&self.engine.toggle_keys)?,
+            start_mode: self.engine.start_mode,
+            indicator: self.engine.indicator,
         })
     }
 
@@ -323,6 +368,49 @@ mod tests {
             message.contains("ai") || message.contains("ao"),
             "要说清缺哪个：{message}"
         );
+    }
+
+    #[test]
+    fn 切换键和初始模式可以配() {
+        // 默认：Ctrl+空格，中文
+        let settings = Config::parse("").unwrap().settings().unwrap();
+        assert!(settings.toggle_keys.ctrl_space);
+        assert!(!settings.toggle_keys.shift_tap);
+        assert_eq!(settings.start_mode, Mode::Chinese);
+        assert!(settings.indicator);
+
+        // 两个都要
+        let config =
+            Config::parse("[engine]\ntoggle_keys = [\"ctrl+space\", \"shift\"]\n").unwrap();
+        let settings = config.settings().unwrap();
+        assert!(settings.toggle_keys.ctrl_space && settings.toggle_keys.shift_tap);
+
+        // 空数组 = 不要切换键
+        let config = Config::parse("[engine]\ntoggle_keys = []\n").unwrap();
+        assert!(!config.settings().unwrap().toggle_keys.enabled());
+
+        // 启动就是英文 + 不要提示
+        let config =
+            Config::parse("[engine]\nstart_mode = \"english\"\nindicator = false\n").unwrap();
+        let settings = config.settings().unwrap();
+        assert_eq!(settings.start_mode, Mode::English);
+        assert!(!settings.indicator);
+    }
+
+    #[test]
+    fn 切换键写错了要报错() {
+        let config = Config::parse("[engine]\ntoggle_keys = [\"ctrl+alt+del\"]\n").unwrap();
+        let message = match config.settings() {
+            Ok(_) => panic!("不认识的切换键该报错"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            message.contains("ctrl+space"),
+            "错误信息该说清能写什么：{message}"
+        );
+
+        // start_mode 只认 chinese / english
+        assert!(Config::parse("[engine]\nstart_mode = \"zh\"\n").is_err());
     }
 
     #[test]

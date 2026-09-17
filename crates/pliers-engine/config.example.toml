@@ -25,6 +25,20 @@ kind = "full-pinyin"
 # 码表要用 pliers-dict 导进去：--table 码表.txt --table-scheme wubi
 # name = "wubi"
 
+# ---- 中英文切换 -------------------------------------------------------------
+[engine]
+# 切换键，可以写多个：
+#   "ctrl+space"  Ctrl+空格（中文输入法的老习惯）
+#   "shift"       轻按一下 Shift（按下到抬起之间没按别的键才算）
+# 空数组 [] = 不要切换键（那就一直是中文）
+# toggle_keys = ["ctrl+space", "shift"]
+
+# 启动时用哪种模式：chinese / english
+# start_mode = "chinese"
+
+# 切换时在光标处弹一下「中」/「英」（复用候选框）
+# indicator = true
+
 # ---- 词库 -------------------------------------------------------------------
 [dict]
 # SQLite 词库文件（用 pliers-dict 生成，见 README）

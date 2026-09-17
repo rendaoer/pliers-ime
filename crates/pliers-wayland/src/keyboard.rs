@@ -59,6 +59,12 @@ impl Keyboard {
             || self.state.mod_name_is_active(xkb::MOD_NAME_LOGO, mods)
     }
 
+    /// 只有 Ctrl 按着吗（用来认 Ctrl+空格；Alt+空格得留给应用）
+    pub fn ctrl_held(&self) -> bool {
+        self.state
+            .mod_name_is_active(xkb::MOD_NAME_CTRL, xkb::STATE_MODS_EFFECTIVE)
+    }
+
     /// Shift / Caps Lock 按着吗（只用来打日志：大小写其实已经体现在 keysym 里了）
     pub fn shift_and_caps(&self) -> (bool, bool) {
         let mods = xkb::STATE_MODS_EFFECTIVE;

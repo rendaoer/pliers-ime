@@ -76,7 +76,16 @@ impl PopupSurface {
 
     /// 贴一帧候选框：按 `scale` 画好像素，挑一块能用的缓冲区写进去
     pub fn show(&mut self, painter: &Painter, preedit: &Preedit, scale: i32) {
-        let image = painter.render(preedit, scale);
+        self.show_image(painter.render(preedit, scale), scale);
+    }
+
+    /// 贴一个中英文模式提示（「中」/「英」）
+    pub fn show_notice(&mut self, painter: &Painter, label: &str, scale: i32) {
+        self.show_image(painter.render_notice(label, scale), scale);
+    }
+
+    /// 贴一帧画好的像素
+    fn show_image(&mut self, image: pliers_popup::Image, scale: i32) {
         if image.width <= 0 || image.height <= 0 {
             return; // 没东西可画（正常路径下这会儿该是 hide）
         }

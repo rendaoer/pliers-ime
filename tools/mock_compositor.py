@@ -29,6 +29,7 @@ Usage: mock_compositor.py <socket-path> [keys] [expected-committed-text] [mode]
 
 Modes: active | inactive | shortcut | shift | mixed | enter | escape | caps |
        pick (数字选词) | nav (方向键换候选) | page (翻页) | symbol (组词中敲符号) |
+       englishword (英文补全：kuber + 空格 → kubernetes) |
        switch (组词中切中英文) | control (先等一会儿再打字，留给 `pliers set` 用) |
        watch (等 6 秒，留给"改配置文件看它自动重读"用) |
        segment (分段上屏 + 记住拼出来的句子) | forget (Del 忘掉自己拼的句子) |
@@ -965,6 +966,25 @@ def main():
         print(
             f"mock: {'PASS' if ok else 'FAIL'}: committed {committed!r} (期望 {EXPECT!r}), "
             f"最后一个预编辑 {nonempty[-1] if nonempty else None!r}, forwarded {len(forwards)} keys",
+            flush=True,
+        )
+    elif mode == "englishword":
+        # 英文补全：只敲了 `kuber` + 空格，上屏的必须是补全后的 `kubernetes`
+        #（词表编译在二进制里，这个词来自 tools/english-extra.txt 那份开发词）。
+        # 预编辑里全程只有敲进去的那几个字母 —— 补全不改变"用户敲了什么"
+        typed = KEYS.rstrip()
+        ok = (
+            grab_id is not None
+            and committed == EXPECT
+            and nonempty
+            and nonempty[-1] == typed
+            and not forwards
+            and shows
+        )
+        print(
+            f"mock: {'PASS' if ok else 'FAIL'}: committed {committed!r}（期望补全成 {EXPECT!r}）, "
+            f"预编辑 {nonempty[-1] if nonempty else None!r}, forwarded {len(forwards)} keys, "
+            f"贴框 {len(shows)} 次",
             flush=True,
         )
     elif mode == "enter":

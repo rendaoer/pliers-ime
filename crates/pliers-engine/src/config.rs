@@ -63,10 +63,41 @@ pub struct Config {
     pub dict: DictConfig,
     #[serde(default)]
     pub engine: EngineConfig,
+    #[serde(default)]
+    pub english: EnglishConfig,
     /// 上一次用过的双拼键位（`pliers set scheme.kind double-pinyin` 切回来时接着用）。
     /// `serde(skip)`：这只是运行期的记忆，配置文件里没这一项
     #[serde(skip)]
     pub last_double_pinyin: Option<(String, BTreeMap<String, String>)>,
+}
+
+/// 英文候选（打英文单词时的补全：`hel` + 空格 → `hello`）—— 见 [`crate::english`]
+#[derive(Debug, Clone, Deserialize)]
+pub struct EnglishConfig {
+    /// 要不要给英文候选。关掉就只有中文候选，打英文得整串打完
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 自己加的词表：一行一个词，`#` 注释。里面的词排在**内置词表前面**
+    /// （`vendor`、项目名、自己那套术语放这儿）。空 = 只用内置的
+    #[serde(default)]
+    pub path: String,
+    /// 一次最多给几个英文候选
+    #[serde(default = "default_english_limit")]
+    pub limit: usize,
+}
+
+impl Default for EnglishConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            path: String::new(),
+            limit: default_english_limit(),
+        }
+    }
+}
+
+fn default_english_limit() -> usize {
+    5
 }
 
 /// 引擎行为：中英文怎么切之类
@@ -257,7 +288,7 @@ impl Config {
         })
     }
 
-    /// 合成引擎设置：候选个数在 `[dict]` 里，切换键在 `[engine]` 里
+    /// 合成引擎设置：候选个数在 `[dict]` 里，切换键在 `[engine]` 里，英文候选在 `[english]` 里
     pub fn settings(&self) -> Result<Settings> {
         Ok(Settings {
             limit: self.dict.max_candidates,
@@ -266,6 +297,9 @@ impl Config {
             toggle_keys: ToggleKeys::parse(&self.engine.toggle_keys)?,
             start_mode: self.engine.start_mode,
             indicator: self.engine.indicator,
+            english: self.english.enabled,
+            english_path: (!self.english.path.is_empty()).then(|| expand(&self.english.path)),
+            english_limit: self.english.limit,
         })
     }
 
@@ -293,6 +327,9 @@ impl Config {
     /// | `engine.start_mode` | `chinese` / `english` |
     /// | `engine.indicator` | `true` / `false` |
     /// | `engine.chinese_punctuation` | `true` / `false`（中文标点） |
+    /// | `english.enabled` | `true` / `false`（英文候选） |
+    /// | `english.limit` | 一次最多几个英文候选 |
+    /// | `english.path` | 自己加的词表文件（空 = 只用内置的） |
     ///
     /// 换 `kind` 时会把另一套方案的字段带过去（比如全拼 → 双拼保留原来的键位），
     /// 省得每换一次都要重设一遍。报错信息是给用户看的，所以都说人话
@@ -408,12 +445,26 @@ impl Config {
                 self.engine.chinese_punctuation =
                     parse_bool(value).ok_or_else(|| bad("true / false"))?;
             }
+            "english.enabled" => {
+                self.english.enabled = parse_bool(value).ok_or_else(|| bad("true / false"))?;
+            }
+            "english.limit" => {
+                let count: usize = value.parse().map_err(|_| bad("一个正整数"))?;
+                if count == 0 || count > 9 {
+                    return Err(bad("1-9 之间的数字（英文候选一次给几个）"));
+                }
+                self.english.limit = count;
+            }
+            "english.path" => {
+                // 空串是合法的：回到"只用内置词表"
+                self.english.path = value.trim().to_string();
+            }
             other => {
                 return Err(format!(
                     "不认识的配置项 {other:?}（能改的：scheme.kind / scheme.layout / \
                      scheme.sentence / scheme.name / dict.path / dict.max_candidates / \
                      dict.pool_size / engine.toggle_keys / engine.start_mode / engine.indicator / \
-                     engine.chinese_punctuation）"
+                     engine.chinese_punctuation / english.enabled / english.limit / english.path）"
                 ));
             }
         }
@@ -492,16 +543,17 @@ pub fn write_setting(path: &Path, key: &str, value: &str) -> std::result::Result
 /// 值按配置项的类型写：数字写成整数、开关写成 true/false、切换键写成数组，别的都是字符串
 fn toml_value(key: &str, value: &str) -> toml_edit::Item {
     match key {
-        "dict.max_candidates" | "dict.pool_size" => match value.parse::<i64>() {
+        "dict.max_candidates" | "dict.pool_size" | "english.limit" => match value.parse::<i64>() {
             Ok(number) => toml_edit::value(number),
             Err(_) => toml_edit::value(value),
         },
-        "scheme.sentence" | "engine.indicator" | "engine.chinese_punctuation" => {
-            match parse_bool(value) {
-                Some(flag) => toml_edit::value(flag),
-                None => toml_edit::value(value),
-            }
-        }
+        "scheme.sentence"
+        | "engine.indicator"
+        | "engine.chinese_punctuation"
+        | "english.enabled" => match parse_bool(value) {
+            Some(flag) => toml_edit::value(flag),
+            None => toml_edit::value(value),
+        },
         "engine.toggle_keys" => {
             let mut array = toml_edit::Array::new();
             for key in value.split(',').map(str::trim).filter(|k| !k.is_empty()) {
@@ -601,6 +653,34 @@ mod tests {
     }
 
     #[test]
+    fn 在线改配置_英文候选() {
+        let mut config = Config::default();
+        // 默认是开着的，一次 5 个，没有自己的词表
+        assert!(config.settings().unwrap().english);
+        assert_eq!(config.settings().unwrap().english_limit, 5);
+        assert!(config.settings().unwrap().english_path.is_none());
+
+        config.set("english.enabled", "off").unwrap();
+        config.set("english.limit", "3").unwrap();
+        config.set("english.path", "~/words.txt").unwrap();
+        let settings = config.settings().unwrap();
+        assert!(!settings.english);
+        assert_eq!(settings.english_limit, 3);
+        // `~` 要展开（词表路径跟词库路径一个规矩）
+        let path = settings.english_path.unwrap();
+        assert!(!path.to_string_lossy().starts_with('~'), "{path:?}");
+
+        // 空串 = 回到"只用内置词表"（不算错）
+        config.set("english.path", "").unwrap();
+        assert!(config.settings().unwrap().english_path.is_none());
+
+        // 个数得是 1-9
+        assert!(config.set("english.limit", "0").is_err());
+        assert!(config.set("english.limit", "99").is_err());
+        assert_eq!(config.english.limit, 3, "报错了就不该改动");
+    }
+
+    #[test]
     fn 写回配置文件_注释和别的项都留着() {
         let path = std::env::temp_dir().join(format!(
             "pliers-config-test-{}-{:?}.toml",
@@ -617,6 +697,10 @@ mod tests {
         write_setting(&path, "scheme.layout", "flypy").unwrap();
         write_setting(&path, "dict.max_candidates", "5").unwrap();
         write_setting(&path, "engine.toggle_keys", "ctrl+space,shift").unwrap();
+        // 英文候选这几项：开关要写成 true/false、个数要写成整数（写成字符串下次就读不了）
+        write_setting(&path, "english.enabled", "false").unwrap();
+        write_setting(&path, "english.limit", "3").unwrap();
+        write_setting(&path, "english.path", "~/words.txt").unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("# 我手写的注释"), "注释没了：\n{text}");
@@ -628,6 +712,9 @@ mod tests {
         ));
         assert_eq!(config.dict.max_candidates, 5);
         assert_eq!(config.engine.toggle_keys, ["ctrl+space", "shift"]);
+        assert!(!config.english.enabled);
+        assert_eq!(config.english.limit, 3);
+        assert_eq!(config.english.path, "~/words.txt");
         let _ = std::fs::remove_file(&path);
     }
 

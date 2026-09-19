@@ -410,6 +410,14 @@ impl State {
                 }
             ),
             format!("indicator={}", config.engine.indicator),
+            format!("chinese_punctuation={}", config.engine.chinese_punctuation),
+            format!("english={}", config.english.enabled),
+            format!("english_limit={}", config.english.limit),
+            format!("english_path={}", config.english.path),
+            format!(
+                "english_words={}",
+                self.engine().english_words().unwrap_or(0)
+            ),
             format!("mode={mode}"),
             format!("config={}", pliers_engine::config::config_path().display()),
             format!(
@@ -432,6 +440,11 @@ impl State {
                 "；但 PLIERS_DICT 环境变量优先级更高，实际用的还是它".to_string()
             }
             "dict.path" => "；词库已经重新打开了，用户词频还在库里".to_string(),
+            // 词表是起引擎的时候读进内存的，改完 path 得重新读一遍 —— 这里重建引擎了
+            "english.path" | "english.enabled" => "；英文词表已经重新读了".to_string(),
+            "english.limit" if self.config.english.enabled => {
+                "；只影响一次给几个英文候选".to_string()
+            }
             _ => String::new(),
         }
     }

@@ -7,7 +7,8 @@
 //! 按键 ──► KeyInput ──► Engine ──► Action ──► 协议层照做
 //!                        │
 //!                        ├── scheme：这串键对应哪些码（全拼切音节 / 双拼解码 / 五笔码）
-//!                        └── dict  ：这些码对应哪些词、谁排前面（词频 + 用户习惯）
+//!                        ├── dict  ：这些码对应哪些词、谁排前面（词频 + 用户习惯）
+//!                        └── english：不像拼音的那串字母，拿去补全英文单词（hel → hello）
 //! ```
 //!
 //! 拆开的好处：换输入方案（全拼↔双拼↔五笔）改配置文件就行；加词、调权重改数据库就行；
@@ -15,6 +16,7 @@
 
 pub mod config;
 pub mod dict;
+pub mod english;
 pub mod fetch;
 mod pinyin;
 mod scheme;
@@ -22,6 +24,7 @@ mod sentence;
 
 pub use config::{Config, EXAMPLE as EXAMPLE_CONFIG, SchemeConfig};
 pub use dict::Dict;
+pub use english::Words;
 pub use scheme::{DoublePinyin, FullPinyin, Layout, Scheme, Table};
 
 /// 空格（X11 keysym）
@@ -150,6 +153,12 @@ pub struct Settings {
     pub start_mode: Mode,
     /// 切换模式时在光标处弹一下"中/英"
     pub indicator: bool,
+    /// 要不要英文候选（`hel` + 空格 → `hello`）
+    pub english: bool,
+    /// 自己加的英文词表（`[english] path`），没有就是 None
+    pub english_path: Option<std::path::PathBuf>,
+    /// 一次最多给几个英文候选
+    pub english_limit: usize,
 }
 
 impl Default for Settings {
@@ -161,6 +170,9 @@ impl Default for Settings {
             toggle_keys: ToggleKeys::default(),
             start_mode: Mode::Chinese,
             indicator: true,
+            english: true,
+            english_path: None,
+            english_limit: 5,
         }
     }
 }
@@ -269,6 +281,8 @@ pub struct Candidate {
     /// 黑名单（`user_hidden`）只对"不是词库里的"候选生效 ——
     /// 词库里的词再怎么删也删不掉，不然一次误操作就永久少一个正常候选
     pub from_dict: bool,
+    /// 内置英文词表补出来的（`hel` → `hello`）—— 按 Del 是"这个词以后别给我了"
+    pub english: bool,
 }
 
 impl Candidate {
@@ -279,6 +293,7 @@ impl Candidate {
             consumed: input.chars().count(),
             learned: false,
             from_dict: false,
+            english: false,
         }
     }
 
@@ -289,6 +304,7 @@ impl Candidate {
             consumed,
             learned: false,
             from_dict: false,
+            english: false,
         }
     }
 
@@ -301,6 +317,12 @@ impl Candidate {
     /// 词库里本来就有这个词条（Del 删不掉）
     pub fn from_dict(mut self) -> Self {
         self.from_dict = true;
+        self
+    }
+
+    /// 英文词表补出来的（Del = 这个词以后不再出现）
+    pub fn english(mut self) -> Self {
+        self.english = true;
         self
     }
 }
@@ -357,6 +379,10 @@ pub struct Engine {
     indicator: bool,
     /// 中文标点：中文模式下把 `,` `.` `?` 这些打成 `，` `。` `？`
     chinese_punctuation: bool,
+    /// 英文候选词表（`[english] enabled = false` 时是 None，那就一个英文候选都不出）
+    english: Option<english::Words>,
+    /// 一次最多给几个英文候选
+    english_limit: usize,
     /// Shift 按下之后还没抬起来，且中间没按别的键（"轻按 Shift"用）
     shift_tap: bool,
 
@@ -391,6 +417,12 @@ impl Engine {
             toggle: settings.toggle_keys,
             indicator: settings.indicator,
             chinese_punctuation: settings.chinese_punctuation,
+            // 词表在这里一次性读进内存（192 KB 的内置表 + 用户自己那份）。
+            // 英文候选关掉的话连读都不读
+            english: settings
+                .english
+                .then(|| english::Words::load(settings.english_path.as_deref())),
+            english_limit: settings.english_limit,
             shift_tap: false,
             buffer: String::new(),
             cursor: 0,
@@ -433,6 +465,11 @@ impl Engine {
     /// 现在用的是哪套方案（日志用）
     pub fn scheme_name(&self) -> &str {
         self.scheme.name()
+    }
+
+    /// 英文词表里有多少词（没开英文候选就是 None）—— `pliers status` 报数用
+    pub fn english_words(&self) -> Option<usize> {
+        self.english.as_ref().map(english::Words::len)
     }
 
     /// 预编辑串原文（拼音 / 码）
@@ -491,7 +528,11 @@ impl Engine {
             .into_iter()
             .map(|text| Candidate::whole(text, &self.buffer).learned())
             .collect();
-        // 2) 方案给的：整词、整句、以及"只匹配前面一段"的候选（带 consumed）
+        // 2) 英文补全：只有这串字母**不像拼音**的时候才给（`shou` 不该冒出 `should`），
+        //    而且排在中文候选前面 —— 都不像拼音了，中文那批只是"前半截的猜测"。
+        //    `hello` 的第一个候选就是 `hello`，`hel` 出 help/hello/hell
+        self.english_candidates();
+        // 3) 方案给的：整词、整句、以及"只匹配前面一段"的候选（带 consumed）
         for candidate in self
             .scheme
             .candidates(&self.dict, &self.buffer, self.pool_size)
@@ -509,6 +550,49 @@ impl Engine {
                 .retain(|candidate| candidate.from_dict || !hidden.contains(&candidate.text));
         }
         self.pool.truncate(self.pool_size);
+    }
+
+    /// 英文补全候选，接进候选池（在"用户自己拼的句子"之后、方案的中文候选之前）。
+    ///
+    /// 三个前提，缺一不可：
+    ///
+    /// 1. `[english] enabled = true`（关掉就一个都不出）；
+    /// 2. 这串字母**不像拼音**（[`Scheme::looks_pinyin`]）—— 打 `shou` 是在打「手」，
+    ///    不该冒出 `should`；打 `hello` 切不出音节，才轮到英文；
+    /// 3. 至少两个字母 —— 一个字母永远是拼音的"首字母联想"（`n` 要出你/那/年）。
+    ///
+    /// 排序：用户选过的排前面（跟中文共用 `user_word` 那张表），其余按词频 ——
+    /// 词表本身就是按词频排的，所以只要稳定地按"用过没有/用过几次"排一遍就够了
+    fn english_candidates(&mut self) {
+        let Some(words) = &self.english else {
+            return;
+        };
+        if self.buffer.chars().count() < 2 || self.scheme.looks_pinyin(&self.buffer) {
+            return;
+        }
+        // 用户按 Del 删过的英文词（黑名单按**词**记，不管当前打的是 `con` 还是 `conf`）
+        let hidden = self.dict.hidden(dict::ENGLISH_HIDE_KEY);
+        let mut hits: Vec<(String, i64)> = words
+            .candidates(&self.buffer, self.english_limit + hidden.len())
+            .into_iter()
+            .filter(|word| !hidden.contains(word))
+            .map(|word| (word, 0))
+            .collect();
+        hits.truncate(self.english_limit);
+        if hits.is_empty() {
+            return;
+        }
+        let texts: Vec<String> = hits.iter().map(|(word, _)| word.clone()).collect();
+        let boosts = self.dict.boosts(&texts);
+        for (word, count) in &mut hits {
+            *count = boosts.get(word).copied().unwrap_or(0);
+        }
+        // 稳定排序：同样"用过几次"的保持词频顺序
+        hits.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+        self.pool.extend(
+            hits.into_iter()
+                .map(|(word, _)| Candidate::whole(word, &self.buffer).english()),
+        );
     }
 
     /// 输入框失焦：按住没放的键不会再有抬起事件了，账本一起清掉。
@@ -841,6 +925,20 @@ impl Engine {
             return Action::Notice("没有能删的候选".to_string());
         };
         let text = candidate.text.clone();
+        // 英文候选是"补全"，同一个词在 `con`/`conf`/`confi` 上都会冒出来 ——
+        // 所以黑名单按**词**记（键固定用 `#english`），不是按当前这串字母
+        if candidate.english {
+            if let Err(e) = self.dict.hide(dict::ENGLISH_HIDE_KEY, &text) {
+                eprintln!("pliers: 记黑名单失败：{e}");
+            }
+            if let Err(e) = self.dict.forget_boost(&text) {
+                eprintln!("pliers: 清偏好失败：{e}");
+            }
+            // 列表按新的库重排，选中回到第一个，然后**把候选框贴回来**（那个词已经没了）
+            self.refresh_pool();
+            self.cursor = 0;
+            return Action::UpdatePreedit(self.preedit());
+        }
         if !candidate.learned {
             return Action::Notice(format!("「{text}」不是自己拼的，删不了"));
         }
@@ -1043,6 +1141,132 @@ mod tests {
         assert_eq!(preedit.candidates[0], "你好");
         assert_eq!(preedit.selected, 0);
         assert_eq!(preedit.current(), Some("你好"));
+    }
+
+    // ---- 英文候选（打英文单词时的补全）-----------------------------------------
+
+    /// 现在这一页候选里有没有这个词
+    fn has(engine: &Engine, text: &str) -> bool {
+        engine.preedit().candidates.iter().any(|c| c == text)
+    }
+
+    #[test]
+    fn 打英文单词会给补全() {
+        let mut engine = engine();
+        type_letters(&mut engine, "hel");
+        let candidates = engine.preedit().candidates.clone();
+        assert_eq!(candidates[0], "help", "补全按词频排：{candidates:?}");
+        assert!(candidates.contains(&"hello".to_string()), "{candidates:?}");
+        assert!(
+            candidates.contains(&"hell".to_string()),
+            "打到一半就该看见：{candidates:?}"
+        );
+        // 空格上屏的是选中的补全（想原样上屏就按回车，或者把词打完）
+        assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Commit("help".into()));
+        assert_eq!(engine.text(), "");
+    }
+
+    #[test]
+    fn 打全的英文词第一个就是它() {
+        let mut engine = engine();
+        type_letters(&mut engine, "hello");
+        assert_eq!(engine.preedit().candidates[0], "hello");
+        assert_eq!(
+            engine.on_key(key(KEY_SPACE)),
+            Action::Commit("hello".into())
+        );
+    }
+
+    #[test]
+    fn 词表里没有的就原样上屏() {
+        // 英文候选不是"万能兜底"：词表里没有、拼音也切不动，就是一个候选都没有，
+        // 空格照样把打的原文交出去（不能凭空吞掉）
+        let mut engine = engine();
+        type_letters(&mut engine, "zzzz");
+        assert!(engine.preedit().candidates.is_empty());
+        assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Commit("zzzz".into()));
+    }
+
+    #[test]
+    fn 拼音优先_打一半的拼音不冒英文() {
+        let mut engine = engine();
+        // `sho` 是 `shou` 的半截：这时候在打「手/受」，不该冒出 should 来抢
+        type_letters(&mut engine, "sho");
+        assert!(!has(&engine, "should"), "{:?}", engine.preedit().candidates);
+        // 打完了（shou 是完整音节）也一样
+        type_letters(&mut engine, "u");
+        assert!(!has(&engine, "should"));
+        // 再打一个字母就切不动了：这回轮到英文补全，而且排在中文候选前面
+        type_letters(&mut engine, "l");
+        assert_eq!(engine.preedit().candidates[0], "should");
+        // 打 `nihao` 这种完整拼音更不会掺英文
+        engine.set_text("nihao");
+        assert!(engine.preedit().candidates.contains(&"你好".to_string()));
+    }
+
+    #[test]
+    fn 一个字母不掺英文() {
+        // 一个字母是拼音"首字母联想"的地盘（n → 你/那/年），英文不插队
+        let mut engine = engine();
+        type_letters(&mut engine, "h");
+        assert!(
+            engine
+                .preedit()
+                .candidates
+                .iter()
+                .all(|candidate| !candidate.is_ascii()),
+            "{:?}",
+            engine.preedit().candidates
+        );
+    }
+
+    #[test]
+    fn 大写原文不掺英文() {
+        // 混进大写 = 在打英文原文（Shift/Caps Lock）：一个候选都不出，空格原样上屏
+        let mut engine = engine();
+        type_letters(&mut engine, "he");
+        type_letters(&mut engine, "L");
+        assert!(engine.preedit().candidates.is_empty());
+        assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Commit("heL".into()));
+    }
+
+    #[test]
+    fn 关掉英文候选就一个都不出() {
+        let mut engine = engine_with(Settings {
+            english: false,
+            ..Settings::default()
+        });
+        type_letters(&mut engine, "hel");
+        assert!(engine.preedit().candidates.is_empty());
+        assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Commit("hel".into()));
+    }
+
+    #[test]
+    fn del_让英文词以后不再出现() {
+        let mut engine = engine();
+        type_letters(&mut engine, "hel");
+        assert_eq!(engine.preedit().candidates[0], "help");
+        // Del：把选中的候选拉黑（英文候选是补全，黑名单按**词**记）
+        engine.on_key(key(KEY_DELETE));
+        assert!(!has(&engine, "help"), "{:?}", engine.preedit().candidates);
+        assert_eq!(engine.preedit().candidates[0], "hello");
+        // 换个前缀也还是黑的（`help` 在 `hel`/`help`/`helpx` 上都不再出现）
+        engine.set_text("help");
+        assert!(!has(&engine, "help"), "{:?}", engine.preedit().candidates);
+        // 别的词没受影响
+        engine.set_text("hel");
+        assert!(has(&engine, "hello"));
+    }
+
+    #[test]
+    fn 用过的英文词排前面() {
+        let mut engine = engine();
+        type_letters(&mut engine, "hel");
+        assert_eq!(engine.preedit().candidates[0], "help");
+        // 挑「hello」上屏：它该被记一笔，下次打 hel 就排最前
+        assert_eq!(pick(&mut engine, "hello"), Action::Commit("hello".into()));
+        type_letters(&mut engine, "hel");
+        assert_eq!(engine.preedit().candidates[0], "hello");
     }
 
     /// 在候选里挑某个词（按下它对应的数字键）

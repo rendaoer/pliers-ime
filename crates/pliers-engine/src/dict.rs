@@ -78,6 +78,13 @@ pub const USER_BOOST: i64 = 1_000_000;
 /// 用户词频最多算多少次（防止某一个词被刷到天上去）
 pub const USER_BOOST_CAP: i64 = 50;
 
+/// 英文候选的黑名单键（`user_hidden.code`）。
+///
+/// 中文候选的黑名单是"**这串键**上别再给我这个词"（`code` 就是用户敲的那串字母），
+/// 英文候选却是"补全"：同一个词在 `con`/`conf`/`confi` 上都会冒出来，按字母串记等于没记。
+/// 所以英文词用这个固定键，效果是"这个词以后别给我了"。`#` 不是拼音字符，不会撞车
+pub const ENGLISH_HIDE_KEY: &str = "#english";
+
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// 词库
@@ -208,6 +215,27 @@ impl Dict {
             out.push((text, score));
         }
         Ok(out)
+    }
+
+    /// 这批词里用户各选过多少次（`user_word` 表）。英文候选靠它把"你用过的词"往前排。
+    ///
+    /// 中文那边是在 SQL 里 JOIN 出来一起排序的；英文词表不在库里（它编译在二进制里），
+    /// 所以只能拿着候选单独问一次 —— 一次 `IN (...)`，五个词上下，跟一次普通查询差不多
+    pub fn boosts(&self, texts: &[String]) -> std::collections::HashMap<String, i64> {
+        if texts.is_empty() {
+            return std::collections::HashMap::new();
+        }
+        let placeholders = (1..=texts.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let params: Vec<turso::Value> = texts.iter().map(|text| text.clone().into()).collect();
+        self.query(
+            &format!("SELECT text, count FROM user_word WHERE text IN ({placeholders})"),
+            &params,
+        )
+        .into_iter()
+        .collect()
     }
 
     /// 这个键（用户敲的原文）上，他自己拼过的句子。按用得多的排前面

@@ -2,8 +2,11 @@
 
 最小可用的 Wayland 中文输入法：敲 `nihao` + 空格 → 输出「你好」，组词时输入框旁边弹出
 候选框，`←`/`→` 挪选中的那个、`↑`/`↓` 整页翻，也可以直接按数字 `1`–`9`；空格上屏。
+中文模式下打英文单词也有补全：`hel` + 空格 → `help`（`kuber` → `kubernetes`）。
 
 * **全拼**是完整实现的：150 万词的词库、音节切分、**整句候选**、词频排序、用户调频
+* **英文候选**：两万五千个词的词表**编译在二进制里**，不下载、不进词库，打一半就补全；
+  打 `shou` 这种还在拼音上的串永远只出中文（见[规则](docs/usage.md#英文单词补全英文候选)）
 * **双拼 / 五笔**留好了位置：双拼（自然码/小鹤/微软）已经能用，五笔是"码表方案"那条路
 * **行为都在配置文件里**（TOML）：换方案、换词库、改候选个数都不用改代码
 * **词库在 SQLite 里**：用 [turso](https://github.com/tursodatabase/turso)（Rust 写的 SQLite）读写，
@@ -40,8 +43,8 @@ seat」然后退出，所以别同时跑两个。
 想确认自己没跑歪：
 
 ```bash
-cargo test --workspace        # 162 个单测，不需要合成器、不需要词库
-./tools/run_mock_tests.sh     # mock 合成器跑 25 个场景 + 2 项在线改配置检查
+cargo test --workspace        # 192 个单测，不需要合成器、不需要词库
+./tools/run_mock_tests.sh     # mock 合成器跑 26 个场景 + 2 项在线改配置检查
 ```
 
 ## 按键速查
@@ -49,6 +52,7 @@ cargo test --workspace        # 162 个单测，不需要合成器、不需要�
 | 按键 | 行为 |
 | --- | --- |
 | `a`–`z`（小写） | 组词；**只有小写参与匹配**，大写一律当英文字符 |
+| 打英文单词 | 给补全候选（`hel` → help/hello/hell，`kuber` → kubernetes）：切不出拼音时才出，空格上屏选中的那个 |
 | 空格 | 上屏选中的候选（可能是"只匹配了前面一段"的分段候选） |
 | `←` `→` / `Tab` / `Shift+Tab` | 挪选中的候选（挪出这一页会自动翻页） |
 | `↑` `↓` / `,` `.` / `-` `=` / `PageUp` `PageDown` | 整页翻，页内位置保持 |
@@ -62,18 +66,18 @@ cargo test --workspace        # 162 个单测，不需要合成器、不需要�
 | `Ctrl` + 空格 | 切中英文（切换时半截拼音先上屏） |
 | Ctrl / Alt / Super + 任何键 | 不组词，原样转发 |
 
-完整行为、中文标点、分段上屏的"记性"见 [docs/usage.md](docs/usage.md)。
+完整行为、中文标点、英文候选的规则、分段上屏的"记性"见 [docs/usage.md](docs/usage.md)。
 
 ## 文档
 
 | 文档 | 讲什么 |
 | --- | --- |
 | [docs/usage.md](docs/usage.md) | 按键全表、大写字母为什么不参与匹配、中英文切换、中文标点、分段上屏 + 记性、`Del` 的语义 |
-| [docs/config.md](docs/config.md) | `config.toml` 每一项（全拼/双拼/码表/engine）、`pliers set` vs `pliers config set`、自动重读、交互模式、Nushell 写法 |
+| [docs/config.md](docs/config.md) | `config.toml` 每一项（全拼/双拼/码表/engine/english）、`pliers set` vs `pliers config set`、自动重读、交互模式、Nushell 写法 |
 | [docs/dictionary.md](docs/dictionary.md) | 词库怎么装（`pliers --init`）、换成别的源、自己从语料构建、表结构与权重、用 SQL 加词、`lookup` 看候选 |
 | [docs/internals.md](docs/internals.md) | crate 划分、用了哪些 Wayland 协议、**为什么拼音查询不能交给 SQL**、整句候选、候选框是怎么画出来的 |
 | [docs/pitfalls.md](docs/pitfalls.md) | 10 条实测踩出来的坑（Ctrl+A 被吃掉、焦点一走拼音就没了……）+ 已知不足 |
-| [docs/testing.md](docs/testing.md) | 单测、跑起来、`PLIERS_DEBUG`、mock 合成器的 25 个场景都验了什么 |
+| [docs/testing.md](docs/testing.md) | 单测、跑起来、`PLIERS_DEBUG`、mock 合成器的 26 个场景都验了什么 |
 
 ## 代码结构
 
@@ -81,7 +85,7 @@ cargo test --workspace        # 162 个单测，不需要合成器、不需要�
 
 | crate | 管什么 |
 | --- | --- |
-| `crates/pliers-engine` | 按键状态机 + 输入方案（全拼/双拼/码表）+ 词库 + 配置 |
+| `crates/pliers-engine` | 按键状态机 + 输入方案（全拼/双拼/码表）+ 词库 + 英文词表 + 配置 |
 | `crates/pliers-popup` | 候选框长什么样：找字体、排版、画像素、共享内存文件 |
 | `crates/pliers-wayland` | 跟合成器说协议：注册、抓键盘、转发按键、贴候选框 |
 | `crates/pliers-ime` | `main()`：读配置、把上面几个拼起来（命令是 `pliers`） |
@@ -102,6 +106,11 @@ cargo test --workspace        # 162 个单测，不需要合成器、不需要�
   [rime-frost](https://github.com/gaboolic/rime-frost) 那份 GPL-3.0 语料的衍生作品，
   跟代码的许可是两回事。不想碰它就 `pliers dict build` 自己从上游构建（那只是下载语料，
   不涉及再分发）—— 见 [docs/dictionary.md](docs/dictionary.md#许可)
+* **英文词表数据**（`crates/pliers-engine/data/english.txt`，编译进二进制的那份）：
+  **CC-BY-SA-4.0** —— 词频来自 [FrequencyWords](https://github.com/hermitdave/FrequencyWords)
+  的 `en_50k`（OpenSubtitles2018 词频）；里面掺的开发常用词
+  （`tools/english-extra.txt`）是本项目自己写的，跟代码同许可。出处和重新生成的步骤见
+  [data/README.md](crates/pliers-engine/data/README.md)
 
 ## 名字
 

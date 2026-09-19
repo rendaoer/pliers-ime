@@ -1,0 +1,96 @@
+# 英文候选的"开发常用词"补充表（一行一个词或一串词，# 开头是注释）。
+#
+# 为什么需要它：内置的通用词频表来自影视字幕（OpenSubtitles），口语词排得很前，
+# 而 `config`、`stdout`、`iterator`、`kubernetes` 这些要么根本没有、要么排到两万名开外。
+# 这份表里的词会被插到通用表最常用的 1000 个词之后、其余词之前 ——
+# 也就是"日常英语里最常用的一千个词照样赢，剩下的位置让给开发词"。
+#
+# 排序**有意义**：同一个前缀下先写的先出（敲 `imp` 先出 import 还是 image，
+# 就看谁写在前面）。所以按"敲这个前缀时最可能想要哪个词"来排，别按字母表排。
+#
+# 这个文件是本项目自己写的（MIT OR Apache-2.0），不涉及第三方词表版权。
+# 想加自己的词**不用改这里** —— 在配置里写 [english] path = "~/..../words.txt"，
+# 那份词表会排在所有内置词前面。见 docs/config.md。
+
+# ---- 版本控制 ----
+git github gitlab commit commits branch merge rebase checkout clone fork
+push pull fetch remote upstream downstream origin stash tag diff patch
+conflict resolve revert reset gitignore submodule review changelog
+
+# ---- 命令行 / 终端 ----
+shell bash zsh fish nushell terminal console command commands subcommand
+argument arguments flag flags option options parameter parameters
+stdin stdout stderr pipe pipeline redirect exit script executable binary
+environment env export alias sudo chmod chown symlink wildcard glob regex
+verbose debug trace warning error fatal exception stacktrace backtrace
+install uninstall update upgrade downgrade download upload
+
+# ---- 常用缩写 ----
+api cli sdk html css ide gpu cpu disk os ui vm
+
+# ---- 文件 / 目录 ----
+directory directories filename filenames extension basename dirname
+filesystem folder folder read write open close create append overwrite
+remove rename move copy delete
+
+# ---- Rust ----
+cargo crate crates rust rustc trait impl enum struct fn mod pub
+mutable immutable borrow ownership lifetime closure iterator iterate
+generics generic derive macro rustfmt clippy serde tokio async await
+unwrap panic assert match option result
+compile compiler linker lint refactor benchmark
+
+# ---- 通用编程 ----
+function functions method methods class classes object objects instance
+interface inheritance polymorphism abstraction encapsulation variable
+constant constants parameter return value values type types typedef
+pointer reference array arrays vector tuple dictionary set stack heap queue
+tree graph node edge algorithm recursion sort sorted search binary bitwise
+operator expression statement syntax semantic interpreter assembler bytecode
+loop loops break continue yield init initialize constructor destructor
+null none optional variant pattern union
+runtime virtual machine thread threads concurrency concurrent parallel
+asynchronous synchronous blocking nonblocking deadlock race lock mutex
+rwlock semaphore atomic memory buffer allocation garbage overflow underflow
+assertion debugging debugger breakpoint profiling coverage mock stub fixture
+regression integration testing unittest deprecated backwards compatible
+breaking versioning semver release releases dependency dependencies
+transitive string integer number length size capacity count input output
+result success failure valid invalid
+
+# ---- 配置 / 格式 ----
+config configuration configure settings preference default custom override
+json yaml toml xml csv markdown template boilerplate scaffold placeholder
+snippet autocomplete completion suggestion highlight indentation whitespace
+newline escape unicode utf ascii hex decimal hexadecimal octal byte bytes bit
+field record payload stream chunk batch offset cursor pagination distinct
+aggregate mapping binding handler listener dispatcher router route controller
+component widget layout responsive
+
+# ---- 网络 / 服务 ----
+http https url uri header headers body request requests response responses
+status cookie session token auth authentication authorization oauth jwt
+endpoint rest graphql websocket socket tcp udp dns tls ssl certificate proxy
+firewall port host domain server servers client backend frontend middleware
+cache redis kafka queue message publish subscribe worker daemon service
+microservice timeout retry throttle ratelimit connect connection protocol
+
+# ---- 数据 / 数据库 ----
+database databases sql sqlite postgres postgresql mysql mongodb table tables
+column columns row rows index indexes schema schemas migration migrations
+query queries select insert update delete join transaction transactions
+rollback backup restore replica sharding partition primary foreign constraint
+unique nullable boolean integer float blob timestamp datetime uuid hash
+encryption encrypt decrypt encoding decode encode serialize deserialize
+parse parser format formatter convert transform validation validate
+
+# ---- 部署 / 运维 ----
+container containers docker kubernetes kubectl cluster node pod pods ingress
+volume image registry deploy deployment rollout helm ansible terraform cloud
+aws azure gcp artifact repository repositories pipeline ci cd build rebuild
+monitoring metrics logging logger dashboard incident outage latency uptime
+
+# ---- 文档 / 协作 ----
+documentation docs readme license copyright author contributor maintainer
+issue issues ticket milestone sprint backlog roadmap example examples sample
+

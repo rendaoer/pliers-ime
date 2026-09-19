@@ -34,6 +34,15 @@ pub trait Scheme {
         ch.is_ascii_lowercase()
     }
 
+    /// 这串字母看起来**还在打中文**吗？英文候选只在"不像"的时候才出来
+    ///（见 [`crate::english`]），不然打 `shou` 会冒出 `should`。判据按方案定：
+    ///
+    /// * 全拼：整串能切成音节（`nihao`），或者还只是某个音节的半截
+    ///   （`sho` 是 `shou` 的半截）—— 都算在打中文
+    /// * 双拼：两键一组，每组都解得出音节才算（键位跟拼音字母不是一回事，只能这么判）
+    /// * 码表：永远算 —— 码表用户敲的每个字母都是码，中间不该插英文
+    fn looks_pinyin(&self, input: &str) -> bool;
+
     /// 输入 → 候选词，按权重从高到低。
     ///
     /// 每个候选都带 `consumed`：**整串匹配**的是全部输入，
@@ -166,6 +175,12 @@ impl FullPinyin {
 impl Scheme for FullPinyin {
     fn name(&self) -> &str {
         "pinyin"
+    }
+
+    fn looks_pinyin(&self, input: &str) -> bool {
+        // 打得完（nihao）或者还没打完但仍在某个音节上（sho → shou）：都是在打中文
+        !self.segmenter.complete_segmentations(input).is_empty()
+            || self.segmenter.is_syllable_prefix(input)
     }
 
     fn candidates(&self, dict: &Dict, input: &str, limit: usize) -> Vec<Candidate> {
@@ -640,6 +655,11 @@ impl Scheme for DoublePinyin {
         ch.is_ascii_lowercase() || (self.semicolon && ch == ';')
     }
 
+    fn looks_pinyin(&self, input: &str) -> bool {
+        // 双拼两键一个音节：键正好两两解完才算"还在打中文"
+        matches!(self.decode_pairs(input), Some((_, None)))
+    }
+
     fn candidates(&self, dict: &Dict, input: &str, limit: usize) -> Vec<Candidate> {
         let words = merge(dict, self.name(), &self.lookup_codes(input), limit);
         // 整句候选：键正好两两解完（一组一个音节）时才有得拼
@@ -689,6 +709,11 @@ impl Table {
 impl Scheme for Table {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn looks_pinyin(&self, _input: &str) -> bool {
+        // 码表用户敲的每个字母都是码（`w` 就是 `w`），中间不该插英文候选
+        true
     }
 
     fn candidates(&self, dict: &Dict, input: &str, limit: usize) -> Vec<Candidate> {
@@ -783,6 +808,30 @@ mod tests {
         // 小鹤：hao = h+c
         let flypy = DoublePinyin::new(Layout::preset("flypy").unwrap(), &syllables(), true);
         assert_eq!(flypy.lookup_codes("nihc"), ["ni hao"]);
+    }
+
+    #[test]
+    fn 全拼分得清拼音和英文() {
+        let full = FullPinyin::new(&syllables(), true);
+        // 在打中文：切得完（nihao）或者还挂在某个音节上（sho、zho、sh）
+        for input in ["nihao", "shou", "sho", "sh", "zho", "ni", "xian", "n"] {
+            assert!(full.looks_pinyin(input), "{input} 该算在打中文");
+        }
+        // 在打英文：切不动，也不是任何音节的半截
+        for input in ["hello", "hel", "config", "the", "struct", "nih"] {
+            assert!(!full.looks_pinyin(input), "{input} 该算在打英文");
+        }
+    }
+
+    #[test]
+    fn 双拼和码表也分得清() {
+        let flypy = DoublePinyin::new(Layout::preset("flypy").unwrap(), &syllables(), true);
+        // 两键一组解完了 = 在打中文；解不完 = 不是
+        assert!(flypy.looks_pinyin("nihc"), "你好");
+        assert!(!flypy.looks_pinyin("nih"), "还差一个键");
+        assert!(!flypy.looks_pinyin("hello"), "解不出来的键");
+        // 码表：敲什么都是码，不掺英文
+        assert!(Table::new("wubi").looks_pinyin("hello"));
     }
 
     #[test]

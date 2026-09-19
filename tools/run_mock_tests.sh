@@ -239,6 +239,10 @@ run escape         "nihao"   ""    escape        # Esc 取消
 run mixed          "aaa"     aaaA  mixed         # 组词中 Shift+A：并进预编辑，空格整串上屏
 run shift          "a"       ""    shift         # 纯 Shift+A：4 个事件全转发
 
+echo "== 英文候选（英文单词补全）=="
+# 只敲了 kuber，空格上屏的是补全后的 kubernetes —— 词表编译在二进制里，跟词库无关
+run englishword    "kuber "  kubernetes englishword
+
 echo "== 中英文切换 =="
 run english        "hello "   ""    english       # Ctrl+空格 切英文后打英文
 run switch         "nihao"   nihao switch        # 组词中切英文：半截拼音先上屏

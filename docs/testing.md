@@ -5,8 +5,8 @@
 ## 单测：不需要合成器、不需要词库
 
 ```bash
-cargo test --workspace        # 全部 162 个
-cargo test -p pliers-engine   # 只看引擎（129 个）：切词、方案、词库、按键状态机
+cargo test --workspace        # 全部 192 个
+cargo test -p pliers-engine   # 只看引擎（155 个）：切词、方案、词库、英文候选、按键状态机
 cargo test -p pliers-ime      # 命令行那套（12 个）：状态输出、配置校验、交互选择
 cargo test -p pliers-popup    # 候选框布局与像素（18 个）
 cargo test -p pliers-wayland  # 模式提示的超时、命令 socket 一问一答（3 个）
@@ -55,7 +55,7 @@ wl_compositor / wl_shm / zwp_input_method_v2 / zwp_virtual_keyboard_v1 的够用
 `wl_buffer.release`：
 
 ```bash
-./tools/run_mock_tests.sh                             # 25 个场景 + 2 项在线改配置检查，全绿才算过
+./tools/run_mock_tests.sh                             # 26 个场景 + 2 项在线改配置检查，全绿才算过
 ./tools/run_mock_tests.sh --png target/popup.png      # 顺便存一张候选框实拍
 ```
 
@@ -87,6 +87,7 @@ cp ~/.local/share/pliers/dict.db target/dict-copy.db
 | `mixed` | `aaa` + `Shift+A` + 空格 | 大写并进预编辑（预编辑串到过 `aaaA`，候选框收起），空格整串原样上屏 |
 | `shift` | `Shift+A` | 纯大写：4 个事件全转发 |
 | `english` | Ctrl+空格 + `hello ` | 切到英文后全部按键原样转发、零提交 |
+| `englishword` | `kuber ` | **英文补全**：只敲了 5 个字母，上屏的是补全后的 `kubernetes`（词表编译在二进制里，跟词库无关） |
 | `switch` | `nihao` + Ctrl+空格 + `hi` | 切换键把半截拼音 `nihao` 上屏，切完 `hi` 原样转发 |
 | `notice` | 只按 Ctrl+空格，之后一个键都不按 | 「英」提示**自己**到点消失（大约半秒后收掉），不是等下一个按键 |
 | `symbol` | `nihao` + `/` | **先**提交「你好」**再**把 `/` 转给应用（比请求到达的先后顺序） |

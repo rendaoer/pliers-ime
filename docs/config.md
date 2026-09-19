@@ -113,6 +113,22 @@ chinese_punctuation = true     # 中文模式下 , → ，
 
 这几项的运行时效果见[使用](usage.md#中英文切换)和[使用](usage.md#中文标点)。
 
+## 英文候选（english）
+
+中文模式下打英文单词的补全（`hel` → help/hello/hell，空格上屏）。词表编译在二进制里，
+**不用下载、也不进词库** —— 行为和判断规则见[使用](usage.md#英文单词补全英文候选)。
+
+```toml
+[english]
+enabled = true                          # false = 只有中文候选
+limit = 5                               # 一次最多给几个英文候选
+path = "~/.config/pliers/words.txt"     # 自己加的英文词，一行一个（# 注释），排在内置词表前面
+```
+
+`path` 认 `~`；空字符串（默认）= 只用内置词表。自己那份排在最前面 —— 项目名、内部术语、
+你常打的词放这儿；内置词表里没有的词也能加（那份表是编译进去的，改不了）。
+词表的来历和换法见 [`crates/pliers-engine/data/README.md`](../crates/pliers-engine/data/README.md)。
+
 ## 跑着的时候改配置（不用重启）
 
 输入法起来之后会在 `$XDG_RUNTIME_DIR/pliers.sock` 上听命令，另开一个终端就能问它、改它：
@@ -146,6 +162,7 @@ pliers reload                             # 手动让它重读一遍配置文件
 方案      双拼（小鹤）
 词库      /home/dao/.local/share/pliers/dict.db（131 MB）
 候选      一页 9 个，池子 90 个
+英文候选  开（词表 25223 个词，一次最多 5 个）
 中英切换  ctrl+space
 中英提示  开
 模式      中（启动时 chinese）

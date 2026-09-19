@@ -44,7 +44,11 @@ fn help() -> String {
          \x20 dict.pool_size        <正整数>\n\
          \x20 engine.toggle_keys    ctrl+space,shift                （逗号分隔）\n\
          \x20 engine.start_mode     chinese | english\n\
-         \x20 engine.indicator      true | false\n\n\
+         \x20 engine.indicator      true | false\n\
+         \x20 engine.chinese_punctuation  true | false               （中文标点）\n\
+         \x20 english.enabled       true | false                     （英文候选）\n\
+         \x20 english.limit         1-9                              （一次几个英文候选）\n\
+         \x20 english.path          <词表文件>                        （自己加的英文词）\n\n\
          启动选项：\n\
          \x20 --init [--force] [--build]  写配置 + 装词库（--build = 自己下语料构建）\n\
          \x20 --init-config [--force]     只写配置模板\n\
@@ -285,6 +289,7 @@ fn status_lines(fields: &Fields) -> Vec<String> {
                 fields.get("pool")
             ),
         ),
+        row("英文候选", english_status(fields)),
         row(
             "中英切换",
             if toggle.is_empty() {
@@ -301,6 +306,20 @@ fn status_lines(fields: &Fields) -> Vec<String> {
         row("配置文件", fields.get("config").to_string()),
         row("socket", fields.get("socket").to_string()),
     ]
+}
+
+/// 英文候选那一行：关掉就说"关"；开着的话把词表大小也报出来
+///（词表大小只有跑着的实例知道 —— 它是起引擎时读进内存的，所以可能缺这个字段）
+fn english_status(fields: &Fields) -> String {
+    if fields.get("english") == "false" {
+        return "关".to_string();
+    }
+    let limit = fields.get("english_limit");
+    let limit = if limit.is_empty() { "—" } else { limit };
+    match fields.get("english_words") {
+        "" | "0" => format!("开（一次最多 {limit} 个）"),
+        words => format!("开（词表 {words} 个词，一次最多 {limit} 个）"),
+    }
 }
 
 /// 一行摘要（`config set` 之后报一句就够了，不用贴整块现状）
@@ -397,6 +416,19 @@ const ITEMS: &[(&str, &str, Kind, &str)] = &[
         Kind::Choice(&["true", "false"]),
         "chinese_punctuation",
     ),
+    (
+        "english.enabled",
+        "英文候选",
+        Kind::Choice(&["true", "false"]),
+        "english",
+    ),
+    (
+        "english.limit",
+        "英文候选个数",
+        Kind::Choice(&["1", "2", "3", "4", "5", "6", "7", "8", "9"]),
+        "english_limit",
+    ),
+    ("english.path", "英文词表", Kind::Text, "english_path"),
 ];
 
 /// 菜单里除了改配置，还有这两件事
@@ -570,6 +602,9 @@ fn fields_from_config(config: &Config) -> Fields {
         ),
         format!("indicator={}", config.engine.indicator),
         format!("chinese_punctuation={}", config.engine.chinese_punctuation),
+        format!("english={}", config.english.enabled),
+        format!("english_limit={}", config.english.limit),
+        format!("english_path={}", config.english.path),
         format!("config={}", pliers_engine::config::config_path().display()),
     ];
     Fields::parse(&fields.join("\t"))
@@ -765,7 +800,8 @@ mod tests {
         "dict=/home/dao/.local/share/pliers/dict.db（131 MB）\t",
         "dict_path=/home/dao/.local/share/pliers/dict.db\t",
         "candidates=9\tpool=90\ttoggle=ctrl+space\tstart=chinese\tindicator=true\t",
-        "mode=中\tconfig=/home/dao/.config/pliers/config.toml\t",
+        "chinese_punctuation=true\tenglish=true\tenglish_limit=5\tenglish_path=\t",
+        "english_words=25223\tmode=中\tconfig=/home/dao/.config/pliers/config.toml\t",
         "socket=/run/user/1000/pliers.sock",
     );
 
@@ -773,7 +809,7 @@ mod tests {
     fn 状态按字段渲染成多行() {
         let fields = Fields::parse(PAYLOAD);
         let lines = status_lines(&fields);
-        assert_eq!(lines.len(), 8, "一项一行：{lines:?}");
+        assert_eq!(lines.len(), 9, "一项一行：{lines:?}");
         assert!(lines[0].contains("双拼（小鹤）"), "{:?}", lines[0]);
         assert!(
             lines[1].contains("/home/dao/.local/share"),
@@ -781,7 +817,12 @@ mod tests {
             lines[1]
         );
         assert!(lines[2].contains("一页 9 个，池子 90 个"), "{:?}", lines[2]);
-        assert!(lines[5].contains("中（启动时 chinese）"), "{:?}", lines[5]);
+        assert!(
+            lines[3].contains("开（词表 25223 个词，一次最多 5 个）"),
+            "{:?}",
+            lines[3]
+        );
+        assert!(lines[6].contains("中（启动时 chinese）"), "{:?}", lines[6]);
     }
 
     #[test]
@@ -791,6 +832,7 @@ mod tests {
             "方案",
             "词库",
             "候选",
+            "英文候选",
             "中英切换",
             "中英提示",
             "模式",
@@ -819,7 +861,7 @@ mod tests {
     #[test]
     fn 没设切换键时说清楚() {
         let fields = Fields::parse("kind=full-pinyin\ttoggle=");
-        assert!(status_lines(&fields)[3].contains("（没设）"));
+        assert!(status_lines(&fields)[4].contains("（没设）"));
     }
 
     #[test]

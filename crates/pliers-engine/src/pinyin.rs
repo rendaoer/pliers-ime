@@ -143,6 +143,16 @@ impl Segmenter {
         self.segmentations(input, MAX_SEGMENTATIONS)
     }
 
+    /// 这串字母是不是某个音节的"半截"（`sho` 是 `shou` 的半截，`nih` 不是任何音节的开头）。
+    ///
+    /// 用来把"拼音打到一半"和"英文单词"分开：打 `sho` 的时候用户是在打 `shou`
+    ///（说/手/受），不该冒出 `should` 来抢候选。空串算（还没打呢，当然是中文）
+    pub fn is_syllable_prefix(&self, input: &str) -> bool {
+        self.by_length
+            .iter()
+            .any(|syllable| syllable.starts_with(input))
+    }
+
     /// 分段上屏用的前缀码：把输入按音节边界切成"前一段 + 剩下的一截"，
     /// 返回 `(前一段的码, 它吃了几个字符)`，**长的前缀排在前面**。
     ///
@@ -366,6 +376,19 @@ mod tests {
     fn 打错了就没有码() {
         // q 后面跟不出任何音节
         assert!(segmenter().lookup_codes("qqq").is_empty());
+    }
+
+    #[test]
+    fn 认得音节前缀() {
+        let segmenter = segmenter();
+        // 拼音打到一半：还挂在某个音节上（`sho` 是 `shou` 的半截）
+        for half in ["", "s", "sh", "sho", "zh", "zho", "ni", "xia", "n"] {
+            assert!(segmenter.is_syllable_prefix(half), "{half:?} 该算音节前缀");
+        }
+        // 切不动、也不是任何音节的开头：这是英文（或者打错了）
+        for other in ["nih", "hel", "hello", "v", "vv", "shou1"] {
+            assert!(!segmenter.is_syllable_prefix(other), "{other:?} 不该算");
+        }
     }
 
     #[test]

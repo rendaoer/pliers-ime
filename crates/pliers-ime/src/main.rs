@@ -11,6 +11,7 @@
 //! `set scheme.kind double-pinyin`）—— 见 `pliers --help`。
 
 mod dict;
+mod english;
 mod pick;
 
 use std::io::{IsTerminal, Write};
@@ -24,7 +25,8 @@ fn help() -> String {
         "pliers —— 从零手写的 Wayland 中文输入法\n\n\
          用法：pliers [启动选项]\n\
          \x20     pliers --init                装一份能用的：写配置 + 下载词库\n\
-         \x20     pliers dict fetch|build|status  词库：下载 / 自己构建 / 看现状\n\
+         \x20     pliers dict fetch|build|status  词库（中文）：下载 / 自己构建 / 看现状\n\
+         \x20     pliers english fetch|status   英文词表：单独下载 / 看现状（跟词库分开的文件）\n\
          \x20     pliers status                看正在跑的实例现在是什么配置\n\
          \x20     pliers reload                让它重新读一遍配置文件\n\
          \x20     pliers set                   交互模式：上下选着改（↑↓ + Enter）\n\
@@ -49,17 +51,20 @@ fn help() -> String {
          \x20 engine.chinese_punctuation  true | false               （中文标点）\n\
          \x20 english.enabled       true | false                     （英文候选）\n\
          \x20 english.limit         1-9                              （一次几个英文候选）\n\
-         \x20 english.path          <词表文件>                        （自己加的英文词）\n\n\
+         \x20 english.path          <词表文件>                        （默认 ~/.local/share/pliers/english.txt）\n\
+         \x20 english.extra         <自己加的词文件>                  （排在最前面）\n\n\
          启动选项：\n\
          \x20 --init [--force] [--build]  写配置 + 装词库（--build = 自己下语料构建）\n\
          \x20 --init-config [--force]     只写配置模板\n\
          \x20 --help                      看这个\n\n\
          配置：{}\n\
          词库：{}（pliers dict status 看里面有什么）\n\
+         英文词表：{}（pliers english status 看现在用的是哪份）\n\
          调试：PLIERS_DEBUG=1 pliers 把每个按键的判定打到 stderr\n\
          遥控：命令走 Unix socket，路径看 $PLIERS_SOCKET（默认 $XDG_RUNTIME_DIR/pliers.sock）",
         pliers_engine::config::config_path().display(),
-        pliers_engine::config::default_dict_path().display()
+        pliers_engine::config::default_dict_path().display(),
+        pliers_engine::config::default_english_path().display()
     )
 }
 
@@ -80,6 +85,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("--init-config") => return init_config(args.iter().any(|arg| arg == "--force")),
         // 词库：下载 / 自己构建 / 看现状
         Some("dict") => return dict::command(&args[1..]),
+        // 英文词表：看现状
+        Some("english") => return english::command(&args[1..]),
         Some("--help" | "-h") => {
             println!("{}", help());
             return Ok(());
@@ -354,7 +361,7 @@ fn english_status(fields: &Fields) -> String {
 fn status_summary(fields: &Fields) -> String {
     let scheme = match fields.get("kind") {
         "double-pinyin" => format!("双拼（{}）", layout_name(fields.get("layout"))),
-        "table" => format!("码表（{}）", fields.get("name")),
+        "wubi" => format!("五笔（码表：{}）", fields.get("name")),
         _ => "全拼".to_string(),
     };
     format!(
@@ -653,6 +660,7 @@ fn fields_from_config(config: &Config) -> Fields {
         format!("english={}", config.english.enabled),
         format!("english_limit={}", config.english.limit),
         format!("english_path={}", config.english.path),
+        format!("english_extra={}", config.english.extra),
         format!("config={}", pliers_engine::config::config_path().display()),
     ];
     Fields::parse(&fields.join("\t"))

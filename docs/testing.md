@@ -5,11 +5,12 @@
 ## 单测：不需要合成器、不需要词库
 
 ```bash
-cargo test --workspace        # 全部 208 个
-cargo test -p pliers-engine   # 只看引擎（160 个）：切词、方案、词库、英文候选、按键状态机
-cargo test -p pliers-ime      # 命令行那套（12 个）：状态输出、配置校验、交互选择
+cargo test --workspace        # 全部 213 个
+cargo test -p pliers-engine   # 只看引擎（163 个）：切词、方案、词库、英文候选、按键状态机
+cargo test -p pliers-ime      # 命令行那套（13 个）：状态输出、配置校验、交互选择
+cargo test -p pliers-dict     # 导入工具（5 个）：rime 词库解析、权重缩放、格式不对要说清楚
 cargo test -p pliers-popup    # 候选框布局与像素（18 个）
-cargo test -p pliers-wayland  # 模式提示的超时、长按重复的节拍、命令 socket 一问一答（13 个）
+cargo test -p pliers-wayland  # 模式提示的超时、长按重复的节拍、命令 socket 一问一答（14 个）
 ```
 
 ## 跑起来
@@ -71,7 +72,8 @@ cp ~/.local/share/pliers/dict.db target/dict-copy.db
 ```
 
 脚本会拷一份词库来用（从不写原始那份），另外**每个场景发一个全新的空 `user.db`**
-（`PLIERS_USER_DB`）—— 用户数据跟词库分家之后，"上一个场景选过的词把候选顺序顶乱"
+（`PLIERS_USER_DB`）和一条**不存在的英文词表路径**（`PLIERS_ENGLISH`，引擎会退回二进制里
+那份兜底，所以跟你本地那份词表无关、结果也稳定）—— 用户数据跟词库分家之后，"上一个场景选过的词把候选顺序顶乱"
 这种事就不可能发生了（以前真踩过：`pick` 选完「事件」，`nav` 里「事件」就跑到第一位），
 你自己那份 `user.db` 也不会被测试动到。
 

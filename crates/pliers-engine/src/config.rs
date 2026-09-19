@@ -44,6 +44,12 @@ pub fn default_user_path() -> PathBuf {
     data_dir().join("user.db")
 }
 
+/// 默认的**英文词表**库路径。它也是个独立文件：可以单独更新（`pliers english fetch`），
+/// 换词库、重装输入法都不影响它
+pub fn default_english_path() -> PathBuf {
+    data_dir().join("english.db")
+}
+
 fn data_dir() -> PathBuf {
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
@@ -87,10 +93,14 @@ pub struct EnglishConfig {
     /// 要不要给英文候选。关掉就只有中文候选，打英文得整串打完
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// 自己加的词表：一行一个词，`#` 注释。里面的词排在**内置词表前面**
-    /// （`vendor`、项目名、自己那套术语放这儿）。空 = 只用内置的
-    #[serde(default)]
+    /// 词表库（SQLite：一张 `english(word, weight)` 表）。默认就是上面那个数据目录里的
+    /// `english.db`，可以用 `pliers english fetch` 单独更新到新版本
+    #[serde(default = "default_english")]
     pub path: String,
+    /// 自己**额外**加的词（一行一个）：排在上面的词表前面
+    /// （项目名、内部术语、词表里没有的怪词放这儿）。空 = 不加
+    #[serde(default)]
+    pub extra: String,
     /// 一次最多给几个英文候选
     #[serde(default = "default_english_limit")]
     pub limit: usize,
@@ -100,10 +110,15 @@ impl Default for EnglishConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            path: String::new(),
+            path: default_english(),
+            extra: String::new(),
             limit: default_english_limit(),
         }
     }
+}
+
+fn default_english() -> String {
+    default_english_path().to_string_lossy().into_owned()
 }
 
 fn default_english_limit() -> usize {
@@ -271,6 +286,14 @@ impl Config {
         }
     }
 
+    /// 英文词表文件路径（`PLIERS_ENGLISH` 优先，跟词库/用户数据一个规矩）
+    pub fn english_path(&self) -> PathBuf {
+        match std::env::var_os("PLIERS_ENGLISH") {
+            Some(path) => PathBuf::from(path),
+            None => expand(&self.english.path),
+        }
+    }
+
     /// 按配置造一套输入方案
     pub fn build_scheme(&self, dict: &Dict) -> Result<Box<dyn Scheme>> {
         let syllables = dict.syllables();
@@ -325,7 +348,8 @@ impl Config {
             start_mode: self.engine.start_mode,
             indicator: self.engine.indicator,
             english: self.english.enabled,
-            english_path: (!self.english.path.is_empty()).then(|| expand(&self.english.path)),
+            english_path: (!self.english.path.is_empty()).then(|| self.english_path()),
+            english_extra: (!self.english.extra.is_empty()).then(|| expand(&self.english.extra)),
             english_limit: self.english.limit,
         })
     }
@@ -357,7 +381,8 @@ impl Config {
     /// | `engine.chinese_punctuation` | `true` / `false`（中文标点） |
     /// | `english.enabled` | `true` / `false`（英文候选） |
     /// | `english.limit` | 一次最多几个英文候选 |
-    /// | `english.path` | 自己加的词表文件（空 = 只用内置的） |
+    /// | `english.path` | 词表文件（默认 `~/.local/share/pliers/english.txt`） |
+    /// | `english.extra` | 自己额外加的英文词（排在最前面） |
     ///
     /// 换 `kind` 时会把另一套方案的字段带过去（比如全拼 → 双拼保留原来的键位），
     /// 省得每换一次都要重设一遍。报错信息是给用户看的，所以都说人话
@@ -490,8 +515,14 @@ impl Config {
                 self.english.limit = count;
             }
             "english.path" => {
-                // 空串是合法的：回到"只用内置词表"
+                if value.trim().is_empty() {
+                    return Err("英文词表路径不能是空的（想清掉就删那个文件）".into());
+                }
                 self.english.path = value.trim().to_string();
+            }
+            "english.extra" => {
+                // 空串是合法的：回到"不加自己的词"
+                self.english.extra = value.trim().to_string();
             }
             other => {
                 return Err(format!(
@@ -499,7 +530,8 @@ impl Config {
                      scheme.sentence / scheme.name / dict.path / dict.user_path / \
                      dict.max_candidates / dict.pool_size / engine.toggle_keys / \
                      engine.start_mode / engine.indicator / \
-                     engine.chinese_punctuation / english.enabled / english.limit / english.path）"
+                     engine.chinese_punctuation / english.enabled / english.limit /
+                     english.path / english.extra）"
                 ));
             }
         }
@@ -690,24 +722,36 @@ mod tests {
     #[test]
     fn 在线改配置_英文候选() {
         let mut config = Config::default();
-        // 默认是开着的，一次 5 个，没有自己的词表
-        assert!(config.settings().unwrap().english);
-        assert_eq!(config.settings().unwrap().english_limit, 5);
-        assert!(config.settings().unwrap().english_path.is_none());
+        // 默认是开着的，一次 5 个，词表指向数据目录里那个文件
+        let settings = config.settings().unwrap();
+        assert!(settings.english);
+        assert_eq!(settings.english_limit, 5);
+        assert_eq!(
+            settings.english_path.unwrap(),
+            default_english_path(),
+            "默认词表是独立那个文件"
+        );
+        assert!(settings.english_extra.is_none());
 
         config.set("english.enabled", "off").unwrap();
         config.set("english.limit", "3").unwrap();
         config.set("english.path", "~/words.txt").unwrap();
+        config.set("english.extra", "~/my-words.txt").unwrap();
         let settings = config.settings().unwrap();
         assert!(!settings.english);
         assert_eq!(settings.english_limit, 3);
         // `~` 要展开（词表路径跟词库路径一个规矩）
-        let path = settings.english_path.unwrap();
-        assert!(!path.to_string_lossy().starts_with('~'), "{path:?}");
+        for path in [
+            settings.english_path.clone().unwrap(),
+            settings.english_extra.clone().unwrap(),
+        ] {
+            assert!(!path.to_string_lossy().starts_with('~'), "{path:?}");
+        }
 
-        // 空串 = 回到"只用内置词表"（不算错）
-        config.set("english.path", "").unwrap();
-        assert!(config.settings().unwrap().english_path.is_none());
+        // 词表路径不能空（想清掉就删文件）；自己加词那份清空 = 不加
+        assert!(config.set("english.path", "").is_err());
+        config.set("english.extra", "").unwrap();
+        assert!(config.settings().unwrap().english_extra.is_none());
 
         // 个数得是 1-9
         assert!(config.set("english.limit", "0").is_err());

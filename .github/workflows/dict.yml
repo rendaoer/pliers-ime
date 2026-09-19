@@ -1,4 +1,7 @@
-# 构建词库，把 dict.db.zst 挂到 Release 上。
+# 构建**两个**资产，挂到 Release 上：
+#   dict.db.zst     中文词库（86 MB → 27 MB），pliers --init 下载它
+#   english.db.zst  英文候选词表（SQLite，25k 词 → 约 500 KB），pliers english fetch 下载它
+# 两者分开，是为了能各自独立更新：换词表不用重发词库，反之亦然。
 #
 # 为什么走 Release 而不是直接进仓库：词库是几百 MB 的派生物，GitHub 单文件上限 100 MB，
 # 而且每次重新导入都会产生一堆二进制 diff。`pliers --init` 就是从这个地址拿的：
@@ -63,6 +66,27 @@ jobs:
       - name: 构建
         run: cargo run --release -p pliers-dict -- --rime corpus --out dict.db
 
+      # 英文词表：上游 en_50k（OpenSubtitles 词频）+ 我们自己那份开发词表，
+      # 由 tools/build_english_list.py 合成，再用 pliers-dict 导成 english.db。
+      # 跟中文词库分开打包，可以单独更新
+      - name: 构建英文词表
+        run: |
+          curl -fsSL -o en_50k.txt \
+            "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/en/en_50k.txt"
+          python3 tools/build_english_list.py --source en_50k.txt --out english.txt
+          test "$(grep -c '^[a-z]' english.txt)" -gt 20000
+          # 跟仓库里那份比一比：不一样说明上游词频表变了，提醒一句（不算失败）
+          if ! diff -q english.txt crates/pliers-engine/data/english.txt >/dev/null; then
+            echo "::warning::生成的词表跟仓库里那份不一样（上游数据更新了？）—— 想同步就重跑一次脚本并提交"
+          fi
+          cargo run --release -p pliers-dict -- --english english.txt --out english.db
+          # 自包含：写完必须没有待并回的 WAL，否则压缩出来的库是空的
+          if [ -f english.db-wal ] && [ -s english.db-wal ]; then
+            echo "::error::english.db-wal 还有数据，压缩出来会是个空库"
+            exit 1
+          fi
+          test "$(sqlite3 english.db 'select count(*) from english')" -gt 20000
+
       # 发布前自检：词库得是**自包含**的一个文件（导入程序最后会把 WAL 并回主库），
       # 而且要能被 pliers 正常打开 —— 这一步能挡住"资产里少了一半数据"这种事
       - name: 自检
@@ -86,11 +110,13 @@ jobs:
             echo "::error::checkpoint 之后 dict.db-wal 还有数据，压缩出来会是个残缺的库"
             exit 1
           fi
-          rm -f dict.db-wal dict.db-shm
+          rm -f dict.db-wal dict.db-shm english.db-wal english.db-shm
           zstd -19 -T0 dict.db -o dict.db.zst
+          zstd -19 -T0 english.db -o english.db.zst
           sha256sum dict.db.zst > dict.db.zst.sha256
-          ls -l dict.db dict.db.zst
-          cat dict.db.zst.sha256
+          sha256sum english.db.zst > english.db.zst.sha256
+          ls -l dict.db dict.db.zst english.db english.db.zst
+          cat dict.db.zst.sha256 english.db.zst.sha256
 
       # 许可：词库是从 GPL-3.0 的语料构建出来的衍生作品，发出来就得随附许可和来源
       #（来源就是 rime-frost 仓库本身 + 这个工作流，谁都拿得到）
@@ -110,6 +136,15 @@ jobs:
           | 构建方式 | \`pliers-dict --rime corpus --out dict.db\`（见 \`.github/workflows/dict.yml\`） |
           | 许可 | **GPL-3.0**（本资产是上述语料的衍生作品） |
 
+          同一个 Release 里还有 **`english.db.zst`**（英文候选词表，SQLite，约 500 KB），
+          来源 [FrequencyWords](https://github.com/hermitdave/FrequencyWords) 的 `en_50k`
+          （OpenSubtitles2018 词频，CC-BY-SA-4.0）+ 仓库里 `tools/english-extra.txt`
+          那份开发常用词。它跟词库**分开**，可以单独更新：
+
+          \`\`\`
+          pliers english fetch     # 只更新词表，不用重装输入法
+          \`\`\`
+
           词条是 \`词 + 拼音 + 权重\`，多音字一行一个读音。想自己构建（不用这个资产）：
 
           \`\`\`
@@ -127,3 +162,5 @@ jobs:
           files: |
             dict.db.zst
             dict.db.zst.sha256
+            english.db.zst
+            english.db.zst.sha256

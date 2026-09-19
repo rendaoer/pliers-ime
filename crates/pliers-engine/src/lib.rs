@@ -25,7 +25,7 @@ mod sentence;
 pub use config::{Config, EXAMPLE as EXAMPLE_CONFIG, SchemeConfig};
 pub use dict::Dict;
 pub use english::Words;
-pub use scheme::{DoublePinyin, FullPinyin, Layout, Scheme, Table};
+pub use scheme::{Table, DoublePinyin, FullPinyin, Layout, Scheme};
 
 /// 空格（X11 keysym）
 pub const KEY_SPACE: u32 = 0x20;
@@ -155,8 +155,10 @@ pub struct Settings {
     pub indicator: bool,
     /// 要不要英文候选（`hel` + 空格 → `hello`）
     pub english: bool,
-    /// 自己加的英文词表（`[english] path`），没有就是 None
+    /// 英文词表文件（`[english] path`）：没有它就退回二进制里那份兜底
     pub english_path: Option<std::path::PathBuf>,
+    /// 自己额外加的英文词（`[english] extra`），排在最前面
+    pub english_extra: Option<std::path::PathBuf>,
     /// 一次最多给几个英文候选
     pub english_limit: usize,
 }
@@ -172,6 +174,7 @@ impl Default for Settings {
             indicator: true,
             english: true,
             english_path: None,
+            english_extra: None,
             english_limit: 5,
         }
     }
@@ -417,11 +420,14 @@ impl Engine {
             toggle: settings.toggle_keys,
             indicator: settings.indicator,
             chinese_punctuation: settings.chinese_punctuation,
-            // 词表在这里一次性读进内存（192 KB 的内置表 + 用户自己那份）。
+            // 词表在这里一次性读进内存（外部文件，读不了就用二进制里那份兜底）。
             // 英文候选关掉的话连读都不读
-            english: settings
-                .english
-                .then(|| english::Words::load(settings.english_path.as_deref())),
+            english: settings.english.then(|| {
+                english::Words::load(
+                    settings.english_path.as_deref(),
+                    settings.english_extra.as_deref(),
+                )
+            }),
             english_limit: settings.english_limit,
             shift_tap: false,
             buffer: String::new(),
@@ -470,6 +476,11 @@ impl Engine {
     /// 英文词表里有多少词（没开英文候选就是 None）—— `pliers status` 报数用
     pub fn english_words(&self) -> Option<usize> {
         self.english.as_ref().map(english::Words::len)
+    }
+
+    /// 英文词表是从哪儿来的（外部文件 / 内置兜底）—— `pliers status` 报给人看
+    pub fn english_source(&self) -> Option<String> {
+        self.english.as_ref().map(|words| words.source().label())
     }
 
     /// 预编辑串原文（拼音 / 码）

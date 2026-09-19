@@ -104,7 +104,7 @@ pool_size = 90                           # 一次准备多少个候选 = 最多�
 `path` 和 `user_path` 都认 `~`；也可以整个用环境变量顶掉：
 `PLIERS_DICT=/path/to/dict.db`、`PLIERS_USER_DB=/path/to/user.db`。
 
-**词库和用户数据是两个文件**：换词库（`pliers dict fetch --force` / `pliers dict build`）
+**词库和用户数据是两个文件**：换词库（`pliers fetch pinyin --force` / `pliers dict build`）
 只会动 `path`，`user_path` 里那些"你选过的词、你自己拼出来的句子、你按 Del 拉黑的词"
 不受影响；反过来想把输入法的记性清掉，删 `user_path` 那个文件就行，词库不用重装。
 两个文件内部用 SQLite 的 `ATTACH` 连起来，所以排序还是一条 SQL —— 见[词库](dictionary.md#表结构词库和用户数据是两个文件)。
@@ -128,14 +128,27 @@ chinese_punctuation = true     # 中文模式下 , → ，
 
 ```toml
 [english]
-enabled = true                          # false = 只有中文候选
-limit = 5                               # 一次最多给几个英文候选
-path = "~/.config/pliers/words.txt"     # 自己加的英文词，一行一个（# 注释），排在内置词表前面
+enabled = true                                       # false = 只有中文候选
+limit = 5                                            # 一次最多给几个英文候选
+# path  = "~/.local/share/pliers/english.db"         # 词表库（pliers fetch english 更新它）
+# extra = "~/.config/pliers/my-words.txt"            # 自己额外加的词，排在最前面
 ```
 
-`path` 认 `~`；空字符串（默认）= 只用内置词表。自己那份排在最前面 —— 项目名、内部术语、
-你常打的词放这儿；内置词表里没有的词也能加（那份表是编译进去的，改不了）。
-词表的来历和换法见 [`crates/pliers-engine/data/README.md`](../crates/pliers-engine/data/README.md)。
+两个路径都认 `~`，也都能用环境变量顶掉（`PLIERS_ENGLISH` 顶 `path`）。
+`extra` 是自己加词的地方（**纯文本**，一行一个）—— 项目名、内部术语、词表里没有的词；
+`path` 那个库才是主词表，可以整个换成别的：
+
+```nushell
+pliers fetch english                  # 从 Release 更新主词表
+pliers fetch english --url <别的地址>  # 换成别的源（认 .zst / 纯文本 / file://）
+pliers english status                 # 看现在用的是哪份、多少词
+
+# 自己构建一份（词表是文本，一行一个词，`#` 注释）
+pliers-dict --english 词表.txt --out ~/.local/share/pliers/english.db
+```
+
+词表的来历（上游 FrequencyWords + 我们那份开发词）和重新生成的办法见
+[`crates/pliers-engine/data/README.md`](../crates/pliers-engine/data/README.md)。
 
 ## 跑着的时候改配置（不用重启）
 
@@ -157,6 +170,9 @@ pliers reload                             # 手动让它重读一遍配置文件
 | --- | --- | --- | --- | --- |
 | `pliers set …` | 只改内存里那份配置 | **需要** —— 它就是把这个命令发给那个进程（Unix socket） | 重启就回去 | 试手感（"小鹤换微软试试"） |
 | `pliers config set …` | 写进 `~/.config/pliers/config.toml` | 不需要，**输入法没跑也能改** | 不会失效 | 定下来（写的时候注释、空行、行尾注释都留着） |
+
+（`pliers fetch english` / `pliers fetch pinyin` 这类"下载数据"的命令也都不需要实例在跑；
+只有 `set` / `status` / `reload` 是跟**正在跑的那个进程**说话。）
 
 没在跑却敲了 `pliers set …` 的话，它会说「连不上正在跑的输入法」并顺手提示你用
 `pliers config set …`（同名的 `pliers status` / `pliers reload` 也一样要实例 ——

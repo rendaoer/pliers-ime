@@ -34,7 +34,7 @@ pliers-engine  ←──┬──  pliers-popup  ──┐
 | `config.rs` | 读 TOML 配置 |
 | `fetch.rs` | 下载 + 解压（`pliers --init` / `pliers dict ...` 装词库用） |
 
-这么切的好处：**输入方案、词库、候选框长相都能脱离合成器跑测试**（208 个单测），
+这么切的好处：**输入方案、词库、候选框长相都能脱离合成器跑测试**（213 个单测），
 协议层里剩下的全是"Wayland 要求这么做"的东西。想改哪块就只动哪块：
 
 * 加词 / 调词频 → 用 SQL 改词库，或者重新跑一遍 `pliers-dict`
@@ -140,7 +140,7 @@ SELECT text FROM word WHERE code LIKE 'ni%' ORDER BY weight DESC LIMIT 9
 
 ### 词库和用户数据：两个文件 + `ATTACH`
 
-词库（86 MB、别人整理的数据、`dict fetch --force` / `dict build` 会整个换掉）和用户数据
+词库（86 MB、别人整理的数据、`pliers fetch pinyin --force` / `dict build` 会整个换掉）和用户数据
 （几十 KB、你自己选过的词和拼过的句子）**生命周期完全不一样**，所以放在两个文件里：
 `dict.db` + `user.db`。以前混在一个文件里，换一次词库就把用户习惯一起丢了 ——
 导入工具是先把输出文件删了重建的。
@@ -165,8 +165,14 @@ Rust 里重排 —— 那样"权重最高的前 N 个"就得先按语料权重�
 
 ### 英文候选：另一半不进词库
 
-英文补全（`hel` → help/hello/hell）**没走 SQLite**，词表是 `include_str!` 编进二进制的
-（`data/english.txt`，两万五千个词，192 KB）。理由跟上面那条正好互为对照：
+英文补全（`hel` → help/hello/hell）用的是自己一个 SQLite 库
+（`~/.local/share/pliers/english.db`，一张 `english(word, weight)` 表；跟词库一起挂在 Release 上，
+但可以 `pliers fetch english` 单独更新）。**关键是它只在启动时被读一次**：
+一次性把两万五千行读进内存，之后每次按键都在这份内存词表上扫（实测 57 µs）。
+二进制里还嵌着同一份文本（`include_str!`）**只当兜底**：库没装或读不了时用它，
+保证"装完就能用、离线也能用"。
+
+也就是说：SQLite 在这里是**存储和发布格式**，不是每次按键的查询引擎 —— 那样才谈得上跟下面那条对照：
 
 * 它**只读、永不修改**：没有用户词频要写进去，就不需要事务、WAL、"重新导入"那一套；
 * 查法是"谁以这串字母开头"，词表按词频排好之后**顺着扫一遍就是答案**（先扫到的更常用），

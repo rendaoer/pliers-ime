@@ -9,22 +9,26 @@
 pliers --init          # 写配置 + 下载词库
 ```
 
-> 这篇讲的是**中文词库**（SQLite 里的 word / user_word / … 那几张表）。
-> 打英文单词时的补全**不在词库里** —— 那份词表编译在二进制里（`data/english.txt`），
-> 不用下载也不用导入，见[使用](usage.md#英文单词补全英文候选)。
+> 这篇讲的是**中文词库**（SQLite 里的 word / syllable / meta 那几张表）。
+> 打英文单词时的补全**不在词库里** —— 它是另一个独立的库（`english.db`，
+> 跟词库一起挂在同一个 Release 上，但可以单独更新：`pliers fetch english`），
+> 见[使用](usage.md#英文单词补全英文候选)。
 
 ## 几条命令
 
 | 想干的事 | 命令 |
 | --- | --- |
 | 新机器装一份能用的 | `pliers --init` |
-| 只装（或重装）词库 | `pliers dict fetch [--force]` |
+| 只装（或重装）中文词库 | `pliers fetch pinyin [--force]` |
+| 只更新英文词表 | `pliers fetch english` |
+| 整套字典（两块都拿） | `pliers fetch all`（= `pliers fetch dict`，也可以不写种类） |
+| 哪个旧更新哪个 | `pliers update`（先比 Release 上的 sha256，一样就跳过） |
 | 自己下语料、自己构建 | `pliers dict build` |
 | 看现在用的是哪个库、多少词、什么来源 | `pliers dict status` |
 | 拿到词库路径（脚本用） | `pliers dict path` |
 | 手动下载一份放进去 | 放到 `pliers dict path` 打印的那个路径 |
 
-`--init` 和 `dict fetch` 是从**仓库 Release 的资产**拿的：
+`--init` 和 `pliers fetch pinyin` 是从**仓库 Release 的资产**拿的：
 
 ```
 https://github.com/rendaoer/pliers-ime/releases/latest/download/dict.db.zst
@@ -34,8 +38,8 @@ https://github.com/rendaoer/pliers-ime/releases/latest/download/dict.db.zst
 换源（公司镜像、自己搭的服务器、本地文件都行）：
 
 ```bash
-PLIERS_DICT_URL=https://内网镜像/dict.db.zst pliers dict fetch
-pliers dict fetch --url file:///mnt/u盘/dict.db.zst      # 离线装
+PLIERS_DICT_URL=https://内网镜像/dict.db.zst pliers fetch pinyin
+pliers fetch pinyin --url file:///mnt/u盘/dict.db.zst      # 离线装
 ```
 
 下载落在 `<目标>.part`，解压到 `<目标>.unpacked`，最后一步才改名 —— 中途断网不会把
@@ -69,6 +73,99 @@ rime 词库的格式是 `词<TAB>拼音<TAB>权重`，拼音用空格分音节 �
 导入时权重会**等比缩放到 8000 万的上限**（`RIME_MAX_WEIGHT`），这个数是照"用户调频
 选一次 +100 万"定的：太小则选过一次的词永远第一、连「的」「你」都翻不了身，
 太大则调频等于没调。
+
+## 英文词表（同一个 Release 里的另一个资产）
+
+Release 上除了 `dict.db.zst`，还有一个 **`english.db.zst`**（约 500 KB）：英文候选用的词表库
+（一张 `english(word, weight)` 表）。上游是
+[FrequencyWords](https://github.com/hermitdave/FrequencyWords) 的 `en_50k`（字幕词频）
+加上仓库里 `tools/english-extra.txt` 那份开发常用词：`tools/build_english_list.py` 合成文本，
+再由 `pliers-dict --english` 导成库。
+
+它故意跟词库分开，好处是**能各自独立更新**：
+
+```nushell
+pliers fetch english     # 只更新词表（约 100 KB），不用重装输入法、也不用重下 27 MB 词库
+pliers english status    # 现在用的是哪份、多少词
+```
+
+词表库不在时引擎会自动用二进制里那份兜底（编译时嵌进去的同一份数据），
+所以"没装"只会让 `pliers status` 显示成「内置兜底」，不会让英文候选消失。
+**运行时是启动时一次性把它读进内存的**（两万五千行、几十毫秒），每次按键依旧在内存里扫 ——
+SQLite 只当"存储和发布格式"，不参与每次按键的查询。
+
+## 导入工具认识哪些格式
+
+`pliers-dict` 有三种输入（`pliers-dict --help` 里也写着）：
+
+### `--rime`：rime 词库（打拼音必须用它）
+
+`.dict.yaml`。`---` 到 `...` 之间是 YAML 头（**跳过**），之后每行是
+`词<TAB>拼音<TAB>权重`，**用制表符分开**；拼音是空格分开的小写音节，权重可以省（默认 1）：
+
+```text
+---
+name: mydict
+version: "1"
+sort: by_weight
+...
+你	ni	500000
+你好	ni hao	3000000
+长	chang	900
+长	zhang	100
+```
+
+规则和"坑"：
+
+* `#` 开头的行和空行跳过；给目录就读里面所有 `.dict.yaml`（`corrections*` 这类纠错表不读）；
+* **音节表（412 个合法音节）是从这些拼音码里收集的**，所以想打中文就必须给 `--rime`
+  —— 只给 `--table` 会做出一个"没有音节表"的库，输入法起来会直接报错；
+* 多音字就写多行（`长` 上两行），权重各自算；
+* 权重只用来排序，导入时会**等比缩放到上限 8000 万**（跟别的语料一致），
+  所以拿别的词频表来也行，量级不用对；
+* 读不动的行**不会静默丢掉**：导入时会打一句「跳过 N 行」并把前几行连原因贴出来；
+* 偏门音节（三套双拼键位都打不出来的，比如 `lvan`）会被筛掉，同样会报一句。
+
+### `--table`：码表方案（五笔/郑码/仓颉）
+
+每行 `词<TAB>码[<TAB>权重]`：
+
+```text
+你	nin
+好	vbg	200
+```
+
+要跟 `--table-scheme wubi` 一起用（这个名字就是词库里 `word.scheme` 的值，
+配置里 `[scheme] kind = "table"` + `name = "wubi"` 对得上它）。
+
+### `--english`：英文候选词表
+
+一行一个词（`#` 注释），**按词频从高到低**；上游那种 `词 次数` 的两列格式也认（只看第一列）：
+
+```text
+# 我自己的词表
+hello
+kubernetes
+```
+
+只收纯小写字母、长度 ≥ 2 的词（一个字母跟拼音的首字母联想分不开）。
+写出来是 `english.db`（一张 `english(word, weight)` 表，权重按名次折算）。
+
+### 一起导：一个库里几套方案
+
+每次导入都是**重建输出文件**，所以想"拼音 + 五笔"都有，就在同一条命令里都给上：
+
+```bash
+pliers-dict --rime ~/.cache/pliers/rime-frost \
+            --table wubi.txt --table-scheme wubi \
+            --out ~/.local/share/pliers/dict.db
+```
+
+英文是**另一个库**（`english.db`），单独导：
+
+```bash
+pliers-dict --english 词表.txt --out ~/.local/share/pliers/english.db
+```
 
 ## 自己构建
 
@@ -124,12 +221,26 @@ pliers-dict --rime ~/.cache/pliers/rime-frost \
 （顺手说一句：`pliers dict build` 只会导 `--rime` 那部分，码表得自己用 `pliers-dict` 加。）
 见[配置](config.md#五笔--码表方案)。
 
+## 字典是"总概念"：pinyin / wubi / english
+
+命令行里 **dict 指的是整套字典**，它按方案分成几块，各有各的来路：
+
+| 种类 | 存在哪 | 资产 | 怎么更新 |
+| --- | --- | --- | --- |
+| `pinyin` | `dict.db` 的 `word` 表（`scheme='pinyin'`） | `dict.db.zst` | `pliers fetch pinyin` |
+| `wubi` 等码表 | **同一个** `dict.db`（`scheme='wubi'`） | 没有单独资产 | 导入时跟语料一起导（见[码表方案](#码表方案五笔--郑码--仓颉)） |
+| `english` | 自己的 `english.db`（一张 `english(word, weight)` 表） | `english.db.zst` | `pliers fetch english` |
+
+所以 `pliers fetch all`（或不写种类）= 整套字典；`pliers update` = 看哪块不是最新的就更新哪块。
+`pliers dict status` 会把这几块一起报出来。
+
 ## 表结构：词库和用户数据是**两个文件**
 
 | 文件 | 里面有什么 | 谁写的 |
 | --- | --- | --- |
 | `~/.local/share/pliers/dict.db`（86 MB） | `word` 词条 + 权重、`syllable` 音节表、`meta` 来源 | 导入工具（`pliers-dict`） |
 | `~/.local/share/pliers/user.db`（几十 KB） | `user_word` 选过多少次、`user_phrase` 你自己拼的整句、`user_hidden` 按 Del 拉黑的词 | 输入法运行时 |
+| `~/.local/share/pliers/english.db`（约 900 KB） | 英文候选词表（一张 `english(word, weight)` 表，25223 个词） | `pliers --init` 装，`pliers fetch english` 更新 |
 
 ```sql
 -- dict.db：派生物，随时可以重新生成 / 下载覆盖
@@ -144,7 +255,7 @@ user_hidden(code, text)             -- 按 Del 删掉的词（黑名单，英文
 ```
 
 **为什么分成两个文件**：它们的生命周期完全不一样。词库 86 MB、是别人整理的数据、
-`pliers dict fetch --force` 和 `pliers dict build` 会把它整个换掉（导入工具是先把输出文件
+`pliers fetch pinyin --force` 和 `pliers dict build` 会把它整个换掉（导入工具是先把输出文件
 删了重建的）；用户数据只有几十 KB，是你自己的东西 —— 混在一个文件里，换一次词库就把
 "选过的词、自己拼的句子、拉黑的词"全丢了。分家之后 **`dict.db` 随便删、随便换**。
 

@@ -92,7 +92,18 @@ kuber      →  [kubernetes] …                 ← 词表里连开发词都有
 | `nN` `NIHAO`（大写） | 什么候选都没有 | 英文原文，空格/回车原样上屏 |
 | `zzzz` | 什么候选都没有 | 词表里没有，空格照样原样上屏（不会吞掉） |
 
-词表**编译在二进制里**（两万五千个词，约 190 KB），不用下载、也不进 SQLite 词库：
+词表是**自己一个 SQLite 库**（`~/.local/share/pliers/english.db`，一张 `english(word, weight)` 表，
+两万五千个词），跟中文词库分开、也不绑在二进制上 —— 可以单独更新：
+
+```nushell
+pliers --init            # 装一份（离线也行：先把二进制里那份兜底写出来）
+pliers fetch english     # 从 GitHub Release 更新到最新那份
+pliers english status    # 现在用的是哪个文件、多少词
+```
+
+库不在（或者读不了）时引擎自动退回二进制里那份兜底，所以英文候选不会凭空消失，
+只是 `pliers status` 那一行会显示成「内置兜底」。**它是启动时一次性读进内存的**，
+每次按键都在内存里扫（实测 57 µs）—— 换成库只是换了存储和发布方式，查询没有变慢。词表内容：
 
 * 1–1000 名是日常英语最常用的词 —— 这样 `the`/`work`/`strong` 这些词在自己的前缀上照样赢；
 * 1001 名之后是 `tools/english-extra.txt` 里那份开发常用词（`config`、`stdout`、`iterator`、
@@ -106,10 +117,16 @@ kuber      →  [kubernetes] …                 ← 词表里连开发词都有
 [english]
 enabled = true        # 关掉就只有中文候选（打英文得整串打完）
 limit = 5             # 一次最多给几个英文候选
-path = "~/.config/pliers/words.txt"   # 自己加的词，一行一个，排在内置词表前面
+# path  = "~/.local/share/pliers/english.db"    # 词表库本身（很少需要改）
+# extra = "~/.config/pliers/my-words.txt"       # 自己额外加的词，排在最前面
 ```
 
-`path` 那份词表读不了（路径写错、没权限）只会吼一句，输入法照常用内置词表跑。
+`extra` 那份读不了只会吼一句；`path` 那个库读了不了就退回兜底那份。
+想自己构建一份词表库（换词表、离线、往里加自己的词）：
+
+```bash
+pliers-dict --english 词表.txt --out ~/.local/share/pliers/english.db
+```
 运行中改：`pliers set english.enabled false`、`pliers config set english.limit 3`。
 候选框里对着某个英文词按 `Del`，它就**以后都不再出现**（按词记，不是按当前这串字母）。
 

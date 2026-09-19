@@ -5,7 +5,8 @@
 中文模式下打英文单词也有补全：`hel` + 空格 → `help`（`kuber` → `kubernetes`）。
 
 * **全拼**是完整实现的：150 万词的词库、音节切分、**整句候选**、词频排序、用户调频
-* **英文候选**：两万五千个词的词表**编译在二进制里**，不下载、不进词库，打一半就补全；
+* **英文候选**：两万五千个词的词表是自己的一个 SQLite 库（`~/.local/share/pliers/english.db`），
+  打一半就补全（`hel` → help/hello），可以 `pliers fetch english` **单独更新**，不用重装输入法；
   打 `shou` 这种还在拼音上的串永远只出中文（见[规则](docs/usage.md#英文单词补全英文候选)）
 * **双拼 / 五笔**留好了位置：双拼（自然码/小鹤/微软）已经能用，五笔是"码表方案"那条路
 * **行为都在配置文件里**（TOML）：换方案、换词库、改候选个数都不用改代码
@@ -35,14 +36,24 @@ text-input 协议**：Firefox / GTK / Qt 应用都行，alacritty 0.17（基于 
 
 词库默认用[白霜拼音 rime-frost](https://github.com/gaboolic/rime-frost)（约 100 万条，自带字频词频，
 多音字一行一个读音；资产 27 MB）。不想下载现成的、想自己从语料构建：`cargo install pliers-dict` 之后 `pliers dict build`；
-换源或离线装：`PLIERS_DICT_URL=... pliers dict fetch --url file:///...`；
-看现在装的是哪份：`pliers dict status` —— 见 [docs/dictionary.md](docs/dictionary.md)。
+换源或离线装：`PLIERS_DICT_URL=... pliers fetch pinyin --url file:///...`；
+看现在装的是哪份：`pliers dict status`；想把词库和英文词表**一起更新到最新**：`pliers update`
+（已经是最新的会跳过，不白下 27 MB）—— 见 [docs/dictionary.md](docs/dictionary.md)。
 发布出来的词库资产按 GPL-3.0 分发（语料是 GPL-3.0 的），代码本身不受影响。
 
-**词库和用户数据是两个文件**：`dict.db` 是派生物（下载/重建随你），`user.db` 里放
-「你选过哪些词、你自己拼出来的句子、你按 `Del` 拉黑的词」—— 重新装词库不会把这些弄丢；
-反过来想让输入法忘掉你的习惯，删 `user.db` 就行，不用动词库（两个文件内部用 SQLite 的
-`ATTACH` 连起来，见 [docs/dictionary.md](docs/dictionary.md#表结构词库和用户数据是两个文件)）。
+**词库、用户数据、英文词表是三个文件**，各管各的：
+
+| 文件 | 是什么 | 怎么更新 |
+| --- | --- | --- |
+| `~/.local/share/pliers/dict.db` | 中文词库 + 音节表（86 MB） | `pliers fetch pinyin --force` / `pliers dict build` |
+| `~/.local/share/pliers/user.db` | 你选过的词、自己拼的句子、按 `Del` 拉黑的词 | 自动写；想清空就删掉它 |
+| `~/.local/share/pliers/english.db` | 英文候选词表（SQLite，25223 词） | `pliers fetch english`（**可以单独更新**） |
+
+所以重新装词库不会弄丢你的习惯，换英文词表也不用动词库；两个库内部用 SQLite 的 `ATTACH`
+连起来（见 [docs/dictionary.md](docs/dictionary.md#表结构词库和用户数据是两个文件)）。
+英文词表没装/读不了时，引擎会用二进制里那份兜底，英文候选不会凭空消失。
+英文那个库是**启动时一次性读进内存**的（两万五千行，几十毫秒），每次按键还是内存里扫一遍 ——
+用 SQLite 当存储和发布格式，不等于把每次按键的查询交给 SQL。
 
 配置默认是全拼，不用写任何文件；要一份带注释的模板就 `pliers --init-config`。
 跑着的时候另开一个终端 `pliers status` 看现状、`pliers set` 上下选着改 —— 不用重启。
@@ -53,7 +64,7 @@ seat」然后退出，所以别同时跑两个。
 想确认自己没跑歪：
 
 ```bash
-cargo test --workspace        # 208 个单测，不需要合成器、不需要词库
+cargo test --workspace        # 213 个单测，不需要合成器、不需要词库
 ./tools/run_mock_tests.sh     # mock 合成器跑 27 个场景 + 2 项在线改配置检查
 ```
 
@@ -116,7 +127,8 @@ cargo test --workspace        # 208 个单测，不需要合成器、不需要�
   [rime-frost](https://github.com/gaboolic/rime-frost) 那份 GPL-3.0 语料的衍生作品，
   跟代码的许可是两回事。不想碰它就 `pliers dict build` 自己从上游构建（那只是下载语料，
   不涉及再分发）—— 见 [docs/dictionary.md](docs/dictionary.md#许可)
-* **英文词表数据**（`crates/pliers-engine/data/english.txt`，编译进二进制的那份）：
+* **英文词表数据**（`crates/pliers-engine/data/english.txt`，编译进二进制那份兜底；发布出去的
+  `english.db.zst` 也是它的衍生作品）：
   **CC-BY-SA-4.0** —— 词频来自 [FrequencyWords](https://github.com/hermitdave/FrequencyWords)
   的 `en_50k`（OpenSubtitles2018 词频）；里面掺的开发常用词
   （`tools/english-extra.txt`）是本项目自己写的，跟代码同许可。出处和重新生成的步骤见

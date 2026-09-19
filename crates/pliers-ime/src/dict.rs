@@ -4,7 +4,7 @@
 //! 但也不该让你自己去哪儿找一份词表、再守着跑一遍导入：
 //!
 //! * `pliers --init`      写配置 + 下载预构建的词库（新机器一条命令能用）
-//! * `pliers dict fetch`  只装词库（可以换源、重装）
+//! * `pliers fetch dict`  只装词库（可以换源、重装；这个是顶层命令）
 //! * `pliers dict build`  自己下语料、自己构建（Release 上还没有东西时走这条）
 //! * `pliers dict status` 现在用的是哪个库、多少词、来源是什么
 //!
@@ -20,7 +20,7 @@ use crate::pick;
 
 /// 预构建词库的地址：挂在仓库的 Release 上。
 /// `releases/latest/download/` 永远指向最新 Release 里的同名资产，所以不用跟着版本号改。
-/// 想换源：`PLIERS_DICT_URL=... pliers dict fetch`（公司镜像、自己搭的服务器都行）
+/// 想换源：`PLIERS_DICT_URL=... pliers fetch dict`（公司镜像、自己搭的服务器都行）
 pub const DEFAULT_URL: &str =
     "https://github.com/rendaoer/pliers-ime/releases/latest/download/dict.db.zst";
 
@@ -61,13 +61,24 @@ pub fn init(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         crate::init_config(force)?;
     }
 
+    // ---- 英文词表（跟词库分开的文件，顺带装一份；离线也能装，写的是二进制里那份兜底）----
+    crate::english::install_if_missing(force)?;
+
     // ---- 词库 ----
     let dest = target_path();
     if dest.exists() && !force {
         println!("词库：{}（已有，没动它）", dest.display());
-        describe_path(&dest)?;
+        // 跑着的实例会独占词库，这时候读不进去很正常 —— 这不是错，
+        // 别让 `pliers --init` 带着一个"失败"的退出码结束
+        if let Err(e) = describe_path(&dest) {
+            println!("大小        {}", size(&dest));
+            println!("内容        读不了：{e}");
+            println!("            输入法正开着的话词库被它独占着，退掉再看");
+        }
         println!();
-        println!("想重装：pliers dict fetch --force（或 pliers dict build）");
+        println!(
+            "想重装：pliers dict fetch --force（或 pliers dict build）"
+        );
         return Ok(());
     }
     if build {

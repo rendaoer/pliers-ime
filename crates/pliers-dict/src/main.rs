@@ -42,7 +42,23 @@ const BATCH: usize = 50_000;
 const RIME_MAX_WEIGHT: f64 = 80_000_000.0;
 
 /// 一行 rime 词条：`(词, 拼音, 权重)`。`Err` 是读文件本身出的错
-type RimeRow = Result<(String, String, i64), String>;
+type RimeRow = Result<ParsedLine, String>;
+
+/// 一行 rime 词库解析出来的结果。
+///
+/// `Skipped` 是"这一行不像词条" —— 不是错，但得让用户知道，不然"怎么少了一批词"
+/// 永远查不出来（以前是静默丢掉的）
+enum ParsedLine {
+    Row {
+        text: String,
+        code: String,
+        weight: i64,
+    },
+    Skipped {
+        line: String,
+        reason: &'static str,
+    },
+}
 
 /// 导入结果：词条数、单字数、音节表
 struct Imported {
@@ -51,6 +67,8 @@ struct Imported {
     syllables: HashSet<String>,
     weight_source: String,
     source: String,
+    /// 读的时候跳过了哪些行（原来的行 + 为什么）：格式不对时这条最有用
+    skipped: Vec<(String, &'static str)>,
 }
 
 fn main() {
@@ -63,6 +81,19 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse()?;
     let started = Instant::now();
+
+    // ---- 英文词表：另一个库（english.db），跟词库那套表无关 ----
+    if !args.english.is_empty() {
+        let dest = if args.out_given {
+            args.out.clone()
+        } else {
+            pliers_engine::config::default_english_path()
+        };
+        let words = read_english_lists(&args.english)?;
+        pliers_engine::english::write_db(&dest, &words)?;
+        println!("英文词表：{} 个词 → {}", words.len(), dest.display());
+        return Ok(());
+    }
 
     println!(
         "rime 词库：{}",
@@ -95,6 +126,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     create_schema(&conn)?;
 
     let imported = import_rime(&conn, &args.rime, started)?;
+    report_skipped(&imported.skipped);
 
     // ---- 码表（五笔之类）：`词<TAB>码[<TAB>权重]` ----
     if let (Some(path), Some(scheme)) = (&args.table, &args.table_scheme) {
@@ -185,23 +217,45 @@ fn import_rime(
     let mut syllables = HashSet::new();
     let mut lines = 0usize;
     let mut exotic = 0usize;
+    let mut skipped: Vec<(String, &'static str)> = Vec::new();
     for path in &files {
-        for row in rime_rows(path)? {
-            let (_, code, weight) = row?;
-            max_weight = max_weight.max(weight);
-            for syl in code.split(' ') {
-                if usable_syllable(syl) {
-                    syllables.insert(syl.to_string());
-                } else {
-                    exotic += 1;
+        for row in rime_lines(path)? {
+            match row? {
+                ParsedLine::Row { code, weight, .. } => {
+                    max_weight = max_weight.max(weight);
+                    for syl in code.split(' ') {
+                        if usable_syllable(syl) {
+                            syllables.insert(syl.to_string());
+                        } else {
+                            exotic += 1;
+                        }
+                    }
+                    lines += 1;
                 }
+                ParsedLine::Skipped { line, reason } => skipped.push((line, reason)),
             }
-            lines += 1;
         }
     }
     if lines == 0 || max_weight == 0 {
-        return Err("这几个 .dict.yaml 里一行词条都没读到（格式不对？）".into());
+        return Err(format!(
+            "这几个文件里一行词条都没读到。\n\n\
+             rime 词库（.dict.yaml）的格式是这样的：\n\
+             \x20   ---                    ← YAML 头开始（这一段会跳过）\n\
+             \x20   name: mydict\n\
+             \x20   ...                    ← YAML 头结束\n\
+             \x20   你好\tni hao\t3000000    ← 词<TAB>拼音<TAB>权重（权重可省，默认 1）\n\
+             \x20   你\tni\t500000\n\
+             音节表也是从这些拼音码里收集的，所以必须有 --rime 这一份。\n\n\
+             {}",
+            match skipped.first() {
+                Some((line, reason)) =>
+                    format!("你给的文件里，第一行像词条的读出来是这样：\n  {line:?} —— {reason}"),
+                None => "（文件里一行非空内容都没有？）".to_string(),
+            }
+        )
+        .into());
     }
+
     let scale = RIME_MAX_WEIGHT / max_weight as f64;
     println!("  读到 {lines} 行，最大权重 {max_weight}，等比缩放 ×{scale:.2}");
     if exotic > 0 {
@@ -216,8 +270,10 @@ fn import_rime(
     let mut words = 0usize;
     let mut singles = 0usize;
     for path in &files {
-        for row in rime_rows(path)? {
-            let (text, code, weight) = row?;
+        for row in rime_lines(path)? {
+            let ParsedLine::Row { text, code, weight } = row? else {
+                continue; // 跳过的不算词条（第一遍已经报过了）
+            };
             let weight = ((weight as f64 * scale).round() as i64).max(1);
             if text.chars().count() == 1 {
                 singles += 1;
@@ -245,6 +301,7 @@ fn import_rime(
     Ok(Imported {
         words,
         singles,
+        skipped,
         syllables,
         weight_source: format!("rime 词库自带权重（等比缩放到上限 {RIME_MAX_WEIGHT:.0}）"),
         source: paths
@@ -293,7 +350,7 @@ fn has_ext(path: &Path, ext: &str) -> bool {
 ///
 /// 跳过空行、`#` 注释，以及 `---` 到 `...` 之间的 YAML 元信息。
 /// 码里带大写、数字、符号的行直接跳过（英文缩写、表情那些）
-fn rime_rows(path: &Path) -> Result<impl Iterator<Item = RimeRow>, Box<dyn std::error::Error>> {
+fn rime_lines(path: &Path) -> Result<impl Iterator<Item = RimeRow>, Box<dyn std::error::Error>> {
     let file = BufReader::with_capacity(1 << 20, File::open(path)?);
     let path = path.to_path_buf();
     let mut in_header = false;
@@ -311,20 +368,41 @@ fn rime_rows(path: &Path) -> Result<impl Iterator<Item = RimeRow>, Box<dyn std::
             in_header = false;
             return None;
         }
+        // YAML 头、空行、`#` 注释都是正常的，不算"跳过"
         if in_header || line.is_empty() || line.starts_with('#') {
             return None;
         }
         let mut parts = line.split('\t');
         let text = parts.next().unwrap_or("").trim();
-        let code = parts.next().unwrap_or("").trim();
+        let code = parts.next();
+        let skip = |reason: &'static str| {
+            Some(Ok(ParsedLine::Skipped {
+                line: line.to_string(),
+                reason,
+            }))
+        };
+        let Some(code) = code else {
+            return skip("只有一列：要 `词<TAB>拼音<TAB>权重`（用制表符分开）");
+        };
+        let code = code.trim();
+        if text.is_empty() {
+            return skip("第一列（词）是空的");
+        }
+        if code.is_empty() {
+            return skip("第二列（拼音码）是空的");
+        }
+        if !is_pinyin_code(code) {
+            return skip("第二列不像拼音码（要空格分开的小写音节，比如 `ni hao`）");
+        }
         let weight: i64 = parts
             .next()
             .and_then(|w| w.trim().parse().ok())
             .unwrap_or(1);
-        if text.is_empty() || !is_pinyin_code(code) {
-            return None;
-        }
-        Some(Ok((text.to_string(), code.to_string(), weight)))
+        Some(Ok(ParsedLine::Row {
+            text: text.to_string(),
+            code: code.to_string(),
+            weight,
+        }))
     });
     Ok(rows)
 }
@@ -364,6 +442,60 @@ fn usable_syllable(syllable: &str) -> bool {
 }
 
 /// 导入码表：每行 `词<TAB>码[<TAB>权重]`（rime 那种 .txt 码表就是这格式）
+/// 报一下"哪些行不像词条、为什么"。
+///
+/// 静默跳过是最坑的：文件里 90% 的行格式不对，用户只会看到"导入 300 条"，
+/// 完全不知道少了一批 —— 所以这里至少把前几行和原因贴出来
+fn report_skipped(skipped: &[(String, &'static str)]) {
+    if skipped.is_empty() {
+        return;
+    }
+    println!(
+        "  跳过 {} 行（不像 `词<TAB>拼音<TAB>权重`）：",
+        skipped.len()
+    );
+    for (line, reason) in skipped.iter().take(3) {
+        println!("    {line:?} —— {reason}");
+    }
+    if skipped.len() > 3 {
+        println!("    ……还有 {} 行", skipped.len() - 3);
+    }
+}
+
+/// 读 `--english` 给的词表（文件或目录），去重保序。
+///
+/// 解析规则跟引擎那边共用一份（`pliers_engine::english::parse_list`）：一行一个词，
+/// `#` 注释，只留纯小写字母、长度 ≥ 2；`词 频次` 这种两列的也认（只看第一列，顺序即优先级）
+fn read_english_lists(sources: &[PathBuf]) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let mut words: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for source in sources {
+        let files = if source.is_dir() {
+            let mut files: Vec<PathBuf> = std::fs::read_dir(source)?
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .filter(|path| path.extension().is_some_and(|ext| ext == "txt"))
+                .collect();
+            files.sort();
+            files
+        } else {
+            vec![source.clone()]
+        };
+        for file in files {
+            let text = std::fs::read_to_string(&file)
+                .map_err(|e| format!("读不了 {}：{e}", file.display()))?;
+            for word in pliers_engine::english::parse_list(&text) {
+                if seen.insert(word.clone()) {
+                    words.push(word);
+                }
+            }
+        }
+    }
+    if words.is_empty() {
+        return Err("词表是空的（一行一个词，`#` 注释）".into());
+    }
+    Ok(words)
+}
+
 fn import_table(
     conn: &Connection,
     path: &Path,
@@ -399,9 +531,13 @@ fn import_table(
 /// 命令行参数
 struct Args {
     out: PathBuf,
+    /// `--out` 是不是用户显式给的（没给的话，按模式取默认值：词库 → dict.db，英文 → english.db）
+    out_given: bool,
     rime: Vec<PathBuf>,
     table: Option<PathBuf>,
     table_scheme: Option<String>,
+    /// `--english`：英文词表（一行一个词），导成 english.db
+    english: Vec<PathBuf>,
 }
 
 impl Args {
@@ -409,9 +545,11 @@ impl Args {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
         let mut args = Self {
             out: PathBuf::from(format!("{home}/.local/share/pliers/dict.db")),
+            out_given: false,
             rime: Vec::new(),
             table: None,
             table_scheme: None,
+            english: Vec::new(),
         };
         let mut rest = std::env::args().skip(1);
         while let Some(flag) = rest.next() {
@@ -420,28 +558,51 @@ impl Args {
                     .ok_or_else(|| format!("{flag} 后面要跟一个路径"))
             };
             match flag.as_str() {
-                "--out" => args.out = PathBuf::from(value()?),
+                "--out" => {
+                    args.out = PathBuf::from(value()?);
+                    args.out_given = true;
+                }
                 "--rime" => args.rime.push(PathBuf::from(value()?)),
                 "--table" => args.table = Some(PathBuf::from(value()?)),
                 "--table-scheme" => args.table_scheme = Some(value()?),
+                "--english" => args.english.push(PathBuf::from(value()?)),
                 "--help" | "-h" => {
                     println!(
                         "用法：pliers-dict --rime <词库.yaml|目录> [--rime ...] [--out 词库]\n\
                          \x20     pliers-dict --table <码表> --table-scheme wubi [--out 词库]\n\
+                         \x20     pliers-dict --english <词表.txt|目录> [--out english.db]\n\
                          \n\
-                         --rime    rime 词库（.dict.yaml）。语料从哪来、怎么构建，见 docs/dictionary.md\n\
-                         --out     输出的 SQLite 词库（默认 ~/.local/share/pliers/dict.db）\n\
-                         --table   码表方案（五笔/郑码/仓颉）：每行 `词<TAB>码[<TAB>权重]`"
+                         三种输入，格式各是：\n\
+                         \n\
+                         --rime   rime 词库（.dict.yaml）。`---` 和 `...` 之间是 YAML 头（跳过），\n\
+                         \x20        之后每行 `词<TAB>拼音<TAB>权重`，拼音是空格分开的音节，权重可省：\n\
+                         \x20          你好\tni hao\t3000000\n\
+                         \x20          你\tni\t500000\n\
+                         \x20        给目录就读里面所有 .dict.yaml。音节表也从这些拼音里收集，\n\
+                         \x20        所以想打拼音就必须有这一份（语料从哪来见 docs/dictionary.md）\n\
+                         \n\
+                         --table  码表方案（五笔/郑码/仓颉）：每行 `词<TAB>码[<TAB>权重]`\n\
+                         \x20          你\tnin\n\
+                         \x20          好\tvbg\t200\n\
+                         \n\
+                         --english 英文候选词表：一行一个词（`#` 注释），按词频从高到低；\n\
+                         \x20        也认上游词频表那种 `词 次数`（只看第一列）：\n\
+                         \x20          hello\n\
+                         \x20          kubernetes\n\
+                         \n\
+                         --out    输出的 SQLite 文件（词库默认 ~/.local/share/pliers/dict.db，\n\
+                         \x20        英文词表默认 ~/.local/share/pliers/english.db）"
                     );
                     std::process::exit(0);
                 }
                 other => return Err(format!("不认识的参数 {other}").into()),
             }
         }
-        if args.rime.is_empty() && args.table.is_none() {
+        if args.rime.is_empty() && args.table.is_none() && args.english.is_empty() {
             return Err(
                 "要给 --rime <词库>（推荐：pliers dict build 会自动下语料）\n\
-                        或者 --table <码表> --table-scheme wubi"
+                        或者 --table <码表> --table-scheme wubi\n\
+                        或者 --english <英文词表>"
                     .into(),
             );
         }
@@ -488,7 +649,38 @@ QQ\tQQ\t10
         // 6 行词条：注释、YAML 头、`QQ QQ`（码不是纯小写）、空码那行都不算
         assert_eq!(imported.words, 6, "词条数不对");
         assert_eq!(imported.singles, 4, "单字数不对");
+        // 不像词条的那两行要**报出来**（带上原因），不能静默丢掉 ——
+        // 不然"怎么少了一批词"永远查不出来
+        let skipped: Vec<&str> = imported.skipped.iter().map(|(_, r)| *r).collect();
+        assert_eq!(skipped.len(), 2, "{:?}", imported.skipped);
+        assert!(skipped[0].contains("拼音码"), "{:?}", imported.skipped);
+        assert!(skipped[1].contains("拼音码"), "{:?}", imported.skipped);
         (dir, conn)
+    }
+
+    #[test]
+    fn 格式不对时报错要说清楚该怎么写() {
+        let dir = std::env::temp_dir().join(format!("pliers-badfmt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 一份"看起来是词表、其实不是 rime 词库"的文件：逗号分隔、没有拼音
+        std::fs::write(dir.join("bad.dict.yaml"), "hello,world\nfoo,bar\n").unwrap();
+        let out = dir.join("dict.db");
+        let db = pollster::block_on(Builder::new_local(&out.to_string_lossy()).build()).unwrap();
+        let conn = db.connect().unwrap();
+        create_schema(&conn).unwrap();
+
+        let message = match import_rime(&conn, std::slice::from_ref(&dir), Instant::now()) {
+            Ok(_) => panic!("这份文件不该导得进去"),
+            Err(e) => e.to_string(),
+        };
+        // 错误里要说清楚"应该长什么样"，还要把用户给的那一行贴出来
+        assert!(message.contains("词<TAB>拼音<TAB>权重"), "{message}");
+        assert!(message.contains("hello,world"), "{message}");
+        assert!(
+            message.contains("音节表"),
+            "得说清为什么 --rime 不能省：{message}"
+        );
     }
 
     fn 查(conn: &Connection, code: &str) -> Vec<(String, i64)> {

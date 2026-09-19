@@ -1,10 +1,20 @@
 //! 英文候选：打英文单词的时候给补全（`hel` + 空格 → `hello`）。
 //!
-//! 词表**编译进二进制**（`data/english.txt`，两万五千个词，按词频排好），不进 SQLite 词库：
+//! 词表放在**自己的一个 SQLite 文件**里：`~/.local/share/pliers/english.db`
+//! （表就一张：`english(word, weight)`），跟中文词库 `dict.db`、用户数据 `user.db`
+//! 各管各的、可以各自更新：
 //!
-//! * 它小（192 KB）、只读、一次装好永远不变 —— 没有 schema、没有下载、没有 WAL 那一套；
-//! * 查法是"扫一遍看看谁以这串字母开头"，不需要索引，也不该为了它去动词库的表结构；
-//! * 用户想加自己的词，配置里指一个 txt 就行（`[english] path`），不用重新导入词库。
+//! 1. `english.db` —— 运行时用的就是它。`pliers --init` 装一份，
+//!    `pliers english fetch` 从 GitHub Release 更新（约 60 KB 的资产，能**单独更新**，
+//!    不用重装输入法、也不用重下 27 MB 的中文词库）；
+//! 2. `[english] extra` 指的文件（**文本**，一行一个词）—— 你自己额外加的词，排在最前面；
+//! 3. `data/english.txt`（`include_str!` 编译进来那份文本）—— **只当兜底**：
+//!    `english.db` 没装/读不了的时候用它，保证"装完就能用、离线也能用"。
+//!
+//! 关键的一条：**只在启动时把 `english.db` 读进内存**（两万五千行，几十毫秒），
+//! 每次按键还是在这份内存词表上扫一遍（实测 57 µs）——
+//! 用 SQLite 当"存储和发布格式"，不等于把每次按键的查询交给 SQL。
+//! 那种"宽前缀 + 按权重排序"的查询正是这个项目一开始就绕开的坑（见 docs/internals.md）。
 //!
 //! **什么时候轮得到英文候选不归这里管**：引擎先问方案"这串字母还像不像在打拼音"
 //!（[`crate::Scheme::looks_pinyin`](crate::scheme::Scheme::looks_pinyin)），不像才来查这份词表。
@@ -13,40 +23,145 @@
 
 use std::path::Path;
 
-/// 内置词表。`include_str!` = 编译进去，装好就有，不联网也能用
-const BUILTIN: &str = include_str!("../data/english.txt");
+use turso::Builder;
+
+/// `english.db` 的表结构。导入工具（`pliers-dict --english`）和运行时共用这一份 DDL
+///
+/// `weight` 是按词频顺序折算出来的分数（越大越靠前）：第 0 名 = 总词数 ×1000，
+/// 往后每名少 1000。现在读的时候只按它排序，留着它是为了这个库能当"能查的库"用
+///（想按权重筛、想以后跟用户词频一起算，都有个字段可用）
+pub const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS english (
+    word   TEXT PRIMARY KEY,
+    weight INTEGER NOT NULL
+)";
+
+/// 兜底词表。`include_str!` = 编译进去：外部那份没装/读不了的时候用它，
+/// 保证"装完就能用、离线也能用"。`pliers --init` 装的那份就是从它写出去的
+pub const BUILTIN: &str = include_str!("../data/english.txt");
 
 /// 词表里最短的词。一个字母的词（`a`/`i`）不收：一个字母跟拼音的"首字母联想"
 /// 完全分不开，运行时也不会拿一个字母去匹配英文（见 [`Words::candidates`]）
 const MIN_LEN: usize = 2;
 
-/// 英文词表：按优先级排好的一串词（用户自己那份在前，内置的在后）
+/// 这份词表是从哪儿来的（`pliers status` / `pliers english status` 报给人看）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Source {
+    /// 外部那个库（正常情况：`~/.local/share/pliers/english.db`，`pliers english fetch` 更新它）
+    Db(std::path::PathBuf),
+    /// 二进制里那份兜底文本（库没装 / 读不了）
+    Builtin,
+}
+
+impl Source {
+    /// 给命令行看的一句话
+    pub fn label(&self) -> String {
+        match self {
+            Source::Db(path) => path.display().to_string(),
+            Source::Builtin => "内置兜底那份".to_string(),
+        }
+    }
+}
+
+/// 把一份词表写成 `english.db`（`pliers --init` 离线装兜底那份、以及导入工具都用它）。
+///
+/// `words` 的顺序就是优先级：第 0 名最靠前。表建好之后整批插进去
+pub fn write_db(path: &Path, words: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    // 从零开始：旧库（连它的 -wal / -shm）直接扔掉，免得混进旧词
+    for extra in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{extra}", path.display()));
+    }
+    let db = pollster::block_on(Builder::new_local(&path.to_string_lossy()).build())?;
+    let conn = db.connect()?;
+    pollster::block_on(conn.execute(SCHEMA, ()))?;
+    let total = words.len() as i64;
+    let mut stmt = pollster::block_on(
+        conn.prepare("INSERT OR REPLACE INTO english (word, weight) VALUES (?1, ?2)"),
+    )?;
+    pollster::block_on(conn.execute("BEGIN", ()))?;
+    for (index, word) in words.iter().enumerate() {
+        let weight = (total - index as i64) * 1000;
+        pollster::block_on(stmt.execute(turso::params![word.as_str(), weight]))?;
+    }
+    drop(stmt);
+    pollster::block_on(conn.execute("COMMIT", ()))?;
+    // 把 WAL 并回主库：这个文件是要被**拷来拷去**的（打包资产、换机器、审核一份），
+    // 只拷 .db 而落下 -wal 就会拿到一个空的库 —— 词库那边踩过同一个坑。
+    // 这条 PRAGMA 会回一行结果，得用 query 读掉（execute 会报 unexpected row）
+    {
+        let mut stmt = pollster::block_on(conn.prepare("PRAGMA wal_checkpoint(TRUNCATE)"))?;
+        let mut rows = pollster::block_on(stmt.query(()))?;
+        while pollster::block_on(rows.next())?.is_some() {}
+    }
+    Ok(())
+}
+
+/// 从一个 `english.db` 里把词读出来（按权重从高到低 = 词频从高到低）。
+/// 表缺了 / 库坏了都返回错误，调用方会退回兜底那份
+pub fn read_db(path: &Path) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let db = pollster::block_on(Builder::new_local(&path.to_string_lossy()).build())?;
+    let conn = db.connect()?;
+    let mut stmt =
+        pollster::block_on(conn.prepare("SELECT word FROM english ORDER BY weight DESC"))?;
+    let mut rows = pollster::block_on(stmt.query(()))?;
+    let mut words = Vec::with_capacity(26_000);
+    while let Some(row) = pollster::block_on(rows.next())? {
+        if let turso::Value::Text(word) = row.get_value(0)? {
+            words.push(word);
+        }
+    }
+    Ok(words)
+}
+
+/// 英文词表：按优先级排好的一串词（自己额外加的在前，主词表在后）
 pub struct Words {
     words: Vec<String>,
+    source: Source,
 }
 
 impl Words {
-    /// 只有内置词表
+    /// 只有兜底词表
     pub fn builtin() -> Self {
-        Self::load(None)
+        Self::load(None, None)
     }
 
-    /// 内置词表 + 用户自己的那份（`extra` 里的词排在前面）。
+    /// `main_db`（`english.db`，没有/读不了就用二进制里那份兜底）
+    /// + `extra`（自己额外加的文本词表，排前面）。
     ///
-    /// 自己那份读不了（路径写错、没权限）不该让输入法起不来 —— 吼一句，然后只用内置的
-    pub fn load(extra: Option<&Path>) -> Self {
-        let mut words = Vec::with_capacity(26_000);
+    /// 两个都读不了都不该让输入法起不来：库读不了 → 退回兜底那份；`extra` 读不了 → 吼一句
+    pub fn load(main_db: Option<&Path>, extra: Option<&Path>) -> Self {
+        let (base, source) = match main_db {
+            Some(path) if path.exists() => match read_db(path) {
+                Ok(words) if !words.is_empty() => (words, Source::Db(path.to_path_buf())),
+                Ok(_) => {
+                    eprintln!(
+                        "pliers: 英文词表 {} 是空的（先用内置那份顶着）",
+                        path.display()
+                    );
+                    (parse_list(BUILTIN), Source::Builtin)
+                }
+                Err(e) => {
+                    eprintln!(
+                        "pliers: 读不了英文词表 {}：{e}（先用内置那份顶着）",
+                        path.display()
+                    );
+                    (parse_list(BUILTIN), Source::Builtin)
+                }
+            },
+            _ => (parse_list(BUILTIN), Source::Builtin),
+        };
+
+        let mut words = Vec::with_capacity(base.len() + 512);
         if let Some(path) = extra {
             match std::fs::read_to_string(path) {
-                Ok(text) => words.extend(parse(&text)),
-                Err(e) => eprintln!(
-                    "pliers: 读不了英文词表 {}：{e}（只用内置的）",
-                    path.display()
-                ),
+                Ok(text) => words.extend(parse_list(&text)),
+                Err(e) => eprintln!("pliers: 读不了自己加的英文词 {}：{e}", path.display()),
             }
         }
-        words.extend(parse(BUILTIN));
-        Self { words }
+        words.extend(base);
+        Self { words, source }
     }
 
     /// 词表里有多少词（`pliers status` 报数用）
@@ -56,6 +171,11 @@ impl Words {
 
     pub fn is_empty(&self) -> bool {
         self.words.is_empty()
+    }
+
+    /// 这份词表是从哪儿来的
+    pub fn source(&self) -> &Source {
+        &self.source
     }
 
     /// 以 `prefix`（小写字母）开头的词，最多 `limit` 个，按优先级从高到低。
@@ -84,7 +204,7 @@ impl Words {
 ///
 /// 也认 `词 次数` 这种词频表（上游就是这格式）—— 只取第一列，顺序就是优先级。
 /// 只留纯小写字母、长度 ≥ [`MIN_LEN`] 的词（别的匹配不上：输入法只认 a-z）
-fn parse(text: &str) -> Vec<String> {
+pub fn parse_list(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in text.lines() {
         let line = line.trim();
@@ -165,6 +285,73 @@ mod tests {
     }
 
     #[test]
+    fn 主词表文件不存在就退回兜底那份() {
+        let words = Words::load(Some(Path::new("/nonexistent/english.txt")), None);
+        assert_eq!(words.source(), &Source::Builtin);
+        assert!(words.len() > 20_000, "兜底那份该是完整的");
+        assert_eq!(words.candidates("hello", 1), ["hello"]);
+    }
+
+    #[test]
+    fn 主词表库存在就用它() {
+        let dir = std::env::temp_dir().join(format!("pliers-main-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("english.db");
+        let list: Vec<String> = ["alpha", "beta", "gamma"]
+            .iter()
+            .map(|w| w.to_string())
+            .collect();
+        write_db(&path, &list).unwrap();
+
+        let words = Words::load(Some(&path), None);
+        assert_eq!(words.source(), &Source::Db(path.clone()));
+        assert_eq!(words.len(), 3, "外部那个库说了算，不再掺兜底那些");
+        assert_eq!(words.candidates("al", 5), ["alpha"]);
+        assert!(words.candidates("hello", 5).is_empty());
+        // 一个字母不掺和（"首字母联想"归拼音），两个字母起才给
+        assert!(words.candidates("a", 5).is_empty());
+        assert_eq!(words.candidates("be", 5), ["beta"]);
+    }
+
+    #[test]
+    fn 权重按名次折算() {
+        let dir = std::env::temp_dir().join(format!("pliers-weight-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("english.db");
+        let list: Vec<String> = ["first", "second", "third"]
+            .iter()
+            .map(|w| w.to_string())
+            .collect();
+        write_db(&path, &list).unwrap();
+        let db = pollster::block_on(Builder::new_local(&path.to_string_lossy()).build()).unwrap();
+        let conn = db.connect().unwrap();
+        let mut stmt = pollster::block_on(
+            conn.prepare("SELECT word, weight FROM english ORDER BY weight DESC"),
+        )
+        .unwrap();
+        let mut rows = pollster::block_on(stmt.query(())).unwrap();
+        let mut got = Vec::new();
+        while let Some(row) = pollster::block_on(rows.next()).unwrap() {
+            let (turso::Value::Text(word), turso::Value::Integer(weight)) =
+                (row.get_value(0).unwrap(), row.get_value(1).unwrap())
+            else {
+                panic!("列类型不对");
+            };
+            got.push((word, weight));
+        }
+        assert_eq!(
+            got,
+            [
+                ("first".to_string(), 3000),
+                ("second".to_string(), 2000),
+                ("third".to_string(), 1000)
+            ]
+        );
+    }
+
+    #[test]
     fn 自己那份词表排在前面() {
         let dir = std::env::temp_dir().join(format!("pliers-english-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -176,7 +363,7 @@ mod tests {
         )
         .unwrap();
 
-        let words = Words::load(Some(&path));
+        let words = Words::load(None, Some(&path));
         // 自己那份排前面：hello 在内置表里本来排第 3，现在第一
         assert_eq!(words.candidates("hel", 3)[0], "hello");
         // 同一个词在两份表里都有，只出一个（dedup）
@@ -188,10 +375,10 @@ mod tests {
     }
 
     #[test]
-    fn 词表读不了就只用内置的() {
-        // 路径写错：不 panic，内置词表照旧能用
-        let words = Words::load(Some(Path::new("/nonexistent/words.txt")));
+    fn 自己那份读不了也不影响主词表() {
+        let words = Words::load(None, Some(Path::new("/nonexistent/words.txt")));
         assert!(words.len() > 20_000);
+        assert_eq!(words.source(), &Source::Builtin);
         assert_eq!(words.candidates("hello", 1), ["hello"]);
     }
 

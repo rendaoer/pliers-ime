@@ -66,6 +66,9 @@ LOGS="$(mktemp -d)"
 # 每个场景一个全新的空文件 —— 既不会动你自己那份 user.db，
 # 也不会让上一个场景选过的词把候选顺序顶乱
 users() { echo "$LOGS/$1-user.db"; }
+# 英文词表也是独立文件：指向一个不存在的路径，引擎就退回二进制里那份兜底
+#（这样测试既不看你自己那份、结果也稳定）
+english() { echo "$LOGS/$1-english.txt"; }
 pass=0
 fail=0
 
@@ -79,7 +82,8 @@ run_control() {
     python3 tools/mock_compositor.py "$sock" "nihc " 你好 control >"$log" 2>&1 &
     local mock=$!
     sleep 0.4
-    env PLIERS_DICT="$DICT" PLIERS_USER_DB="$(users control)" PLIERS_CONFIG="$CFG" \
+    env PLIERS_DICT="$DICT" PLIERS_USER_DB="$(users control)" \
+        PLIERS_ENGLISH="$(english control)" PLIERS_CONFIG="$CFG" \
         PLIERS_SOCKET="$ctl" WAYLAND_DISPLAY="$sock" \
         timeout 30 ./target/debug/pliers >>"$log" 2>&1 &
     local ime=$!
@@ -158,7 +162,8 @@ TOML
     python3 tools/mock_compositor.py "$sock" "nihc " 你好 watch >"$log" 2>&1 &
     local mock=$!
     sleep 0.4
-    env PLIERS_DICT="$DICT" PLIERS_USER_DB="$(users watch)" PLIERS_CONFIG="$cfg" \
+    env PLIERS_DICT="$DICT" PLIERS_USER_DB="$(users watch)" \
+        PLIERS_ENGLISH="$(english watch)" PLIERS_CONFIG="$cfg" \
         PLIERS_SOCKET="$ctl" WAYLAND_DISPLAY="$sock" \
         timeout 30 ./target/debug/pliers >>"$log" 2>&1 &
     local ime=$!
@@ -210,7 +215,8 @@ run() { # run <名字> <按键> <期望提交> <模式> [额外环境变量]
     MOCK_PNG="$png" python3 tools/mock_compositor.py "$SOCK" "$keys" "$expect" "$mode" >"$log" 2>&1 &
     local mock=$!
     sleep 0.4
-    env PLIERS_DICT="$dict" PLIERS_USER_DB="$(users "$name")" PLIERS_CONFIG="$CFG" $extra \
+    env PLIERS_DICT="$dict" PLIERS_USER_DB="$(users "$name")" PLIERS_ENGLISH="$(english "$name")" \
+        PLIERS_CONFIG="$CFG" $extra \
         WAYLAND_DISPLAY="$SOCK" timeout 30 ./target/debug/pliers >>"$log" 2>&1
     wait "$mock"
 

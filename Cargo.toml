@@ -13,6 +13,16 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/rendaoer/pliers-ime"
 keywords = ["input-method", "wayland", "ime", "pinyin", "chinese"]
 
+# 发布版的编译选项。默认的 release 会留着符号表、也不做跨 crate 优化，
+# 实测（turso 这个依赖树）：22.9 MB → 13.9 MB
+#   strip          去掉符号表，省 ~4.6 MB（二进制里没人看那些名字）
+#   lto + cu=1     跨 crate 内联、整个程序当一个编译单元，省 ~4 MB
+# 代价是编译慢一点（~1 分钟 → ~3 分钟），`cargo install` 装的用户也吃这一份
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
 [workspace.dependencies]
 wayland-client = "0.31"
 wayland-protocols-misc = { version = "0.3", features = ["client"] }

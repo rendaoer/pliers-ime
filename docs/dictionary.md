@@ -72,6 +72,10 @@ rime 词库的格式是 `词<TAB>拼音<TAB>权重`，拼音用空格分音节 �
 
 ## 自己构建
 
+（`pliers dict build` 会去调 `pliers-dict` 这个导入程序：`cargo install pliers-dict`，
+或者在仓库里 `cargo build --release -p pliers-dict`。用发布版装的话它是单独一个包，
+不会跟着 `pliers-ime` 一起装。）
+
 不用等 Release，也不用信任何人的二进制：
 
 ```bash

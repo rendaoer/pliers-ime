@@ -26,6 +26,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 自检那一步要真的跑一遍 `pliers`（用发布版能打开的词库才算合格），
+      # 而 pliers-ime 会链接 libxkbcommon —— Ubuntu runner 上默认没有这个开发包，
+      # 少了它链接直接失败：`rust-lld: error: unable to find library -lxkbcommon`。
+      # zstd / jq 是压缩资产和查语料版本用的（runner 一般自带，写在这儿不怕镜像变）
+      - name: 系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libxkbcommon-dev zstd jq
+
       - uses: dtolnay/rust-toolchain@stable
 
       - name: 缓存 cargo
@@ -65,6 +74,12 @@ jobs:
 
       - name: 压缩 + 记指纹
         run: |
+          # 再确认一次"资产是自包含的一个文件"（自检那一步跑过 pliers，可能碰过 -wal）
+          if [ -s dict.db-wal ]; then
+            echo "::error::dict.db-wal 里还有数据，压缩出来会是个残缺的库"
+            exit 1
+          fi
+          rm -f dict.db-wal dict.db-shm
           zstd -19 -T0 dict.db -o dict.db.zst
           sha256sum dict.db.zst > dict.db.zst.sha256
           ls -l dict.db dict.db.zst

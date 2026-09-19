@@ -121,6 +121,7 @@ fn fetch_dict(
         format!(
             "{e}\n\n\
              下载不到也没关系，自己构建一份就行：pliers dict build\n\
+             （那个命令要 pliers-dict：cargo install pliers-dict）\n\
              或者手动下载后放到：{}",
             dest.display()
         )
@@ -157,7 +158,8 @@ fn build_dict(dest: &Path, refresh: bool) -> Result<(), Box<dyn std::error::Erro
 
     let importer = importer_binary().ok_or(
         "找不到 pliers-dict（自己构建要它）\n\
-         先 `cargo build --release -p pliers-dict`，或者直接用它：\n\
+         装一个：cargo install pliers-dict\n\
+         在仓库里的话：cargo build --release -p pliers-dict，或者直接用：\n\
          \x20 cargo run -p pliers-dict --release -- --rime <语料目录> --out <词库路径>",
     )?;
     println!();

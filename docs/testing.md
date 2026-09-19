@@ -18,6 +18,9 @@ cargo test -p pliers-wayland  # 模式提示的超时、长按重复的节拍、
 cargo run                     # workspace 里默认就跑 pliers
 ```
 
+（源码构建需要 libxkbcommon 的开发包：Debian/Ubuntu `libxkbcommon-dev`、Arch `libxkbcommon`、
+Fedora `libxkbcommon-devel`。没装的话链接阶段会报 `unable to find library -lxkbcommon`。）
+
 然后把焦点放到输入框里，敲 `n i h a o` 再按空格。能不能用取决于**应用自己有没有
 实现 text-input 协议**：Firefox / GTK / Qt 应用都行，alacritty 0.17（基于 winit）
 实测也可以。

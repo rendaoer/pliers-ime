@@ -23,13 +23,18 @@ cargo run -- --init      # 装一份能用的：写配置 + 下载词库（几�
 cargo run                # 跑起来
 ```
 
+从源码构建要一个系统库：**libxkbcommon** 的开发包（Debian/Ubuntu 是 `libxkbcommon-dev`，
+Arch 是 `libxkbcommon`，Fedora 是 `libxkbcommon-devel`）—— 少了它链接会报
+`unable to find library -lxkbcommon`。用 `cargo install pliers-ime` 装的话，编的人是你自己，
+所以一样要装。
+
 （发到 crates.io 之后也可以直接装：`cargo install pliers-ime` —— 装出来的命令叫 `pliers`）
 
 然后把焦点放进输入框，敲 `n i h a o` 再按空格。能不能用取决于**应用自己有没有实现
 text-input 协议**：Firefox / GTK / Qt 应用都行，alacritty 0.17（基于 winit）实测也可以。
 
 词库默认用[白霜拼音 rime-frost](https://github.com/gaboolic/rime-frost)（约 100 万条，自带字频词频，
-多音字一行一个读音；资产 27 MB）。不想下载现成的、想自己从语料构建：`pliers dict build`；
+多音字一行一个读音；资产 27 MB）。不想下载现成的、想自己从语料构建：`cargo install pliers-dict` 之后 `pliers dict build`；
 换源或离线装：`PLIERS_DICT_URL=... pliers dict fetch --url file:///...`；
 看现在装的是哪份：`pliers dict status` —— 见 [docs/dictionary.md](docs/dictionary.md)。
 发布出来的词库资产按 GPL-3.0 分发（语料是 GPL-3.0 的），代码本身不受影响。

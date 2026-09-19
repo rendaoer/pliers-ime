@@ -33,7 +33,7 @@ jobs:
       - name: 系统依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libxkbcommon-dev zstd jq
+          sudo apt-get install -y --no-install-recommends libxkbcommon-dev zstd jq sqlite3
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -56,7 +56,9 @@ jobs:
               "https://raw.githubusercontent.com/gaboolic/rime-frost/master/cn_dicts/$f.dict.yaml"
           done
           echo "语料行数：$(cat corpus/*.dict.yaml | wc -l)"
-          echo "CORPUS_SHA=$(curl -fsSL https://api.github.com/repos/gaboolic/rime-frost/commits/master | jq -r .sha)" >> "$GITHUB_ENV"
+          # 带上 token：不带的话 runner 的共享 IP 偶尔会撞上 GitHub 的匿名限流，
+          # 语料版本就会记成空（Release 说明里那一栏靠它）
+          echo "CORPUS_SHA=$(curl -fsSL -H "Authorization: Bearer ${{ github.token }}" https://api.github.com/repos/gaboolic/rime-frost/commits/master | jq -r .sha)" >> "$GITHUB_ENV"
 
       - name: 构建
         run: cargo run --release -p pliers-dict -- --rime corpus --out dict.db
@@ -65,8 +67,10 @@ jobs:
       # 而且要能被 pliers 正常打开 —— 这一步能挡住"资产里少了一半数据"这种事
       - name: 自检
         run: |
-          if [ -s dict.db-wal ]; then
-            echo "::error::dict.db-wal 还有数据，说明没 checkpoint，发布出去会是个残缺的库"
+          # WAL 文件的前 32 字节是文件头：只有头、没有帧 = 没有"还没并回主库的数据"。
+          # 不能只看"文件非空"—— 打开过一次就会留下这个头（turso 也这样）
+          if [ -f dict.db-wal ] && [ "$(stat -c%s dict.db-wal)" -gt 32 ]; then
+            echo "::error::dict.db-wal 里有数据帧，说明没 checkpoint，发布出去会是个残缺的库"
             exit 1
           fi
           PLIERS_DICT="$PWD/dict.db" cargo run --release -p pliers-ime -- dict status | tee /tmp/status.txt
@@ -74,9 +78,12 @@ jobs:
 
       - name: 压缩 + 记指纹
         run: |
-          # 再确认一次"资产是自包含的一个文件"（自检那一步跑过 pliers，可能碰过 -wal）
-          if [ -s dict.db-wal ]; then
-            echo "::error::dict.db-wal 里还有数据，压缩出来会是个残缺的库"
+          # 自检那一步用 pliers 打开过词库，会留下一个只有头的 -wal（数据都在主库里）。
+          # 这里正式 checkpoint 一次：万一旁边的 -wal 里真有帧，也一并并回主库，
+          # 然后要求它归零 —— 资产必须是自包含的一个文件
+          sqlite3 dict.db "PRAGMA wal_checkpoint(TRUNCATE);"
+          if [ -f dict.db-wal ] && [ -s dict.db-wal ]; then
+            echo "::error::checkpoint 之后 dict.db-wal 还有数据，压缩出来会是个残缺的库"
             exit 1
           fi
           rm -f dict.db-wal dict.db-shm

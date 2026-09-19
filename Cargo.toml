@@ -5,7 +5,7 @@ members = ["crates/*"]
 default-members = ["crates/pliers-ime"]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 # 发布到 crates.io 必填。代码是 MIT/Apache 双许可；**词库资产**是另一回事
 #（它是 GPL-3.0 语料 rime-frost 的衍生作品，见 docs/dictionary.md）
@@ -33,6 +33,6 @@ xkbcommon = "0.7"
 # "all dependencies must have a version requirement specified"。
 # 注意 `version.workspace = true` 在这里不支持（cargo 只认字面量），
 # 所以改版本号时 [workspace.package] 和这三行要一起改
-pliers-engine = { version = "0.2.1", path = "crates/pliers-engine" }
-pliers-popup = { version = "0.2.1", path = "crates/pliers-popup" }
-pliers-wayland = { version = "0.2.1", path = "crates/pliers-wayland" }
+pliers-engine = { version = "0.3.0", path = "crates/pliers-engine" }
+pliers-popup = { version = "0.3.0", path = "crates/pliers-popup" }
+pliers-wayland = { version = "0.3.0", path = "crates/pliers-wayland" }

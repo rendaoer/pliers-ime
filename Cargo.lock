@@ -1305,7 +1305,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "pliers-dict"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "pliers-engine",
  "pollster",
@@ -1314,7 +1314,7 @@ dependencies = [
 
 [[package]]
 name = "pliers-engine"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "pollster",
  "serde",
@@ -1325,7 +1325,7 @@ dependencies = [
 
 [[package]]
 name = "pliers-ime"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "libc",
  "pliers-engine",
@@ -1334,7 +1334,7 @@ dependencies = [
 
 [[package]]
 name = "pliers-popup"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "ab_glyph",
  "fontdb",
@@ -1344,7 +1344,7 @@ dependencies = [
 
 [[package]]
 name = "pliers-wayland"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "libc",
  "pliers-engine",

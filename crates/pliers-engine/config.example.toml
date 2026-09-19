@@ -24,7 +24,7 @@ kind = "full-pinyin"
 # ao = "c"      # 把 ao 从 k 挪到 c（小鹤的位置）
 # zh = "v"
 
-# 码表在词库里的名字，只在 kind = "table" 时看。
+# 码表在词库里的名字，只在 kind = "wubi" 时看（郑码/仓颉就写它们的名字）。
 # 码表要用 pliers-dict 导进去：--table 码表.txt --table-scheme wubi
 # name = "wubi"
 

@@ -25,7 +25,7 @@ mod sentence;
 pub use config::{Config, EXAMPLE as EXAMPLE_CONFIG, SchemeConfig};
 pub use dict::Dict;
 pub use english::Words;
-pub use scheme::{Table, DoublePinyin, FullPinyin, Layout, Scheme};
+pub use scheme::{CodeTable, DoublePinyin, FullPinyin, Layout, Scheme};
 
 /// 空格（X11 keysym）
 pub const KEY_SPACE: u32 = 0x20;

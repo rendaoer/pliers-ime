@@ -40,10 +40,10 @@ fn help() -> String {
          \x20 改配置文件的（config set）和只改内存的（set）是两条路：前者留下来的东西\n\
          \x20 下次启动还在，后者重启即失效 —— 试手感用 set，定下来用 config set。\n\n\
          能 set 的项：\n\
-         \x20 scheme.kind           full-pinyin | double-pinyin | table\n\
+         \x20 scheme.kind           full-pinyin | double-pinyin | wubi\n\
          \x20 scheme.layout         natural | flypy | mspy | none   （双拼键位）\n\
          \x20 scheme.sentence       true | false                    （整句候选）\n\
-         \x20 scheme.name           <码表名>                        （kind = table 时）\n\
+         \x20 scheme.name           <码表名>                        （kind = wubi 时，默认 wubi）\n\
          \x20 dict.path             <词库文件>\n\
          \x20 dict.user_path        <用户数据文件>                  （选过的词/自己拼的句子）\n\
          \x20 dict.max_candidates   1-9\n\
@@ -316,7 +316,7 @@ fn layout_name(layout: &str) -> &str {
 fn status_lines(fields: &Fields) -> Vec<String> {
     let scheme = match fields.get("kind") {
         "double-pinyin" => format!("双拼（{}）", layout_name(fields.get("layout"))),
-        "table" => format!("码表（{}）", fields.get("name")),
+        "wubi" => format!("五笔（码表：{}）", fields.get("name")),
         _ => format!("全拼（整句候选{}）", on_off(fields.get("sentence"))),
     };
     let toggle = fields.get("toggle");
@@ -417,7 +417,7 @@ const ITEMS: &[(&str, &str, Kind, &str)] = &[
     (
         "scheme.kind",
         "输入方案",
-        Kind::Choice(&["full-pinyin", "double-pinyin", "table"]),
+        Kind::Choice(&["full-pinyin", "double-pinyin", "wubi"]),
         "kind",
     ),
     (
@@ -633,7 +633,7 @@ fn fields_from_config(config: &Config) -> Fields {
         pliers_engine::SchemeConfig::DoublePinyin {
             layout, sentence, ..
         } => ("double-pinyin", layout.as_str(), "", *sentence),
-        pliers_engine::SchemeConfig::Table { name } => ("table", "", name.as_str(), false),
+        pliers_engine::SchemeConfig::Wubi { name } => ("wubi", "", name.as_str(), false),
     };
     let dict = config.dict_path();
     let dict = match std::fs::metadata(&dict) {
@@ -676,7 +676,6 @@ fn fields_from_config(config: &Config) -> Fields {
         format!("english_path={}", config.english.path),
         format!("english_extra={}", config.english.extra),
         format!("english_source={}", config.english_path().display()),
-        format!("english_extra={}", config.english.extra),
         format!("config={}", pliers_engine::config::config_path().display()),
     ];
     Fields::parse(&fields.join("\t"))
@@ -934,11 +933,11 @@ mod tests {
     }
 
     #[test]
-    fn 全拼和码表也认得出来() {
+    fn 全拼和五笔也认得出来() {
         let full = Fields::parse("kind=full-pinyin\tsentence=false");
         assert!(status_lines(&full)[0].contains("全拼（整句候选关）"));
-        let table = Fields::parse("kind=table\tname=wubi");
-        assert!(status_lines(&table)[0].contains("码表（wubi）"));
+        let wubi = Fields::parse("kind=wubi\tname=wubi");
+        assert!(status_lines(&wubi)[0].contains("五笔（码表：wubi）"));
     }
 
     #[test]

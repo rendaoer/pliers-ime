@@ -23,9 +23,6 @@ pliers --init          # 写配置 + 下载词库
 | 只更新英文词表 | `pliers fetch english` |
 | 整套字典（两块都拿） | `pliers fetch all`（= `pliers fetch dict`，也可以不写种类） |
 | 哪个旧更新哪个 | `pliers update`（先比 Release 上的 sha256，一样就跳过） |
-| 只更新英文词表 | `pliers fetch english` |
-| 整套字典（两块都拿） | `pliers fetch all`（= `pliers fetch dict`，也可以不写种类） |
-| 哪个旧更新哪个 | `pliers update`（先比 Release 上的 sha256，一样就跳过） |
 | 自己下语料、自己构建 | `pliers dict build` |
 | 看现在用的是哪个库、多少词、什么来源 | `pliers dict status` |
 | 拿到词库路径（脚本用） | `pliers dict path` |
@@ -139,7 +136,7 @@ sort: by_weight
 ```
 
 要跟 `--table-scheme wubi` 一起用（这个名字就是词库里 `word.scheme` 的值，
-配置里 `[scheme] kind = "table"` + `name = "wubi"` 对得上它）。
+配置里 `[scheme] kind = "wubi"` + `name = "wubi"` 对得上它）。
 
 ### `--english`：英文候选词表
 
@@ -223,19 +220,6 @@ pliers-dict --rime ~/.cache/pliers/rime-frost \
 
 （顺手说一句：`pliers dict build` 只会导 `--rime` 那部分，码表得自己用 `pliers-dict` 加。）
 见[配置](config.md#五笔--码表方案)。
-
-## 字典是"总概念"：pinyin / wubi / english
-
-命令行里 **dict 指的是整套字典**，它按方案分成几块，各有各的来路：
-
-| 种类 | 存在哪 | 资产 | 怎么更新 |
-| --- | --- | --- | --- |
-| `pinyin` | `dict.db` 的 `word` 表（`scheme='pinyin'`） | `dict.db.zst` | `pliers fetch pinyin` |
-| `wubi` 等码表 | **同一个** `dict.db`（`scheme='wubi'`） | 没有单独资产 | 导入时跟语料一起导（见[码表方案](#码表方案五笔--郑码--仓颉)） |
-| `english` | 自己的 `english.db`（一张 `english(word, weight)` 表） | `english.db.zst` | `pliers fetch english` |
-
-所以 `pliers fetch all`（或不写种类）= 整套字典；`pliers update` = 看哪块不是最新的就更新哪块。
-`pliers dict status` 会把这几块一起报出来。
 
 ## 字典是"总概念"：pinyin / wubi / english
 

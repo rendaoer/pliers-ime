@@ -18,7 +18,7 @@ pliers --init-config        # 写到 ~/.config/pliers/config.toml，已存在就
 
 ```toml
 [scheme]
-kind = "full-pinyin"      # full-pinyin | double-pinyin | table
+kind = "full-pinyin"      # full-pinyin | double-pinyin | wubi
 
 [dict]
 # path = "~/.local/share/pliers/dict.db"
@@ -64,14 +64,14 @@ Error: "这套双拼键位缺韵母：ai an ang ei en eng ia ian iang iao ie in 
 （安 = `aj`、爱 = `ad`），Rime / fcitx5 / 搜狗那边习惯直接打全拼（安 = `an`、爱 = `ai`）——
 两种都收，按哪个习惯打都行（`ou` `en` `er` 本来就是全拼，重复的那个自动跳过）。
 
-### 五笔 / 码表方案
+### 五笔 / 码表方案（`kind = "wubi"`）
 
 五笔（以及郑码、仓颉这类码表方案）走 `table`：
 
 ```toml
 [scheme]
-kind = "table"
-name = "wubi"             # 词库里 word.scheme 用哪个名字
+kind = "wubi"             # 五笔（郑码/仓颉这类"键本身就是码"的方案也走这条）
+name = "wubi"             # 词库里 word.scheme 用哪个名字；就是 wubi 的话可以不写
 ```
 
 码表用 pliers-dict 的 `--table` 导入：`--table wubi.txt --table-scheme wubi`

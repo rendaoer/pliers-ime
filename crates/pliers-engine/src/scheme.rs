@@ -686,7 +686,7 @@ impl Scheme for DoublePinyin {
 
 // ---- 码表方案（五笔这类）-----------------------------------------------------
 
-/// 码表方案：键本身就是码，直接拿去查（五笔、郑码、仓颉……都是这个形状）。
+/// 五笔/码表方案：键本身就是码，直接拿去查（五笔、郑码、仓颉……都是这个形状）。
 ///
 /// 词库那张表有 `scheme` 字段，所以一套码表就是一批 `scheme = 'wubi'` 的行。
 /// 导入用 `pliers-dict --table 码表.txt --table-scheme wubi`。
@@ -694,11 +694,11 @@ impl Scheme for DoublePinyin {
 /// 注意：码表查询是**前缀**查询（打 `w` 要能出所有以 w 开头的字），
 /// 这是唯一会扫一大片的查询，码表很大时会慢。真要用起来得在导入时按前缀
 /// 预先算好 top-N —— 见 docs/pitfalls.md 的"已知不足"
-pub struct Table {
+pub struct CodeTable {
     name: String,
 }
 
-impl Table {
+impl CodeTable {
     pub fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -706,7 +706,7 @@ impl Table {
     }
 }
 
-impl Scheme for Table {
+impl Scheme for CodeTable {
     fn name(&self) -> &str {
         &self.name
     }
@@ -831,7 +831,7 @@ mod tests {
         assert!(!flypy.looks_pinyin("nih"), "还差一个键");
         assert!(!flypy.looks_pinyin("hello"), "解不出来的键");
         // 码表：敲什么都是码，不掺英文
-        assert!(Table::new("wubi").looks_pinyin("hello"));
+        assert!(CodeTable::new("wubi").looks_pinyin("hello"));
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //!
 //! ```toml
 //! [scheme]
-//! kind = "full-pinyin"          # full-pinyin | double-pinyin | table
+//! kind = "full-pinyin"          # full-pinyin | double-pinyin | wubi
 //!
 //! [dict]
 //! path = "~/.local/share/pliers/dict.db"
@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::dict::{Dict, Result};
-use crate::scheme::{DoublePinyin, FullPinyin, Layout, Scheme, Table};
+use crate::scheme::{CodeTable, DoublePinyin, FullPinyin, Layout, Scheme};
 use crate::{Mode, Settings, ToggleKeys};
 
 /// 默认配置文件路径（找不到就用内置默认值）
@@ -186,9 +186,16 @@ pub enum SchemeConfig {
         #[serde(default = "default_sentence")]
         sentence: bool,
     },
-    /// 码表方案：五笔、郑码、仓颉这类"键本身就是码"的
-    Table {
-        /// 词库里 `word.scheme` 用哪个名字（导入时 `--table-scheme` 指定的那个）
+    /// 五笔（以及郑码、仓颉这类"键本身就是码"的码表方案）
+    ///
+    /// 配置里写 `kind = "wubi"`；郑码/仓颉也走这条，只是把 `name` 换成词库里那套码表的名字。
+    /// 老配置里写的 `kind = "table"` 一样认（alias），但文档里不再这么叫了 ——
+    /// "table" 看不出是五笔
+    #[serde(alias = "table")]
+    Wubi {
+        /// 词库里 `word.scheme` 用哪个名字（导入时 `--table-scheme` 指定的那个）。
+        /// 默认就是 "wubi"：`kind = "wubi"` 一行就够
+        #[serde(default = "default_wubi_name")]
         name: String,
     },
 }
@@ -206,6 +213,10 @@ fn default_layout() -> String {
 
 fn default_sentence() -> bool {
     true
+}
+
+fn default_wubi_name() -> String {
+    "wubi".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -334,7 +345,7 @@ impl Config {
                 }
                 Box::new(DoublePinyin::new(layout, syllables, *sentence))
             }
-            SchemeConfig::Table { name } => Box::new(Table::new(name)),
+            SchemeConfig::Wubi { name } => Box::new(CodeTable::new(name)),
         })
     }
 
@@ -370,7 +381,7 @@ impl Config {
     /// | `scheme.kind` | `full-pinyin` / `double-pinyin` / `table` |
     /// | `scheme.layout` | `natural` / `flypy` / `mspy` / `none`（双拼键位） |
     /// | `scheme.sentence` | `true` / `false`（整句候选） |
-    /// | `scheme.name` | 码表名（`kind = "table"` 时用） |
+    /// | `scheme.name` | 码表名（`kind = "wubi"` 时用，默认 wubi） |
     /// | `dict.path` | 词库文件 |
     /// | `dict.user_path` | 用户数据文件（选过的词/自己拼的句子/拉黑的词） |
     /// | `dict.max_candidates` | 1–9（数字键选词） |
@@ -406,16 +417,16 @@ impl Config {
                         keys,
                         sentence,
                     },
-                    "table" => {
-                        // 码表方案要个名字（词库里 scheme 字段用哪个）：
-                        // 从别的方案切过来先默认 wubi，要改就用 scheme.name
+                    // 五笔（郑码/仓颉也走这条）。老名字 "table" 一样认
+                    "wubi" | "table" | "五笔" => {
+                        // 码表名字：从别的方案切过来先默认 wubi，要改就用 scheme.name
                         let name = match &self.scheme {
-                            SchemeConfig::Table { name } => name.clone(),
-                            _ => "wubi".to_string(),
+                            SchemeConfig::Wubi { name } => name.clone(),
+                            _ => default_wubi_name(),
                         };
-                        SchemeConfig::Table { name }
+                        SchemeConfig::Wubi { name }
                     }
-                    _ => return Err(bad("full-pinyin / double-pinyin / table")),
+                    _ => return Err(bad("full-pinyin / double-pinyin / wubi")),
                 };
             }
             "scheme.layout" => {
@@ -440,14 +451,14 @@ impl Config {
                 match &mut self.scheme {
                     SchemeConfig::FullPinyin { sentence }
                     | SchemeConfig::DoublePinyin { sentence, .. } => *sentence = flag,
-                    SchemeConfig::Table { .. } => {
-                        return Err("码表方案是「键本身就是码」，没有整句候选".into());
+                    SchemeConfig::Wubi { .. } => {
+                        return Err("五笔是「键本身就是码」，没有整句候选".into());
                     }
                 }
             }
             "scheme.name" => match &mut self.scheme {
-                SchemeConfig::Table { name } => *name = value.to_string(),
-                _ => return Err("scheme.name 只在码表方案（kind = \"table\"）里有意义".into()),
+                SchemeConfig::Wubi { name } => *name = value.to_string(),
+                _ => return Err("scheme.name 只在五笔（kind = \"wubi\"）里有意义".into()),
             },
             "dict.path" => {
                 if value.trim().is_empty() {
@@ -544,7 +555,7 @@ impl Config {
             SchemeConfig::FullPinyin { sentence } | SchemeConfig::DoublePinyin { sentence, .. } => {
                 *sentence
             }
-            SchemeConfig::Table { .. } => false,
+            SchemeConfig::Wubi { .. } => false,
         }
     }
 }
@@ -814,10 +825,10 @@ mod tests {
     fn 在线改配置_码表才有名字() {
         let mut config = Config::default();
         assert!(config.set("scheme.name", "wubi").is_err(), "全拼没有码表名");
-        config.set("scheme.kind", "table").unwrap();
-        assert!(matches!(&config.scheme, SchemeConfig::Table { name } if name == "wubi"));
+        config.set("scheme.kind", "wubi").unwrap();
+        assert!(matches!(&config.scheme, SchemeConfig::Wubi { name } if name == "wubi"));
         config.set("scheme.name", "cangjie").unwrap();
-        assert!(matches!(&config.scheme, SchemeConfig::Table { name } if name == "cangjie"));
+        assert!(matches!(&config.scheme, SchemeConfig::Wubi { name } if name == "cangjie"));
         assert!(
             config.set("scheme.layout", "flypy").is_err(),
             "码表没有键位"
@@ -992,7 +1003,7 @@ mod tests {
     fn 能配五笔码表() {
         let config = Config::parse("[scheme]\nkind = \"table\"\nname = \"wubi\"\n").unwrap();
         match &config.scheme {
-            SchemeConfig::Table { name } => assert_eq!(name, "wubi"),
+            SchemeConfig::Wubi { name } => assert_eq!(name, "wubi"),
             other => panic!("{other:?}"),
         }
     }

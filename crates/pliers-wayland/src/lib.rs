@@ -403,8 +403,8 @@ impl State {
             pliers_engine::SchemeConfig::DoublePinyin {
                 layout, sentence, ..
             } => ("double-pinyin", layout.clone(), String::new(), *sentence),
-            pliers_engine::SchemeConfig::Table { name } => {
-                ("table", String::new(), name.clone(), false)
+            pliers_engine::SchemeConfig::Wubi { name } => {
+                ("wubi", String::new(), name.clone(), false)
             }
         };
         [

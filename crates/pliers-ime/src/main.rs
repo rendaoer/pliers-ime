@@ -86,11 +86,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         // 遥控正在跑的那个实例。注意这里**不**碰合成器：
         // 起第二个输入法会把 seat 抢走，正在打字的人就被顶掉了
-        Some("status") if args.len() == 1 => return remote("status"),
-        Some("reload") if args.len() == 1 => return remote("reload"),
+        Some("status") if args.len() == 1 => {
+            return remote(
+                "status",
+                "没有实例在跑的话，看配置文件本身：pliers config show（想改就用 pliers config set）",
+            );
+        }
+        Some("reload") if args.len() == 1 => {
+            return remote(
+                "reload",
+                "没在跑就不用 reload —— 它启动时自然读配置（想改配置用 pliers config set）",
+            );
+        }
         // 不带参数 = 交互模式：上下选着改
         Some("set") if args.len() == 1 => return interactive(Target::Runtime),
-        Some("set") => return remote(&args.join(" ")),
+        // `set` 改的是**正在跑的那个实例**（内存），所以必须有实例；没有的话指条路：
+        // 同样这几项用 `pliers config set` 就能离线写进配置文件
+        Some("set") => {
+            let request = args.join(" ");
+            let hint = format!("想改配置文件（不需要实例在跑）：pliers config {request}");
+            return remote(&request, &hint);
+        }
         // 改配置文件（跟 set 区分开：这个会留下来）
         Some("config") => return config_command(&args[1..]),
         Some(other) => return Err(format!("不认识的参数 {other:?}（pliers --help 看看）").into()),
@@ -129,6 +145,15 @@ enum Reply {
 }
 
 /// 把一条命令发给正在跑的实例。`Err` = 根本没连上（没有实例在跑）
+/// 连不上实例时的补充说明。
+///
+/// 最容易踩的是"`pliers set` 和 `pliers config set` 长得太像"：
+/// 前者把命令发给**正在跑的那个进程**（改内存，重启就回去了），后者写**配置文件**（离线也能改）。
+/// 所以连不上时得把后者说出来，不然用户只会看到"它在跑吗？"
+fn offline_hint(message: &str, hint: &str) -> String {
+    format!("{message}\n\x20     {hint}")
+}
+
 fn ask(command: &str) -> Result<Reply, String> {
     let path = pliers_wayland::control::socket_path();
     match pliers_wayland::control::send(&path, command) {
@@ -216,8 +241,9 @@ fn config_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// 把一条命令发给实例、按结果说话。脚本用：出错就退出码 1
-fn remote(command: &str) -> Result<(), Box<dyn std::error::Error>> {
-    match ask(command)? {
+fn remote(command: &str, hint: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let answer = ask(command).map_err(|error| offline_hint(&error, hint))?;
+    match answer {
         Reply::Done(payload) => {
             print_reply(command, &payload);
             Ok(())
@@ -471,9 +497,16 @@ fn fancy(target: Target) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut fields = match target {
         Target::File => fields_from_config(&read_config()?),
-        Target::Runtime => match ask("status")? {
-            Reply::Done(payload) => Fields::parse(&payload),
-            Reply::Failed(message) => return Err(format!("没拿到现状：{message}").into()),
+        Target::Runtime => match ask("status") {
+            Ok(Reply::Done(payload)) => Fields::parse(&payload),
+            Ok(Reply::Failed(message)) => return Err(format!("没拿到现状：{message}").into()),
+            Err(error) => {
+                return Err(offline_hint(
+                    &error,
+                    "`pliers set` 改的是正在跑的实例；改配置文件用 `pliers config set`",
+                )
+                .into());
+            }
         },
     };
     println!("改的是{}：", target.label());
@@ -636,9 +669,16 @@ fn interactive(target: Target) -> Result<(), Box<dyn std::error::Error>> {
     let mut fields = match target {
         // 改文件：现状就从文件读（不需要有实例在跑）
         Target::File => fields_from_config(&read_config()?),
-        Target::Runtime => match ask("status")? {
-            Reply::Done(payload) => Fields::parse(&payload),
-            Reply::Failed(message) => return Err(format!("没拿到现状：{message}").into()),
+        Target::Runtime => match ask("status") {
+            Ok(Reply::Done(payload)) => Fields::parse(&payload),
+            Ok(Reply::Failed(message)) => return Err(format!("没拿到现状：{message}").into()),
+            Err(error) => {
+                return Err(offline_hint(
+                    &error,
+                    "`pliers set` 改的是正在跑的实例；改配置文件用 `pliers config set`",
+                )
+                .into());
+            }
         },
     };
     println!("改的是{}：", target.label());

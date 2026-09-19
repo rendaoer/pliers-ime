@@ -153,10 +153,14 @@ pliers reload                             # 手动让它重读一遍配置文件
 
 **`set` 和 `config set` 是两条路**，想清楚再敲：
 
-| | 改哪儿 | 什么时候失效 | 用途 |
-| --- | --- | --- | --- |
-| `pliers set …` | 只改内存里那份配置 | 重启就回去 | 试手感（"小鹤换微软试试"） |
-| `pliers config set …` | 写进 `~/.config/pliers/config.toml` | 不会失效 | 定下来（写的时候注释、空行、行尾注释都留着） |
+| | 改哪儿 | 需要实例在跑吗 | 什么时候失效 | 用途 |
+| --- | --- | --- | --- | --- |
+| `pliers set …` | 只改内存里那份配置 | **需要** —— 它就是把这个命令发给那个进程（Unix socket） | 重启就回去 | 试手感（"小鹤换微软试试"） |
+| `pliers config set …` | 写进 `~/.config/pliers/config.toml` | 不需要，**输入法没跑也能改** | 不会失效 | 定下来（写的时候注释、空行、行尾注释都留着） |
+
+没在跑却敲了 `pliers set …` 的话，它会说「连不上正在跑的输入法」并顺手提示你用
+`pliers config set …`（同名的 `pliers status` / `pliers reload` 也一样要实例 ——
+没实例时"现状"就是配置文件本身，`pliers config show` 直接看）
 
 **配置文件改了就自动生效**：跑着的实例每 0.7 秒看一眼文件的 mtime，发现变了就重读
 （`pliers config set`、`$EDITOR` 里保存、`echo >>` 都算），不用重启、也不用敲 `reload`。

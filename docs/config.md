@@ -66,19 +66,28 @@ Error: "这套双拼键位缺韵母：ai an ang ei en eng ia ian iang iao ie in 
 
 ### 五笔 / 码表方案（`kind = "wubi"`）
 
-五笔（以及郑码、仓颉这类码表方案）走 `table`：
+五笔（以及郑码、仓颉这类码表方案）走这条：
 
 ```toml
 [scheme]
 kind = "wubi"             # 五笔（郑码/仓颉这类"键本身就是码"的方案也走这条）
-name = "wubi"             # 词库里 word.scheme 用哪个名字；就是 wubi 的话可以不写
+name = "wubi"             # 码表在库里的名字；就是 wubi 的话可以不写
+
+[dict]
+wubi_path = "~/.local/share/pliers/wubi.db"   # 码表库；默认就是这个位置
 ```
 
-码表用 pliers-dict 的 `--table` 导入：`--table wubi.txt --table-scheme wubi`
-（每行 `词<TAB>码[<TAB>权重]`，rime 那种 .txt 码表就是这个格式）。全拼和码表**可以在同一个
-`dict.db` 里共存**（`word.scheme` 字段区分），但每次导入都会重建那个文件 ——
-想两套都有就在同一条命令里带上 `--rime`，见[词库](dictionary.md#码表方案五笔--郑码--仓颉)。
-仓库里**没有**带码表数据，所以这条路目前只有骨架 —— 见[已知不足](pitfalls.md#已知不足)。
+码表**在自己的一个库里**（跟拼音词库 `dict.db` 分开），用自己的码表构建：
+
+```bash
+pliers build wubi 我的五笔.txt                  # 每行 `词<TAB>码[<TAB>权重]`（rime 那种 .txt 就这格式）
+pliers build wubi 我的郑码.txt --scheme zhengma # 别的码表：名字要跟 scheme.name 对上
+```
+
+分开的好处：重导（或重新下载）拼音词库不会把五笔抹掉，反之也一样。
+`pliers status wubi` 看它的现状、`pliers path wubi` 拿路径；
+**仓库里没有码表数据**（各家的码不一样、许可也各不相同），所以得用你手上那份 ——
+见[词库](dictionary.md#码表方案五笔--郑码--仓颉)和[已知不足](pitfalls.md#已知不足)。
 
 ### 整句候选（全拼/双拼共用）
 
@@ -95,19 +104,22 @@ sentence = true           # 想要"只出词库里真有的词"就设 false
 
 ```toml
 [dict]
-path = "~/.local/share/pliers/dict.db"   # 词库（派生物，可以随时换/重建）
-user_path = "~/.local/share/pliers/user.db"  # 用户数据（选过的词/自己拼的句子/拉黑的词）
+path = "~/.local/share/pliers/dict.db"        # 拼音词库（派生物，可以随时换/重建）
+wubi_path = "~/.local/share/pliers/wubi.db"   # 码表库（五笔/郑码/仓颉，自己用码表构建）
+user_path = "~/.local/share/pliers/user.db"   # 用户数据（选过的词/自己拼的句子/拉黑的词）
 max_candidates = 9                       # 一页显示几个候选
 pool_size = 90                           # 一次准备多少个候选 = 最多能翻多少页（90 就是 10 页，得 ≥ max_candidates）
 ```
 
-`path` 和 `user_path` 都认 `~`；也可以整个用环境变量顶掉：
-`PLIERS_DICT=/path/to/dict.db`、`PLIERS_USER_DB=/path/to/user.db`。
+`path` / `wubi_path` / `user_path` 都认 `~`；也可以整个用环境变量顶掉：
+`PLIERS_DICT=/path/to/dict.db`、`PLIERS_WUBI=/path/to/wubi.db`、`PLIERS_USER_DB=/path/to/user.db`。
+**哪个库被打开由方案决定**：`scheme.kind = "wubi"` 时用 `wubi_path`，别的方案用 `path`。
 
-**词库和用户数据是两个文件**：换词库（`pliers fetch pinyin --force` / `pliers build pinyin`）
-只会动 `path`，`user_path` 里那些"你选过的词、你自己拼出来的句子、你按 Del 拉黑的词"
-不受影响；反过来想把输入法的记性清掉，删 `user_path` 那个文件就行，词库不用重装。
-两个文件内部用 SQLite 的 `ATTACH` 连起来，所以排序还是一条 SQL —— 见[词库](dictionary.md#表结构词库和用户数据是两个文件)。
+**词库、码表库、用户数据是三个文件**：换词库（`pliers fetch pinyin --force` / `pliers build pinyin`）
+只会动 `path`，`wubi_path` 和 `user_path` 里那些"你的五笔码表、你选过的词、你自己拼出来的句子、
+你按 Del 拉黑的词"都不受影响；反过来想把输入法的记性清掉，删 `user_path` 那个文件就行，
+两个库都不用重装。库和用户数据内部用 SQLite 的 `ATTACH` 连起来，所以排序还是一条 SQL ——
+见[词库](dictionary.md#表结构每个库一个文件用户数据单独一个)。
 
 ## 输入习惯（engine）
 
@@ -216,20 +228,22 @@ $ pliers set
 …
 
 ? 要改哪一项？
-    输入方案     double-pinyin      full-pinyin / double-pinyin / table
+    输入方案     double-pinyin      full-pinyin / double-pinyin / wubi
 ❯   双拼键位     flypy              natural / flypy / mspy / none
     整句候选     开                 true / false
     码表名       —                  手输
-    词库文件     /home/dao/.local/share/pliers/dict.db   手输
+    拼音词库文件 /home/dao/.local/share/pliers/dict.db   手输
     一页候选数   9                  1 / 2 / 3 / 4 / 5 / 6 / 7 / 8 / 9
     …
+    用户数据文件 /home/dao/.local/share/pliers/user.db   手输
+    码表库文件   /home/dao/.local/share/pliers/wubi.db   手输
     重新读配置文件
     看完整现状
   ↑↓ 选择 · Enter 确认 · q 退出
 ```
 
 选中一项之后：**有固定选项的**再给一个列表上下选，光标先停在现在这个值上（带绿点 ●）；
-**要手输的**（词库路径、池子深度、码表名）给一行输入框、预填现在的值。
+**要手输的**（三个文件路径、池子深度、码表名）给一行输入框、预填现在的值。
 中文按两列算宽度，所以列是对齐的；`NO_COLOR=1` 或重定向到文件时自动不上色。
 
 改完把结果和新的现状打在滚动历史里，回到列表时**光标停在你刚改的那项上** —— 连着调几项不用重新挪。

@@ -25,6 +25,7 @@ mod sentence;
 pub use config::{Config, EXAMPLE as EXAMPLE_CONFIG, SchemeConfig};
 pub use dict::Dict;
 pub use english::Words;
+pub use pinyin::SYLLABLES;
 pub use scheme::{CodeTable, DoublePinyin, FullPinyin, Layout, Scheme};
 
 /// 空格（X11 keysym）

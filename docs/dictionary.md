@@ -21,13 +21,14 @@ pliers --init          # 写配置 + 下载词库
 | 想干的事 | 命令 |
 | --- | --- |
 | 新机器装一份能用的 | `pliers --init` |
-| 只装（或重装）中文词库 | `pliers fetch pinyin [--force]` |
+| 只装（或重装）拼音词库 | `pliers fetch pinyin [--force]` |
 | 只更新英文词表 | `pliers fetch english` |
-| 整套字典（两块都拿） | `pliers fetch all`（也可以不写种类） |
+| 两个预构建的都要 | `pliers fetch all`（也可以不写种类） |
 | 哪个旧更新哪个 | `pliers update`（先比 Release 上的 sha256，一样就跳过） |
-| 自己下语料、自己构建 | `pliers build pinyin [--refresh]` |
-| 看现在用的是哪个库、多少词、什么来源 | `pliers status pinyin`（不给种类 = 连实例和英文一起看） |
-| 拿到词库路径（脚本用） | `pliers path dict` |
+| 自己下语料、自己构建拼音词库 | `pliers build pinyin [--refresh]` |
+| 用自己的码表建五笔库 | `pliers build wubi <码表.txt>` |
+| 看现在用的是哪个库、多少词、什么来源 | `pliers status pinyin`（不给种类 = 连实例和别的库一起看） |
+| 拿到某个库的路径（脚本用） | `pliers path dict` / `pliers path wubi` |
 | 手动下载一份放进去 | 放到 `pliers path dict` 打印的那个路径 |
 
 `--init` 和 `pliers fetch pinyin` 是从**仓库 Release 的资产**拿的：
@@ -142,8 +143,17 @@ sort: by_weight
 好	vbg	200
 ```
 
-要跟 `--table-scheme wubi` 一起用（这个名字就是词库里 `word.scheme` 的值，
-配置里 `[scheme] kind = "wubi"` + `name = "wubi"` 对得上它）。
+跟 `--table-scheme wubi` 一起用 —— 这个名字就是库里的 `word.scheme`，配置里
+`[scheme] kind = "wubi"` + `name = "wubi"` 对得上它。
+
+**它写出来的是自己的一个库**（默认 `~/.local/share/pliers/wubi.db`，`pliers build wubi`
+就是调这个）。跟拼音词库分开是故意的：码是另一套东西，各建各的、各换各的 ——
+重导（或下载一份新的）拼音词库不会把五笔一起抹掉。结构跟拼音词库一样
+（`word` / `syllable` / `meta` 三张表），所以两边共用同一套读写代码。
+
+```bash
+pliers-dict --table 我的五笔.txt --table-scheme wubi --out ~/.local/share/pliers/wubi.db
+```
 
 ### `--english`：英文候选词表
 
@@ -158,21 +168,18 @@ kubernetes
 只收纯小写字母、长度 ≥ 2 的词（一个字母跟拼音的首字母联想分不开）。
 写出来是 `english.db`（一张 `english(word, weight)` 表，权重按名次折算）。
 
-### 一起导：一个库里几套方案
+### 一次只导一种
 
-每次导入都是**重建输出文件**，所以想"拼音 + 五笔"都有，就在同一条命令里都给上：
-
-```bash
-pliers-dict --rime ~/.cache/pliers/rime-frost \
-            --table wubi.txt --table-scheme wubi \
-            --out ~/.local/share/pliers/dict.db
-```
-
-英文是**另一个库**（`english.db`），单独导：
+三种输入各写各的库（`dict.db` / `wubi.db` / `english.db`），所以分几次跑：
 
 ```bash
+pliers-dict --rime ~/.cache/pliers/rime-frost --out ~/.local/share/pliers/dict.db
+pliers-dict --table 我的五笔.txt --table-scheme wubi --out ~/.local/share/pliers/wubi.db
 pliers-dict --english 词表.txt --out ~/.local/share/pliers/english.db
 ```
+
+（以前拼音和码表能塞进同一个文件里，靠 `word.scheme` 区分；现在不行了 ——
+分开之后重导拼音不会碰到五笔，各自的文件也能各自备份、各自重建。）
 
 ## 自己构建
 
@@ -213,49 +220,61 @@ cargo run -p pliers-dict --release -- --rime cn_dicts/base.dict.yaml --rime cn_d
 
 ## 码表方案（五笔 / 郑码 / 仓颉）
 
-码表和拼音**可以放在同一个库里**，靠 `word.scheme` 那个字段区分（`pinyin` / `wubi` / …，
-`pliers status pinyin` 会分行数）。码表每行是 `词<TAB>码[<TAB>权重]`（rime 那种 .txt 码表就是这个格式）。
-
-注意**每次导入都是重建输出文件**（词库是派生物，旧库直接覆盖，用户数据在 `user.db` 里不受影响），
-所以想"拼音 + 五笔"都在，就在同一条命令里把两种语料都给上：
+码表在自己的一个库里：`~/.local/share/pliers/wubi.db`（`pliers path wubi` 问路径）。
+一行 `词<TAB>码[<TAB>权重]`（rime 那种 .txt 码表就是这个格式），构建一条命令：
 
 ```bash
-pliers-dict --rime ~/.cache/pliers/rime-frost \
-            --table wubi.txt --table-scheme wubi \
-            --out ~/.local/share/pliers/dict.db
+pliers build wubi 我的五笔.txt                    # 默认 scheme 名字就叫 wubi
+pliers build wubi 我的郑码.txt --scheme zhengma   # 别的码表：名字跟配置里的 scheme.name 对上
 ```
 
-（顺手说一句：`pliers build pinyin` 只会导 `--rime` 那部分，码表得自己用 `pliers-dict` 加。）
+然后切过去（`pliers config set scheme.kind wubi`，或者写文件）：
+
+```toml
+[scheme]
+kind = "wubi"             # 码表方案（五笔/郑码/仓颉都走这条）
+name = "wubi"             # 跟构建时的 --table-scheme 对上
+```
+
+**为什么不是一个文件**：码和拼音是两套东西，谁也不用管谁 —— 重导拼音词库
+（或者 `pliers fetch pinyin --force` 下载一份新的）不会把五笔抹掉，反过来也一样；
+两个文件各自备份、各自重建。代价是"改一行码表也要重导整个 `wubi.db`"（几 MB 的码表，
+几秒的事）。
+
+`pliers status wubi` 看这个库的现状，`pliers path wubi` 拿路径。
+**仓库里没有码表数据**（各家的码不一样、许可也各不相同），得用你手上那份 ——
 见[配置](config.md#五笔--码表方案)。
 
 ## 字典是"总概念"：pinyin / wubi / english
 
-命令行里 **dict 指的是整套字典**，它按方案分成几块，各有各的来路：
+命令行里 **dict 指的是整套字典**，它按方案分成几块，**各有各的文件、各有各的来路**：
 
 | 种类 | 存在哪 | 资产 | 怎么更新 |
 | --- | --- | --- | --- |
-| `pinyin` | `dict.db` 的 `word` 表（`scheme='pinyin'`） | `dict.db.zst` | `pliers fetch pinyin` |
-| `wubi` 等码表 | **同一个** `dict.db`（`scheme='wubi'`） | 没有单独资产 | 导入时跟语料一起导（见[码表方案](#码表方案五笔--郑码--仓颉)） |
-| `english` | 自己的 `english.db`（一张 `english(word, weight)` 表） | `english.db.zst` | `pliers fetch english` |
+| `pinyin` | `dict.db`（`word` 表里 `scheme='pinyin'`） | `dict.db.zst` | `pliers fetch pinyin` / `pliers build pinyin` |
+| `wubi` 等码表 | `wubi.db`（自己的库，行是 `scheme='wubi'` 这种） | 没有资产（各家码表不同） | `pliers build wubi <码表.txt>` |
+| `english` | `english.db`（一张 `english(word, weight)` 表） | `english.db.zst` | `pliers fetch english` / `pliers build english` |
 
-所以 `pliers fetch all`（或不写种类）= 整套字典；`pliers update` = 看哪块不是最新的就更新哪块。
-`pliers status pinyin` 会把这几块一起报出来。
+所以 `pliers fetch all`（或不写种类）= 两个预构建的资产；`pliers update` = 看哪块不是最新的就更新哪块。
+`pliers status` 不带种类 = 正在跑的实例 + 每个库的现状（码表库没建就不占地方，
+`pliers status wubi` 随时能单独看）。
 
-## 表结构：词库和用户数据是**两个文件**
+## 表结构：每个库一个文件，用户数据单独一个
 
 | 文件 | 里面有什么 | 谁写的 |
 | --- | --- | --- |
-| `~/.local/share/pliers/dict.db`（86 MB） | `word` 词条 + 权重、`syllable` 音节表、`meta` 来源 | 导入工具（`pliers-dict`） |
+| `~/.local/share/pliers/dict.db`（86 MB） | 拼音：`word` 词条 + 权重、`syllable` 音节表、`meta` 来源 | 导入工具（`pliers-dict --rime`） |
+| `~/.local/share/pliers/wubi.db`（看码表多大） | 码表：同样的三张表，行是 `scheme='wubi'` 那种 | 导入工具（`pliers-dict --table`） |
 | `~/.local/share/pliers/user.db`（几十 KB） | `user_word` 选过多少次、`user_phrase` 你自己拼的整句、`user_hidden` 按 Del 拉黑的词 | 输入法运行时 |
 | `~/.local/share/pliers/english.db`（约 900 KB） | 英文候选词表（一张 `english(word, weight)` 表，25223 个词） | `pliers --init` 装，`pliers fetch english` 更新 |
 
 ```sql
--- dict.db：派生物，随时可以重新生成 / 下载覆盖
-word(scheme, code, text, weight)    -- 词库本体：scheme='pinyin' / 'wubi' / …
-syllable(syl)                       -- 412 个合法音节，切词用
-meta(key, value)                    -- 词库来源、权重来源、导入时间、词条数
+-- dict.db / wubi.db：派生物，随时可以重新生成 / 下载覆盖。两张库结构一模一样
+word(scheme, code, text, weight)    -- 词条本体（一个库里一种方案：pinyin 或 wubi）
+syllable(syl)                       -- 412 个合法音节，切词用（码表用不着，但结构保持一致）
+meta(key, value)                    -- 来源、权重来源、导入时间、词条数
 
--- user.db：你自己的东西，换词库不会碰它
+-- user.db：你自己的东西，换词库不会碰它。**两种库共用这一份**
 user_word(text, count, last_used)   -- 选过多少次（调频用）
 user_phrase(code, text, count, last_used)  -- 你自己分段拼出来的句子
 user_hidden(code, text)             -- 按 Del 删掉的词（黑名单，英文候选那条是 `#english`）
@@ -263,10 +282,11 @@ user_hidden(code, text)             -- 按 Del 删掉的词（黑名单，英文
 
 **为什么分成两个文件**：它们的生命周期完全不一样。词库 86 MB、是别人整理的数据、
 `pliers fetch pinyin --force` 和 `pliers build pinyin` 会把它整个换掉（导入工具是先把输出文件
-删了重建的）；用户数据只有几十 KB，是你自己的东西 —— 混在一个文件里，换一次词库就把
-"选过的词、自己拼的句子、拉黑的词"全丢了。分家之后 **`dict.db` 随便删、随便换**。
+删了重建的）；码表库是你自己那份码表导出来的，跟拼音无关；用户数据只有几十 KB，
+是你自己的东西 —— 混在一个文件里，换一次拼音词库就把"选过的词、自己拼的句子、
+拉黑的词"全丢了，五笔也会跟着没。分开之后**每个文件都随便删、随便换**。
 
-两个文件用 SQLite 的 `ATTACH` 连起来（turso 的 `experimental_attach`），所以排序还是
+库和用户数据用 SQLite 的 `ATTACH` 连起来（turso 的 `experimental_attach`），所以排序还是
 一句 SQL，不用把用户词频搬到内存里再排：
 
 ```sql
@@ -276,16 +296,21 @@ WHERE w.scheme = ?1 AND w.code = ?2
 ORDER BY score DESC LIMIT ?3
 ```
 
-* `scheme` 字段就是"多方案"的落点：一套方案一批行，互不干扰。一个库里可以同时有
-  `pinyin` 和 `wubi` 的条目（`pliers status pinyin` 会分行数）
+* `scheme` 字段是"这个库里是哪套方案"的标签：查词永远带 `WHERE scheme = ?`，
+  所以一个库里就算放了几套码也不会串（我们的构建是一条命令一套，一个库一种）
 * 权重 = 语料权重（缩放后）+ 用户选过的次数 ×100 万（最多算 50 次）。
   所以选过十次的词能压过绝大多数常用词，但压不过「的」「你」这种顶级高频词 ——
   避免误选一次就再也翻不了身
 * 选中的词会在 `Engine::pick()` 里写一笔 `user.user_word`，下次它自己就往前排了 ——
   这就是"用户使用频率权重"。`user_phrase` / `user_hidden` 的语义见[使用](usage.md#分段上屏--记性)
+* 用户数据是**两种库共用**的：记的是"你选过哪个词"，跟用哪套码无关 —— 拼音下选过的词，
+  切到五笔也照样排在前面
 * 升级上来的老库（用户表还混在词库里）会在第一次打开时**自动搬**到 `user.db`，
   终端上会打一句"把词库里的用户数据搬到了 …（N 条）"。两边都有数据的话不合并，
   免得替你乱做决定
+* **老布局的五笔不再读了**：以前 `scheme='wubi'` 的行是导在 `dict.db` 里的，
+  现在码表方案开的是 `wubi.db`。拿原来那份码表跑一次 `pliers build wubi <码表.txt>`
+  就行（拼音词库不用动），`pliers status wubi` 会提醒你还有多少老数据留在 `dict.db` 里
 
 ## 维护
 

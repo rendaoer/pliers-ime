@@ -4,8 +4,9 @@
 //!（pinyin / wubi / english），所以"哪个是种类"这件事只在这里判断一次 ——
 //! 以前每个子命令各写一份，结果同一个东西三种说法。
 
-/// 带值的选项：`--url X` 里的 `X` 不是位置参数（`--url=X` 只有一个词，不用管）
-const VALUE_FLAGS: &[&str] = &["url"];
+/// 带值的选项：`--url X` / `--scheme X` 里的 `X` 不是位置参数
+///（`--url=X` 只有一个词，不用管）
+const VALUE_FLAGS: &[&str] = &["url", "scheme"];
 
 /// 位置参数：种类、文件名这些，跳过所有 `--选项`（连带它的值）
 pub fn positional(args: &[String]) -> Vec<&str> {

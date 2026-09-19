@@ -141,7 +141,54 @@ pub fn build(refresh: bool) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `pliers status pinyin|wubi`：中文词库这一块现在是什么样
+/// `pliers build wubi <码表.txt>`：用自己的码表构建**码表库**（`wubi.db`）。
+///
+/// 码表是几 MB 的纯文本，各家的码还不一样（86 / 98 / 新世纪 / 极点…），所以没有预构建的
+/// 资产可下 —— 这一步就是"把你手上那份导进去"。`scheme` 是这批码在库里的名字，
+/// 也是配置里 `scheme.name` 要写的那个
+pub fn build_wubi(
+    table: Option<&str>,
+    scheme: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(table) = table else {
+        return Err("要给码表文件：pliers build wubi <码表.txt>\n\
+                    \x20     码表每行是 `词<TAB>码[<TAB>权重]`，比如：\n\
+                    \x20       你\tnin\n\
+                    \x20       好\tvbg\t200\n\
+                    \x20     （码表从哪来：你那套输入法/码表项目里那份 .txt，rime 的码表格式正好是这个）"
+            .into());
+    };
+    let scheme = scheme.map(str::to_string).unwrap_or_else(wubi_scheme_name);
+    let dest = wubi_path();
+    let importer = importer_binary().ok_or(
+        "找不到 pliers-dict（导入码表要它）\n\
+         装一个：cargo install pliers-dict\n\
+         在仓库里的话：cargo build --release -p pliers-dict",
+    )?;
+    println!(
+        "构建：{} --table {table} --table-scheme {scheme} --out {}",
+        importer.display(),
+        dest.display()
+    );
+    let status = std::process::Command::new(&importer)
+        .arg("--table")
+        .arg(table)
+        .arg("--table-scheme")
+        .arg(&scheme)
+        .arg("--out")
+        .arg(&dest)
+        .status()?;
+    if !status.success() {
+        return Err(format!("构建失败（退出码 {:?}）", status.code()).into());
+    }
+    println!();
+    describe_path(&dest)?;
+    println!();
+    println!("搞定 —— 重启输入法就生效；方案里要写 kind = \"wubi\"（码表名 {scheme:?}）");
+    Ok(())
+}
+
+/// `pliers status pinyin`：拼音词库这一块现在是什么样
 pub fn report() -> Result<(), Box<dyn std::error::Error>> {
     let dest = path();
     let user = user_path();
@@ -157,7 +204,7 @@ pub fn report() -> Result<(), Box<dyn std::error::Error>> {
         );
         return Ok(());
     }
-    if let Err(e) = contents(&dest, &user) {
+    if let Err(e) = contents(&dest, true) {
         // 输入法开着的时候词库被它独占（turso 是独占锁），读不进去很正常 ——
         // 这不是词库坏了，所以只说清楚原因，不当成错误
         println!("{}", row("内容", format!("读不了：{e}")));
@@ -172,16 +219,101 @@ pub fn report() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// `pliers status wubi`：码表库（五笔/郑码/仓颉）这一块 —— 它跟拼音词库是**两个文件**
+pub fn wubi_report() -> Result<(), Box<dyn std::error::Error>> {
+    let dest = wubi_path();
+    let how_big = size(&dest).unwrap_or_else(|| "还没有".to_string());
+    println!(
+        "{}",
+        row("码表库", format!("{}（{how_big}）", dest.display()))
+    );
+    if !dest.exists() {
+        println!(
+            "{}",
+            note("还没有 —— 用自己的码表构建一份（每行 `词<TAB>码[<TAB>权重]`）：")
+        );
+        println!("{}", note("pliers build wubi <码表.txt>"));
+        // 老布局：五笔的条目以前跟拼音挤在 dict.db 里（靠 word.scheme 分），现在不读了
+        if let Some(rows) = legacy_wubi_rows() {
+            println!(
+                "{}",
+                note(format!(
+                    "注意：{} 里还有 {rows} 条 scheme = \"wubi\" 的老数据，现在**不再读它**了 ——",
+                    path().display()
+                ))
+            );
+            println!(
+                "{}",
+                note("拿原来那份码表重新构建一次就有 wubi.db 了（拼音词库不用动）")
+            );
+        }
+        return Ok(());
+    }
+    // 用户数据不在这儿报：两个库共用同一个 user.db（记的是"你选过哪个词"），
+    // 中文词库那一块已经报过了
+    match contents(&dest, false) {
+        Ok(schemes) => {
+            let want = wubi_scheme_name();
+            if !schemes.iter().any(|(name, _)| name == &want) {
+                println!(
+                    "{}",
+                    note(format!(
+                        "里面没有 scheme = {want:?} 的行 —— 构建时的 --table-scheme 和配置里的 scheme.name 得对上"
+                    ))
+                );
+            }
+        }
+        Err(e) => {
+            println!("{}", row("内容", format!("读不了：{e}")));
+            println!(
+                "{}",
+                note("输入法正开着的话库被它独占着（用的是哪一份看实例那块的「词库」），退掉再看")
+            );
+        }
+    }
+    Ok(())
+}
+
+/// 配置里码表那套方案用的名字（`scheme.name`，默认 wubi）。
+/// 不是码表方案的话就用默认的 "wubi"
+pub fn wubi_scheme_name() -> String {
+    match Config::load().map(|config| config.scheme) {
+        Ok(pliers_engine::SchemeConfig::Wubi { name }) => name,
+        _ => "wubi".to_string(),
+    }
+}
+
+/// 老布局残留：拼音词库里还有多少 `scheme = "wubi"` 的行。
+/// 读不了（没这个库 / 被跑着的实例独占）就是 None
+fn legacy_wubi_rows() -> Option<i64> {
+    let dict = Dict::open(&path(), &user_path()).ok()?;
+    let stats = dict.stats().ok()?;
+    stats
+        .schemes
+        .iter()
+        .find(|(name, _)| name == "wubi")
+        .map(|(_, rows)| *rows)
+        .filter(|rows| *rows > 0)
+}
+
 /// 报一下这个库的体检结果：大小、词条数、来源、用户数据。
 /// `Dict::open` 本身就是校验 —— 表缺了、音节表空了都会报错
 fn describe_path(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", row("大小", size(path).unwrap_or_default()));
-    contents(path, &user_path())
+    contents(path, true)?;
+    Ok(())
 }
 
-/// 打开来数一数里面有什么（下载完 / 构建完用它验一遍）
-fn contents(path: &Path, user: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let dict = Dict::open(path, user)?;
+/// 打开来数一数里面有什么（下载完 / 构建完用它验一遍），返回每种方案多少行。
+///
+/// `with_user` = 要不要报用户数据那一行：码表库跟拼音库共用同一个 `user.db`，
+/// 同一次输出里报两遍没意义
+fn contents(
+    path: &Path,
+    with_user: bool,
+) -> Result<Vec<(String, i64)>, Box<dyn std::error::Error>> {
+    let user = user_path();
+    let dict = Dict::open(path, &user)?;
     let stats = dict.stats()?;
     println!(
         "{}",
@@ -203,11 +335,13 @@ fn contents(path: &Path, user: &Path) -> Result<(), Box<dyn std::error::Error>> 
     if let Some(freq) = dict.meta("freq") {
         println!("{}", row("权重", freq));
     }
-    println!(
-        "{}",
-        user_row(user, Some((stats.user_words, stats.user_phrases)))
-    );
-    Ok(())
+    if with_user {
+        println!(
+            "{}",
+            user_row(&user, Some((stats.user_words, stats.user_phrases)))
+        );
+    }
+    Ok(stats.schemes)
 }
 
 /// 用户数据那一行。词库读不进去（被跑着的实例独占）时至少把文件和大小报出来
@@ -238,6 +372,14 @@ pub fn path() -> PathBuf {
     Config::load()
         .map(|config| config.dict_path())
         .unwrap_or_else(|_| pliers_engine::config::default_dict_path())
+}
+
+/// 码表库（五笔/郑码/仓颉）文件：`dict.wubi_path`（认 `PLIERS_WUBI`）。
+/// 它跟拼音词库是**两个文件** —— 重导拼音不会碰到它
+pub fn wubi_path() -> PathBuf {
+    Config::load()
+        .map(|config| config.wubi_path())
+        .unwrap_or_else(|_| pliers_engine::config::default_wubi_path())
 }
 
 /// 语料缓存放 `~/.cache/pliers/rime-frost`（重装词库不用再下一遍几十 MB）

@@ -79,18 +79,22 @@ fn targets(what: &str) -> Result<Vec<&'static Asset>, String> {
             );
         }
         "wubi" => {
-            return Err("码表（五笔/郑码）没有单独的资产 —— 它跟拼音在**同一个** dict.db 里\n\
-                        \x20     （`word.scheme` 区分）。想加五笔得带上语料一起导入，见 docs/dictionary.md：\n\
-                        \x20     pliers-dict --rime <语料> --table 码表.txt --table-scheme wubi --out …"
-                .to_string());
+            return Err(
+                "五笔这类码表**没有**预构建的资产 —— 各家的码不一样（86 / 98 / 新世纪 / 极点…），\n\
+                 \x20     许可也各不相同。它有自己的库（wubi.db），用自己的码表建一份就行：\n\
+                 \x20     pliers build wubi <码表.txt>        # 每行 `词<TAB>码[<TAB>权重]`\n\
+                 \x20     （拼音词库不受影响：那是另一个文件 dict.db）"
+                    .to_string(),
+            );
         }
         other => {
             return Err(format!(
                 "不认识的种类 {other:?}（fetch 收这些）：\n\
-                 \x20     pinyin   中文词库（pinyin + wubi 都在这个库里，27 MB）\n\
-                 \x20     english  英文词表（约 500 KB）\n\
-                 \x20     all      整套字典（也可以不写）\n\
-                 \x20 想「哪个不是最新就更新哪个」用：pliers update"
+                 \x20     pinyin   拼音词库（dict.db，27 MB）\n\
+                 \x20     english  英文词表（english.db，约 500 KB）\n\
+                 \x20     all      两个预构建的都要（也可以不写）\n\
+                 \x20 想「哪个不是最新就更新哪个」用：pliers update\n\
+                 \x20 五笔码表没有资产可下，用 pliers build wubi <码表.txt> 自己建"
             ));
         }
     })
@@ -317,10 +321,10 @@ mod tests {
         // `dict` 是总概念，不是"整套"的另一种写法 —— 要把它指回 all
         let message = targets("dict").unwrap_err();
         assert!(message.contains("pliers fetch all"), "{message}");
-        // 码表没有单独资产，但要说清楚为什么、怎么办
+        // 码表：没有资产可下，要说清楚该怎么办（自己的码表 → 自己的库）
         let message = targets("wubi").unwrap_err();
-        assert!(message.contains("同一个"), "{message}");
-        assert!(message.contains("--table-scheme wubi"), "{message}");
+        assert!(message.contains("pliers build wubi"), "{message}");
+        assert!(message.contains("wubi.db"), "{message}");
         // 不认识的名字要把能用的列出来
         let message = targets("pinying").unwrap_err();
         assert!(message.contains("pinyin"), "{message}");

@@ -24,7 +24,9 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-cargo build -q || exit 1
+# pliers-dict 不在默认 members 里（`cargo build` 不会编它），
+# 但五笔那个场景要用它现搭一个码表库
+cargo build -q -p pliers-ime -p pliers-dict || exit 1
 
 # 测试自己的配置：不吃 ~/.config/pliers/config.toml 里用户改过的东西
 # （不然你把方案改成双拼，这套断言就全变了）
@@ -247,6 +249,29 @@ run shift          "a"       ""    shift         # 纯 Shift+A：4 个事件全�
 echo "== 英文候选（英文单词补全）=="
 # 只敲了 kuber，空格上屏的是补全后的 kubernetes —— 词表编译在二进制里，跟词库无关
 run englishword    "kuber "  kubernetes englishword
+
+echo "== 五笔（码表库是**另一个文件**）=="
+# 现搭一个码表库，配置里 kind = "wubi" 指向它。要是引擎还去开拼音的 dict.db，
+# 这里一个候选都出不来，直接 FAIL —— 这一条就是"两个库真的分家"的回归测试
+WUBI_DIR="$LOGS/wubi"
+mkdir -p "$WUBI_DIR"
+# 给三条：`nin` 精确命中「你」，`ninb` / `ninm` 是前缀命中另外两个 ——
+# 多几个候选，mock 才能靠"没选中的那些是浅色字"数出笔画像素来（只有一个候选时它数不出来）
+printf '你\tnin\n您\tninb\n宁\tninm\n好\tvbg\t200\n' >"$WUBI_DIR/五笔.txt"
+./target/debug/pliers-dict --table "$WUBI_DIR/五笔.txt" --table-scheme wubi \
+    --out "$WUBI_DIR/wubi.db" >"$WUBI_DIR/import.log" 2>&1 || {
+    echo "  码表库没建出来，见 $WUBI_DIR/import.log"; fail=$((fail + 1))
+}
+WUBI_CFG="$WUBI_DIR/config.toml"
+cat >"$WUBI_CFG" <<TOML
+[scheme]
+kind = "wubi"
+name = "wubi"
+
+[dict]
+wubi_path = "$WUBI_DIR/wubi.db"
+TOML
+run wubi           "nin "     你    active  "PLIERS_CONFIG=$WUBI_CFG PLIERS_WUBI=$WUBI_DIR/wubi.db"
 
 echo "== 长按重复 =="
 # 按住退格不放：合成器只报了 repeat_info，重复得输入法自己做 ——

@@ -33,9 +33,15 @@ pub fn config_path() -> PathBuf {
     base.join("pliers").join("config.toml")
 }
 
-/// 默认词库路径
+/// 默认词库路径（拼音）
 pub fn default_dict_path() -> PathBuf {
     data_dir().join("dict.db")
+}
+
+/// 默认的**码表库**路径（五笔/郑码/仓颉）。它跟拼音词库**分开一个文件**：
+/// 码跟拼音不是一回事，各建各的、各换各的 —— 重导拼音词库不会再抹掉五笔
+pub fn default_wubi_path() -> PathBuf {
+    data_dir().join("wubi.db")
 }
 
 /// 默认的**用户数据**路径。跟词库放在同一个目录，但是**两个文件** ——
@@ -221,11 +227,15 @@ fn default_wubi_name() -> String {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DictConfig {
-    /// 词库文件（`pliers-dict` 导入出来的那个 SQLite）
+    /// 拼音词库文件（`pliers-dict --rime` 导出来的那个 SQLite）
     #[serde(default = "default_dict")]
     pub path: String,
+    /// 码表库文件（五笔/郑码/仓颉，`pliers-dict --table` 导出来的那个 SQLite）。
+    /// 跟拼音词库**分开一个文件**：重导/重下拼音词库不会碰到它，反过来也一样
+    #[serde(default = "default_wubi")]
+    pub wubi_path: String,
     /// 用户数据文件（选过的词、自己拼的句子、拉黑的词）。
-    /// 跟词库**分开存**：换词库不会丢它
+    /// 跟词库**分开存**：换词库不会丢它。两种库共用这一份（记的是"你选过哪个词"）
     #[serde(default = "default_user")]
     pub user_path: String,
     /// 候选框一页显示几个
@@ -240,6 +250,7 @@ impl Default for DictConfig {
     fn default() -> Self {
         Self {
             path: default_dict(),
+            wubi_path: default_wubi(),
             user_path: default_user(),
             max_candidates: default_max_candidates(),
             pool_size: default_pool_size(),
@@ -249,6 +260,10 @@ impl Default for DictConfig {
 
 fn default_dict() -> String {
     default_dict_path().to_string_lossy().into_owned()
+}
+
+fn default_wubi() -> String {
+    default_wubi_path().to_string_lossy().into_owned()
 }
 
 fn default_user() -> String {
@@ -286,6 +301,23 @@ impl Config {
         match std::env::var_os("PLIERS_DICT") {
             Some(path) => PathBuf::from(path),
             None => expand(&self.dict.path),
+        }
+    }
+
+    /// 码表库文件路径（`PLIERS_WUBI` 优先，跟词库一个规矩）
+    pub fn wubi_path(&self) -> PathBuf {
+        match std::env::var_os("PLIERS_WUBI") {
+            Some(path) => PathBuf::from(path),
+            None => expand(&self.dict.wubi_path),
+        }
+    }
+
+    /// **现在这套方案**该开哪个库：码表方案（五笔/郑码/仓颉）开码表库，
+    /// 拼音那几套开拼音词库 —— 两个文件，谁也不拖累谁
+    pub fn active_dict_path(&self) -> PathBuf {
+        match &self.scheme {
+            SchemeConfig::Wubi { .. } => self.wubi_path(),
+            _ => self.dict_path(),
         }
     }
 
@@ -365,9 +397,35 @@ impl Config {
         })
     }
 
-    /// 打开词库（+ 用户数据）+ 建好方案，一步到位
+    /// 打开词库（+ 用户数据）+ 建好方案，一步到位。
+    ///
+    /// 开哪个文件由方案决定（[`Config::active_dict_path`]）：拼音开 `dict.db`，
+    /// 五笔这类码表开 `wubi.db` —— 库不存在时给的提示也不一样（各自的构建命令不同）
     pub fn build_engine_parts(&self) -> Result<(Dict, Box<dyn Scheme>)> {
-        let dict = Dict::open(&self.dict_path(), &self.user_path())?;
+        let path = self.active_dict_path();
+        if !path.exists() {
+            return Err(match &self.scheme {
+                SchemeConfig::Wubi { .. } => format!(
+                    "码表库不存在：{}\n\
+                     装一份（用你自己的码表，每行 `词<TAB>码[<TAB>权重]`）：\n\
+                     \x20 pliers build wubi <码表.txt>\n\
+                     （拼音词库是另一个文件：{}，两者互不影响）",
+                    path.display(),
+                    self.dict_path().display()
+                ),
+                _ => format!(
+                    "词库不存在：{}\n\
+                     装一份（写配置 + 下载词库）：\n\
+                     \x20 pliers --init\n\
+                     也可以用你自己的词表构建：pliers build pinyin\n\
+                     （五笔这类码表用的是另一个文件：{}）",
+                    path.display(),
+                    self.wubi_path().display()
+                ),
+            }
+            .into());
+        }
+        let dict = Dict::open(&path, &self.user_path())?;
         let scheme = self.build_scheme(&dict)?;
         Ok((dict, scheme))
     }
@@ -382,7 +440,8 @@ impl Config {
     /// | `scheme.layout` | `natural` / `flypy` / `mspy` / `none`（双拼键位） |
     /// | `scheme.sentence` | `true` / `false`（整句候选） |
     /// | `scheme.name` | 码表名（`kind = "wubi"` 时用，默认 wubi） |
-    /// | `dict.path` | 词库文件 |
+    /// | `dict.path` | 拼音词库文件 |
+    /// | `dict.wubi_path` | 码表库文件（五笔/郑码/仓颉，跟拼音词库分开一个文件） |
     /// | `dict.user_path` | 用户数据文件（选过的词/自己拼的句子/拉黑的词） |
     /// | `dict.max_candidates` | 1–9（数字键选词） |
     /// | `dict.pool_size` | 候选池深度 |
@@ -465,6 +524,12 @@ impl Config {
                     return Err("词库路径不能是空的".into());
                 }
                 self.dict.path = value.to_string();
+            }
+            "dict.wubi_path" => {
+                if value.trim().is_empty() {
+                    return Err("码表库路径不能是空的".into());
+                }
+                self.dict.wubi_path = value.to_string();
             }
             "dict.user_path" => {
                 if value.trim().is_empty() {
@@ -678,6 +743,42 @@ mod tests {
             &config.scheme,
             SchemeConfig::DoublePinyin { layout, sentence, .. } if layout == "flypy" && !*sentence
         ));
+    }
+
+    #[test]
+    fn 码表库跟拼音词库是两个文件() {
+        let mut config = Config::default();
+        assert!(
+            config.dict_path().ends_with("dict.db"),
+            "{:?}",
+            config.dict_path()
+        );
+        assert!(
+            config.wubi_path().ends_with("wubi.db"),
+            "{:?}",
+            config.wubi_path()
+        );
+        assert_ne!(config.wubi_path(), config.dict_path());
+
+        config.set("dict.wubi_path", "/tmp/我的五笔.db").unwrap();
+        assert_eq!(
+            config.wubi_path(),
+            std::path::PathBuf::from("/tmp/我的五笔.db")
+        );
+        // 拼音词库没被带着改
+        assert_ne!(config.dict_path(), config.wubi_path());
+        assert!(config.set("dict.wubi_path", "   ").is_err(), "空的路径不认");
+    }
+
+    #[test]
+    fn 换到五笔就开码表库() {
+        let mut config = Config::default();
+        for kind in ["full-pinyin", "double-pinyin"] {
+            config.set("scheme.kind", kind).unwrap();
+            assert_eq!(config.active_dict_path(), config.dict_path(), "{kind}");
+        }
+        config.set("scheme.kind", "wubi").unwrap();
+        assert_eq!(config.active_dict_path(), config.wubi_path());
     }
 
     #[test]

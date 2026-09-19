@@ -84,15 +84,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // ---- 英文词表：另一个库（english.db），跟词库那套表无关 ----
     if !args.english.is_empty() {
-        let dest = if args.out_given {
-            args.out.clone()
-        } else {
-            pliers_engine::config::default_english_path()
-        };
         let words = read_english_lists(&args.english)?;
-        pliers_engine::english::write_db(&dest, &words)?;
-        println!("英文词表：{} 个词 → {}", words.len(), dest.display());
+        pliers_engine::english::write_db(&args.out, &words)?;
+        println!("英文词表：{} 个词 → {}", words.len(), args.out.display());
         return Ok(());
+    }
+
+    // ---- 码表（五笔/郑码/仓颉）：**自己的一个库**（默认 wubi.db）----
+    if let (Some(table), Some(scheme)) = (&args.table, &args.table_scheme) {
+        return import_code_table(table, scheme, &args.out, started);
     }
 
     println!(
@@ -106,20 +106,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("输出     ：{}", args.out.display());
     println!();
 
-    // 每次重新导入都从零开始：词库是**可以随时重建的派生物**，用户数据在另一个文件
-    //（user.db）里，跟这个文件无关 —— 所以旧库直接扔，不留 .bak（以前留，是因为用户数据
-    // 混在里面；现在那 90 MB 的备份只是占地方，重建一次也就几秒）
-    if args.out.exists() {
-        std::fs::remove_file(&args.out)?;
-        println!("覆盖旧词库 {}", args.out.display());
-    }
-    // 旧库的 WAL / SHM 还留着的话，新库会被它污染
-    for extra in ["-wal", "-shm"] {
-        let _ = std::fs::remove_file(PathBuf::from(format!("{}{extra}", args.out.display())));
-    }
-    if let Some(dir) = args.out.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
+    fresh_output(&args.out)?;
 
     let db = pollster::block_on(Builder::new_local(&args.out.to_string_lossy()).build())?;
     let conn = db.connect()?;
@@ -128,36 +115,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let imported = import_rime(&conn, &args.rime, started)?;
     report_skipped(&imported.skipped);
 
-    // ---- 码表（五笔之类）：`词<TAB>码[<TAB>权重]` ----
-    if let (Some(path), Some(scheme)) = (&args.table, &args.table_scheme) {
-        let rows = import_table(&conn, path, scheme)?;
-        println!("码表 {scheme}：导入 {rows} 条（来自 {}）", path.display());
-    }
-
     // ---- 音节表 + meta ----
-    let mut sorted: Vec<&String> = imported.syllables.iter().collect();
+    let mut sorted: Vec<&str> = imported.syllables.iter().map(String::as_str).collect();
     sorted.sort();
-    let mut stmt =
-        pollster::block_on(conn.prepare("INSERT OR IGNORE INTO syllable (syl) VALUES (?1)"))?;
-    pollster::block_on(conn.execute("BEGIN", ()))?;
-    for syl in &sorted {
-        pollster::block_on(stmt.execute(turso::params![syl.as_str()]))?;
-    }
-    drop(stmt);
-    pollster::block_on(conn.execute("COMMIT", ()))?;
+    seed_syllables(&conn, &sorted)?;
 
     for (key, value) in [
         ("source", imported.source.clone()),
         ("freq", imported.weight_source.clone()),
-        (
-            "imported_at",
-            format!(
-                "{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_secs()
-            ),
-        ),
+        ("imported_at", now()),
         ("words", imported.words.to_string()),
         ("singles", imported.singles.to_string()),
     ] {
@@ -176,29 +142,136 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         started.elapsed().as_secs_f32()
     );
 
-    // 把 WAL 收进主库，让 .db 成为**自包含**的一个文件。
-    //
-    // 这一步不能省：词库是要被拷来拷去的（发布成 Release 资产、mock 测试拷副本、
-    // 手动 scp 到别的机器），只拷 .db 而落下 -wal 的话，拿到的是一个不完整的库 ——
-    // 最典型的是"音节表是空的"（音节是最后写的，全在 WAL 里），输入法直接起不来。
-    // 注意这条 PRAGMA 会回一行结果，得用 query 把它读掉（execute 会报 unexpected row）
+    checkpoint(&conn, &args.out)?;
+
+    println!("搞定：{}", args.out.display());
+    Ok(())
+}
+
+/// 导码表（五笔/郑码/仓颉）→ **自己的一个库**（默认 `wubi.db`）。
+///
+/// 跟拼音词库分开是故意的：码是另一套东西，各建各的、各换各的 —— 重导（或下载一份新的）
+/// 拼音词库不会把五笔一起抹掉，反过来也一样。
+///
+/// 结构跟拼音词库**一样**（word / syllable / meta 三张表，行里的 `scheme` 是码表名），
+/// 所以两边共用同一套读写代码 —— 音节表那 412 行码表用不着，但填上它两边才同构
+fn import_code_table(
+    table: &Path,
+    scheme: &str,
+    out: &Path,
+    started: Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("码表     ：{}（scheme = {scheme}）", table.display());
+    println!("输出     ：{}", out.display());
+    println!();
+
+    fresh_output(out)?;
+
+    let db = pollster::block_on(Builder::new_local(&out.to_string_lossy()).build())?;
+    let conn = db.connect()?;
+    create_schema(&conn)?;
+
+    let rows = import_table(&conn, table, scheme)?;
+    if rows == 0 {
+        return Err(format!(
+            "码表里一行都没读到：{}\n每行是 `词<TAB>码[<TAB>权重]`（权重可省）",
+            table.display()
+        )
+        .into());
+    }
+
+    let syllables: Vec<&str> = pliers_engine::SYLLABLES.split_whitespace().collect();
+    seed_syllables(&conn, &syllables)?;
+
+    for (key, value) in [
+        ("source", format!("码表 {}", table.display())),
+        ("scheme", scheme.to_string()),
+        ("imported_at", now()),
+        ("words", rows.to_string()),
+    ] {
+        pollster::block_on(conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            turso::params![key, value],
+        ))?;
+    }
+
+    let size = std::fs::metadata(out)?.len();
+    println!(
+        "码表 {scheme}：{rows} 条，库 {} MB，总共 {:.0}s",
+        size / 1024 / 1024,
+        started.elapsed().as_secs_f32()
+    );
+
+    checkpoint(&conn, out)?;
+
+    println!("搞定：{}", out.display());
+    Ok(())
+}
+
+/// 每次重新导入都从零开始：库是**可以随时重建的派生物**，用户数据在另一个文件
+///（user.db）里，跟这个文件无关 —— 所以旧库直接扔，不留 .bak（以前留，是因为用户数据
+/// 混在里面；现在那几十 MB 的备份只是占地方，重建一次也就几秒）
+fn fresh_output(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if out.exists() {
+        std::fs::remove_file(out)?;
+        println!("覆盖旧库 {}", out.display());
+    }
+    // 旧库的 WAL / SHM 还留着的话，新库会被它污染
+    for extra in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(PathBuf::from(format!("{}{extra}", out.display())));
+    }
+    if let Some(dir) = out.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    Ok(())
+}
+
+/// 音节表：拼音靠它切词，码表用不着 —— 但两个库结构一样，读写代码才只有一套
+fn seed_syllables(conn: &Connection, syllables: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut stmt =
+        pollster::block_on(conn.prepare("INSERT OR IGNORE INTO syllable (syl) VALUES (?1)"))?;
+    pollster::block_on(conn.execute("BEGIN", ()))?;
+    for syl in syllables {
+        pollster::block_on(stmt.execute(turso::params![*syl]))?;
+    }
+    drop(stmt);
+    pollster::block_on(conn.execute("COMMIT", ()))?;
+    Ok(())
+}
+
+/// 把 WAL 收进主库，让 .db 成为**自包含**的一个文件。
+///
+/// 这一步不能省：库是要被拷来拷去的（发布成 Release 资产、mock 测试拷副本、
+/// 手动 scp 到别的机器），只拷 .db 而落下 -wal 的话，拿到的是一个不完整的库 ——
+/// 最典型的是"音节表是空的"（音节是最后写的，全在 WAL 里），输入法直接起不来。
+/// 注意这条 PRAGMA 会回一行结果，得用 query 把它读掉（execute 会报 unexpected row）
+fn checkpoint(conn: &Connection, out: &Path) -> Result<(), Box<dyn std::error::Error>> {
     {
         let mut stmt = pollster::block_on(conn.prepare("PRAGMA wal_checkpoint(TRUNCATE)"))?;
         let mut rows = pollster::block_on(stmt.query(()))?;
         while pollster::block_on(rows.next())?.is_some() {}
     }
-    let wal = PathBuf::from(format!("{}-wal", args.out.display()));
+    let wal = PathBuf::from(format!("{}-wal", out.display()));
     match std::fs::metadata(&wal) {
         Ok(meta) if meta.len() > 0 => println!(
-            "注意：{} 还有 {} 字节没并回主库（拷词库时记得连它一起拷）",
+            "注意：{} 还有 {} 字节没并回主库（拷这个库时记得连它一起拷）",
             wal.display(),
             meta.len()
         ),
         _ => {}
     }
-
-    println!("搞定：{}", args.out.display());
     Ok(())
+}
+
+/// 导入时间（秒）
+fn now() -> String {
+    format!(
+        "{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    )
 }
 
 /// 导入一批 rime 词库文件（也可以是装着它们的目录）
@@ -530,9 +603,9 @@ fn import_table(
 
 /// 命令行参数
 struct Args {
+    /// 输出文件。没显式给 `--out` 就按模式取默认值：
+    /// 拼音词库 → `dict.db`、码表库 → `wubi.db`、英文词表 → `english.db`
     out: PathBuf,
-    /// `--out` 是不是用户显式给的（没给的话，按模式取默认值：词库 → dict.db，英文 → english.db）
-    out_given: bool,
     rime: Vec<PathBuf>,
     table: Option<PathBuf>,
     table_scheme: Option<String>,
@@ -542,15 +615,12 @@ struct Args {
 
 impl Args {
     fn parse() -> Result<Self, Box<dyn std::error::Error>> {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        let mut args = Self {
-            out: PathBuf::from(format!("{home}/.local/share/pliers/dict.db")),
-            out_given: false,
-            rime: Vec::new(),
-            table: None,
-            table_scheme: None,
-            english: Vec::new(),
-        };
+        let mut out: Option<PathBuf> = None;
+        let mut rime: Vec<PathBuf> = Vec::new();
+        let mut table: Option<PathBuf> = None;
+        let mut table_scheme: Option<String> = None;
+        let mut english: Vec<PathBuf> = Vec::new();
+
         let mut rest = std::env::args().skip(1);
         while let Some(flag) = rest.next() {
             let mut value = || {
@@ -558,18 +628,15 @@ impl Args {
                     .ok_or_else(|| format!("{flag} 后面要跟一个路径"))
             };
             match flag.as_str() {
-                "--out" => {
-                    args.out = PathBuf::from(value()?);
-                    args.out_given = true;
-                }
-                "--rime" => args.rime.push(PathBuf::from(value()?)),
-                "--table" => args.table = Some(PathBuf::from(value()?)),
-                "--table-scheme" => args.table_scheme = Some(value()?),
-                "--english" => args.english.push(PathBuf::from(value()?)),
+                "--out" => out = Some(PathBuf::from(value()?)),
+                "--rime" => rime.push(PathBuf::from(value()?)),
+                "--table" => table = Some(PathBuf::from(value()?)),
+                "--table-scheme" => table_scheme = Some(value()?),
+                "--english" => english.push(PathBuf::from(value()?)),
                 "--help" | "-h" => {
                     println!(
                         "用法：pliers-dict --rime <词库.yaml|目录> [--rime ...] [--out 词库]\n\
-                         \x20     pliers-dict --table <码表> --table-scheme wubi [--out 词库]\n\
+                         \x20     pliers-dict --table <码表> --table-scheme wubi [--out 码表库]\n\
                          \x20     pliers-dict --english <词表.txt|目录> [--out english.db]\n\
                          \n\
                          三种输入，格式各是：\n\
@@ -584,30 +651,79 @@ impl Args {
                          --table  码表方案（五笔/郑码/仓颉）：每行 `词<TAB>码[<TAB>权重]`\n\
                          \x20          你\tnin\n\
                          \x20          好\tvbg\t200\n\
+                         \x20        导出来的是**自己的一个库**（默认 wubi.db），跟拼音词库分开；\n\
+                         \x20        `--table-scheme` 是这批码在库里的名字，也是配置里 `scheme.name`\n\
                          \n\
                          --english 英文候选词表：一行一个词（`#` 注释），按词频从高到低；\n\
                          \x20        也认上游词频表那种 `词 次数`（只看第一列）：\n\
                          \x20          hello\n\
                          \x20          kubernetes\n\
                          \n\
-                         --out    输出的 SQLite 文件（词库默认 ~/.local/share/pliers/dict.db，\n\
-                         \x20        英文词表默认 ~/.local/share/pliers/english.db）"
+                         --out    输出的 SQLite 文件。默认：拼音词库 ~/.local/share/pliers/dict.db、\n\
+                         \x20        码表库 ~/.local/share/pliers/wubi.db、英文词表 …/english.db\n\
+                         \n\
+                         （一次只导一种，各写各的库：拼音和码表混在一个文件里的老做法不支持了 ——\n\
+                         \x20 分开之后重导拼音不会抹掉五笔）"
                     );
                     std::process::exit(0);
                 }
                 other => return Err(format!("不认识的参数 {other}").into()),
             }
         }
-        if args.rime.is_empty() && args.table.is_none() && args.english.is_empty() {
+
+        if rime.is_empty() && table.is_none() && english.is_empty() {
             return Err(
                 "要给 --rime <词库>（推荐：pliers build pinyin 会自动下语料）\n\
-                        或者 --table <码表> --table-scheme wubi\n\
+                        或者 --table <码表> --table-scheme wubi（推荐：pliers build wubi <码表>）\n\
                         或者 --english <英文词表>"
                     .into(),
             );
         }
+        // 一次只导一种：三种输入各写各的库（以前拼音 + 码表能塞进一个文件，现在不支持了）
+        let kinds = [
+            (!rime.is_empty()).then_some("--rime"),
+            table.is_some().then_some("--table"),
+            (!english.is_empty()).then_some("--english"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        if kinds.len() > 1 {
+            return Err(format!(
+                "一次只能给一种（给的是 {}）—— 三种输入各写各的库，分几次跑：\n\
+                 \x20 pliers-dict --rime <语料> --out ~/.local/share/pliers/dict.db\n\
+                 \x20 pliers-dict --table <码表> --table-scheme wubi --out ~/.local/share/pliers/wubi.db\n\
+                 \x20 pliers-dict --english <词表> --out ~/.local/share/pliers/english.db",
+                kinds.join(" + ")
+            )
+            .into());
+        }
+        // `--table` 没写 scheme 的话，导出来的行不知道该叫什么名字（查询就是按它找的）
+        if table.is_some() && table_scheme.is_none() {
+            return Err(
+                "--table 还要 `--table-scheme <名字>`（这批码在库里叫什么，默认方案用它）：\n\
+                 \x20 pliers-dict --table 五笔.txt --table-scheme wubi --out ~/.local/share/pliers/wubi.db"
+                    .into(),
+            );
+        }
+
+        let out = out.unwrap_or_else(|| {
+            if !english.is_empty() {
+                pliers_engine::config::default_english_path()
+            } else if table.is_some() {
+                pliers_engine::config::default_wubi_path()
+            } else {
+                pliers_engine::config::default_dict_path()
+            }
+        });
         let _ = std::io::stdout().flush();
-        Ok(args)
+        Ok(Self {
+            out,
+            rime,
+            table,
+            table_scheme,
+            english,
+        })
     }
 }
 
@@ -748,6 +864,35 @@ QQ\tQQ\t10
             !is_pinyin_code("jun junding"),
             "整行里有一个坏音节就整行不要"
         );
+    }
+
+    #[test]
+    fn 码表导成自己的一个库() {
+        let dir = std::env::temp_dir().join("pliers-table-db");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let table = dir.join("五笔.txt");
+        std::fs::write(&table, "# 五笔\n你\tnin\n好\tvbg\t200\n\n").unwrap();
+        let out = dir.join("wubi.db");
+        import_code_table(&table, "wubi", &out, Instant::now()).unwrap();
+
+        // 跟拼音词库**同一个结构**：`Dict::open` 的体检能过（音节表齐、meta 有来源），
+        // 所以两边共用一套读写代码
+        let dict = pliers_engine::Dict::open(&out, &dir.join("user.db")).unwrap();
+        let stats = dict.stats().unwrap();
+        assert_eq!(stats.words, 2);
+        assert_eq!(stats.schemes, vec![("wubi".to_string(), 2)]);
+        assert!(
+            dict.meta("source").unwrap().contains("五笔.txt"),
+            "{:?}",
+            dict.meta("source")
+        );
+        // 权重没写就是 1，写了就是那个数
+        assert_eq!(dict.exact("wubi", "nin", 9), vec![("你".to_string(), 1)]);
+        assert_eq!(dict.exact("wubi", "vbg", 9), vec![("好".to_string(), 200)]);
+        // 拼音的行一条都没有（这是码表库，不是拼库）
+        assert!(dict.exact("pinyin", "ni", 9).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -28,11 +28,13 @@ fn help() -> String {
     format!(
         "pliers —— 从零手写的 Wayland 中文输入法\n\n\
          用法：pliers [动词] [种类] [选项]        （不带动词 = 启动输入法）\n\n\
-         \x20 字典是个总概念，按方案分成几种：pinyin（中文词库）/ wubi（五笔，跟 pinyin 是\n\
-         \x20 同一份库）/ english（英文词表）。下面四个动词收的都是这几个名字：\n\
-         \x20 pliers status [种类]        看现状：不给种类 = 实例 + 所有字典，给了 = 只看那一块\n\
-         \x20 pliers path   [名字]        文件都在哪（config / dict / user / english / corpus / socket）\n\
-         \x20 pliers build  <种类> [文件]  自己构建（要 pliers-dict；english 可以给一份自己的词表）\n\
+         \x20 字典是个总概念，按方案分成几种，**各有各的文件**：\n\
+         \x20 pinyin（拼音词库 dict.db）/ wubi（码表库 wubi.db，五笔/郑码/仓颉）/ english（英文词表）。\n\
+         \x20 下面四个动词收的都是这几个名字：\n\
+         \x20 pliers status [种类]        看现状：不给种类 = 实例 + 所有库，给了 = 只看那一块\n\
+         \x20 pliers path   [名字]        文件都在哪（config / dict / wubi / user / english / corpus / socket）\n\
+         \x20 pliers build  <种类> [文件]  自己构建（要 pliers-dict：pinyin 下语料，wubi 用自己的码表，\n\
+         \x20                            english 可以给一份自己的词表）\n\
          \x20 pliers fetch  <种类|all>    从 Release 下载预构建的（--force 重装、--url 换源）\n\
          \x20 pliers update              哪个不是最新就更新哪个（已经一样就跳过，不白下载）\n\n\
          \x20 装一份能用的：\n\
@@ -51,8 +53,9 @@ fn help() -> String {
          \x20 scheme.layout         natural | flypy | mspy | none   （双拼键位）\n\
          \x20 scheme.sentence       true | false                    （整句候选）\n\
          \x20 scheme.name           <码表名>                        （kind = wubi 时，默认 wubi）\n\
-         \x20 dict.path             <词库文件>\n\
-         \x20 dict.user_path        <用户数据文件>                  （选过的词/自己拼的句子）\n\
+         \x20 dict.path             <拼音词库文件>                  （dict.db）\n\
+         \x20 dict.wubi_path        <码表库文件>                    （wubi.db，五笔/郑码/仓颉）\n\
+         \x20 dict.user_path        <用户数据文件>                  （选过的词/自己拼的句子；两个库共用）\n\
          \x20 dict.max_candidates   1-9\n\
          \x20 dict.pool_size        <正整数>\n\
          \x20 engine.toggle_keys    ctrl+space,shift                （逗号分隔）\n\
@@ -67,14 +70,22 @@ fn help() -> String {
          {}\n\
          {}\n\
          {}\n\
+         {}\n\
          调试：PLIERS_DEBUG=1 pliers 把每个按键的判定打到 stderr\n\
          遥控：命令走 Unix socket，路径看 $PLIERS_SOCKET（默认 $XDG_RUNTIME_DIR/pliers.sock）",
         row("配置", pliers_engine::config::config_path().display()),
         row(
-            "词库",
+            "拼音词库",
             format!(
                 "{}（pliers status pinyin 看里面有什么）",
                 pliers_engine::config::default_dict_path().display()
+            )
+        ),
+        row(
+            "码表库",
+            format!(
+                "{}（五笔/郑码/仓颉；pliers build wubi <码表.txt> 建一份）",
+                pliers_engine::config::default_wubi_path().display()
             )
         ),
         row(
@@ -167,22 +178,37 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// `pliers status [pinyin|wubi|english]`：看现状。
-/// 不给种类 = 正在跑的实例 + 所有字典（三块各管各的，谁也不重复谁的信息）
+/// 不给种类 = 正在跑的实例 + 所有字典（每块各管各的，谁也不重复谁的信息）
 fn status_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     match args::kind(args) {
         "" => {
             instance_section();
             println!();
             dict::report()?;
+            // 码表库是**另一个文件**，只有真在用（或已经建了）才占一屏 ——
+            // 不用五笔的人不必每次看一句"还没有"
+            if wubi_matters() {
+                println!();
+                dict::wubi_report()?;
+            }
             println!();
             english::report()?;
         }
-        // 五笔的条目就在中文词库这份库里（`word.scheme` 区分），看现状是同一份
-        "pinyin" | "wubi" => dict::report()?,
+        "pinyin" => dict::report()?,
+        "wubi" => dict::wubi_report()?,
         "english" => english::report()?,
         other => return Err(unknown_kind("status", other)),
     }
     Ok(())
+}
+
+/// 聚合的 `pliers status` 里要不要带码表库那一块：文件在、或者当前方案就是码表
+fn wubi_matters() -> bool {
+    dict::wubi_path().exists()
+        || matches!(
+            Config::load().map(|config| config.scheme),
+            Ok(pliers_engine::SchemeConfig::Wubi { .. })
+        )
 }
 
 /// 正在跑的那个实例看到的现状。没在跑**不是错误**（字典那两块照样能看），
@@ -209,6 +235,7 @@ fn path_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let all = [
         ("config", "配置文件", pliers_engine::config::config_path()),
         ("dict", "中文词库", config.dict_path()),
+        ("wubi", "码表库", config.wubi_path()),
         ("user", "用户数据", config.user_path()),
         ("english", "英文词表", config.english_path()),
         ("corpus", "语料缓存", dict::corpus_dir()),
@@ -218,9 +245,9 @@ fn path_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             pliers_wayland::control::socket_path(),
         ),
     ];
-    // 种类名也认：pinyin / wubi 跟 dict 是同一份库
+    // 种类名也认：pinyin 就是 dict，wubi 有自己的文件
     let what = match args::kind(args) {
-        "pinyin" | "wubi" => "dict",
+        "pinyin" => "dict",
         other => other,
     };
     if what.is_empty() {
@@ -237,8 +264,9 @@ fn path_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         None => Err(format!(
             "不认识的名字 {what:?}（path 收这些）：\n\
              \x20     config   配置文件\n\
-             \x20     dict     中文词库（pinyin / wubi 也是它）\n\
-             \x20     user     用户数据（选过的词、自己拼的句子）\n\
+             \x20     dict     拼音词库（pinyin 也是它）\n\
+             \x20     wubi     码表库（五笔/郑码/仓颉，跟拼音词库分开一个文件）\n\
+             \x20     user     用户数据（选过的词、自己拼的句子；两个库共用这一份）\n\
              \x20     english  英文词表\n\
              \x20     corpus   语料缓存（pliers build pinyin 下的那六个文件）\n\
              \x20     socket   遥控正在跑的实例用的 socket"
@@ -247,18 +275,20 @@ fn path_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-/// `pliers build <pinyin|english> [文件]`：自己构建一份字典
+/// `pliers build <种类> [文件]`：自己构建一份字典
 fn build_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     match args::kind(args) {
         "pinyin" => dict::build(args::has(args, "--refresh")),
+        // 码表：`pliers build wubi 我的码表.txt`（--scheme 换码表名字，默认跟方案走）
+        "wubi" => dict::build_wubi(
+            args::at(args, 1),
+            args::value_of(args, "--scheme").as_deref(),
+        ),
         // 不给词表就用二进制里那份兜底重建（那条路不需要 pliers-dict）
         "english" => english::build(args::at(args, 1)),
-        "wubi" => Err("五笔的条目跟拼音在**同一个** dict.db 里（`word.scheme` 区分），\n\
-                       \x20     所以构建走 pliers build pinyin —— 码表是构建时用 --table 一起导进去的\n\
-                       \x20     （见 docs/dictionary.md）"
-            .into()),
         "" => Err("要构建哪一种？\n\
-                   \x20     pliers build pinyin           中文词库（下 rime-frost 语料，要 pliers-dict）\n\
+                   \x20     pliers build pinyin           拼音词库（下 rime-frost 语料，要 pliers-dict）\n\
+                   \x20     pliers build wubi <码表.txt>  码表库（五笔/郑码/仓颉，要 pliers-dict）\n\
                    \x20     pliers build english [词表]   英文词表（不给词表就用二进制里那份兜底）"
             .into()),
         other => Err(unknown_kind("build", other)),
@@ -269,9 +299,9 @@ fn build_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 fn unknown_kind(verb: &str, what: &str) -> Box<dyn std::error::Error> {
     format!(
         "不认识的种类 {what:?}（{verb} 收这些）：\n\
-         \x20     pinyin   中文词库（五笔的条目也在这一份里，27 MB）\n\
-         \x20     english  英文词表（约 500 KB）\n\
-         \x20     wubi     五笔（跟 pinyin 同一份库，只是看现状时能单独列出来）"
+         \x20     pinyin   拼音词库（dict.db，27 MB，能下载也能自己构建）\n\
+         \x20     wubi     码表库（wubi.db，五笔/郑码/仓颉，用自己的码表构建）\n\
+         \x20     english  英文词表（english.db，约 500 KB）"
     )
     .into()
 }
@@ -596,7 +626,7 @@ const ITEMS: &[(&str, &str, Kind, &str)] = &[
         "sentence",
     ),
     ("scheme.name", "码表名", Kind::Text, "name"),
-    ("dict.path", "词库文件", Kind::Text, "dict_path"),
+    ("dict.path", "拼音词库文件", Kind::Text, "dict_path"),
     (
         "dict.max_candidates",
         "一页候选数",
@@ -642,6 +672,9 @@ const ITEMS: &[(&str, &str, Kind, &str)] = &[
     ),
     ("english.path", "英文词表", Kind::Text, "english_path"),
     ("dict.user_path", "用户数据文件", Kind::Text, "user_path"),
+    // 三个"文件在哪"的项排在一起（加在最后，前面那些项的编号就不会变——
+    // mock 测试里的交互模式断言是按编号走的）
+    ("dict.wubi_path", "码表库文件", Kind::Text, "wubi_path"),
 ];
 
 /// 菜单里除了改配置，还有这两件事
@@ -810,6 +843,7 @@ fn fields_from_config(config: &Config) -> Fields {
         format!("sentence={sentence}"),
         format!("dict={dict}"),
         format!("dict_path={}", config.dict_path().display()),
+        format!("wubi_path={}", config.wubi_path().display()),
         format!(
             "user={}",
             match std::fs::metadata(config.user_path()) {

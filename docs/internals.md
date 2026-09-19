@@ -34,7 +34,7 @@ pliers-engine  ←──┬──  pliers-popup  ──┐
 | `config.rs` | 读 TOML 配置 |
 | `fetch.rs` | 下载 + 解压（`pliers --init` / `pliers build pinyin` 装词库用） |
 
-这么切的好处：**输入方案、词库、候选框长相都能脱离合成器跑测试**（219 个单测），
+这么切的好处：**输入方案、词库、候选框长相都能脱离合成器跑测试**（222 个单测），
 协议层里剩下的全是"Wayland 要求这么做"的东西。想改哪块就只动哪块：
 
 * 加词 / 调词频 → 用 SQL 改词库，或者重新跑一遍 `pliers-dict`
@@ -138,15 +138,15 @@ SELECT text FROM word WHERE code LIKE 'ni%' ORDER BY weight DESC LIMIT 9
 一元词频模型的局限见[已知不足](pitfalls.md#已知不足)——想要"只出库里真有的词"，
 配置里 `sentence = false` 关掉。分段上屏（用户自己挑前缀）见[使用](usage.md#分段上屏--记性)。
 
-### 词库和用户数据：两个文件 + `ATTACH`
+### 每个库一个文件，用户数据再单独一个 + `ATTACH`
 
-词库（86 MB、别人整理的数据、`pliers fetch pinyin --force` / `pliers build pinyin` 会整个换掉）和用户数据
-（几十 KB、你自己选过的词和拼过的句子）**生命周期完全不一样**，所以放在两个文件里：
-`dict.db` + `user.db`。以前混在一个文件里，换一次词库就把用户习惯一起丢了 ——
-导入工具是先把输出文件删了重建的。
+拼音词库（86 MB、别人整理的数据、`pliers fetch pinyin --force` / `pliers build pinyin` 会整个换掉）、
+码表库（`wubi.db`，你自己那份码表导出来的）和用户数据（几十 KB、你自己选过的词和拼过的句子）
+**生命周期完全不一样**，所以各占一个文件。以前全混在一个文件里：换一次拼音词库，
+用户习惯和五笔条目一起没 —— 导入工具是先把输出文件删了重建的。
 
 分家之后最大的问题是排序：中文候选的顺序是**一句 SQL** 算出来的
-（`weight + 用户次数 ×100 万`）。两个文件怎么在一句 SQL 里 JOIN？用 SQLite 的 `ATTACH`：
+（`weight + 用户次数 ×100 万`）。库和用户数据怎么在一句 SQL 里 JOIN？用 SQLite 的 `ATTACH`：
 
 ```sql
 ATTACH '~/.local/share/pliers/user.db' AS user;
@@ -160,8 +160,12 @@ turso 里这个功能还叫 `experimental_attach`（得在 `Builder` 上显式�
 Rust 里重排 —— 那样"权重最高的前 N 个"就得先按语料权重截断，一个被你选过很多次、
 但语料权重排在窗口外的词会浮不上来。`ATTACH` 保住了原来的语义，代价只有一个实验性开关。
 
+打开哪个库由方案决定（`Config::active_dict_path()`，见 `config.rs`）：拼音那几套开 `dict.db`，
+`kind = "wubi"` 开 `wubi.db` —— 一次只开一个，所以同一套 `Dict` 代码两边通用
+（两个库的表结构一模一样，连那 412 个音节都是导入时一起写进去的）。
+
 老布局（用户表还混在词库里）会在第一次打开时自动搬过去，见
-[词库](dictionary.md#表结构词库和用户数据是两个文件)。
+[词库](dictionary.md#表结构每个库一个文件用户数据单独一个)。
 
 ### 英文候选：另一半不进词库
 

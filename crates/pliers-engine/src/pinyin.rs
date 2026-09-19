@@ -33,10 +33,11 @@ const MAX_COMPLETIONS: usize = 24;
 /// 这些"感叹词音节"很少落在分段点上（`nihaom` 不该切成 `ni hao m`）
 const NOT_A_SEGMENT_TAIL: &[&str] = &["m", "n", "ng", "hm", "hng"];
 
-/// 标准普通话音节表（412 个）。运行时是从词库里读的（`syllable` 表），
-/// 这份只是给测试和文档用的参考
-#[cfg(test)]
-pub(crate) const SYLLABLES: &str = "\
+/// 标准普通话音节表（412 个）。**运行时是从词库里读的**（`syllable` 表），
+/// 这份只是给测试和文档用的参考 —— 唯一的例外是导入工具：码表库（五笔/郑码/仓颉）
+/// 用不着切词，但要跟拼音词库**结构一样**（音节表是 `Dict::open` 的体检项之一），
+/// 所以 `pliers-dict` 拿这份把表填上
+pub const SYLLABLES: &str = "\
 a ai an ang ao ba bai ban bang bao bei ben beng bi bian biao bie bin bing bo bu ca cai can cang \
 cao ce cen ceng cha chai chan chang chao che chen cheng chi chong chou chu chua chuai chuan chuang \
 chui chun chuo ci cong cou cu cuan cui cun cuo da dai dan dang dao de dei den deng di dia dian \

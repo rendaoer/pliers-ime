@@ -44,22 +44,23 @@ text-input 协议**：Firefox / GTK / Qt 应用都行，alacritty 0.17（基于 
 命令都是**动词在前、种类在后**（种类就三个：`pinyin` / `wubi` / `english` —— 字典是个总概念）：
 
 ```nushell
-pliers status [种类]         # 看现状：不给种类 = 正在跑的实例 + 所有字典
-pliers path   [名字]         # 文件都在哪（config / dict / user / english / corpus / socket）
-pliers build  <种类> [文件]   # 自己构建（pinyin 下语料；english 可以给自己的词表）
+pliers status [种类]         # 看现状：不给种类 = 正在跑的实例 + 所有库
+pliers path   [名字]         # 文件都在哪（config / dict / wubi / user / english / corpus / socket）
+pliers build  <种类> [文件]   # 自己构建（pinyin 下语料；wubi 用自己的码表；english 可给自己的词表）
 pliers fetch  <种类|all>     # 从 Release 下载预构建的；pliers update = 哪个旧更新哪个
 ```
 
-**词库、用户数据、英文词表是三个文件**，各管各的：
+**每个库一个文件**（外加用户数据），各管各的：
 
 | 文件 | 是什么 | 怎么更新 |
 | --- | --- | --- |
-| `~/.local/share/pliers/dict.db` | 中文词库 + 音节表（86 MB） | `pliers fetch pinyin --force` / `pliers build pinyin` |
-| `~/.local/share/pliers/user.db` | 你选过的词、自己拼的句子、按 `Del` 拉黑的词 | 自动写；想清空就删掉它 |
+| `~/.local/share/pliers/dict.db` | 拼音词库 + 音节表（86 MB） | `pliers fetch pinyin --force` / `pliers build pinyin` |
+| `~/.local/share/pliers/wubi.db` | 码表库（五笔/郑码/仓颉，用自己的码表建） | `pliers build wubi <码表.txt>` |
+| `~/.local/share/pliers/user.db` | 你选过的词、自己拼的句子、按 `Del` 拉黑的词（两个库共用） | 自动写；想清空就删掉它 |
 | `~/.local/share/pliers/english.db` | 英文候选词表（SQLite，25223 词） | `pliers fetch english`（**可以单独更新**）/ `pliers build english 词表.txt` |
 
-所以重新装词库不会弄丢你的习惯，换英文词表也不用动词库；两个库内部用 SQLite 的 `ATTACH`
-连起来（见 [docs/dictionary.md](docs/dictionary.md#表结构词库和用户数据是两个文件)）。
+所以重导拼音词库既不会弄丢你的习惯，也不会把五笔抹掉（那是另一个文件）；
+库和用户数据内部用 SQLite 的 `ATTACH` 连起来（见 [docs/dictionary.md](docs/dictionary.md#表结构每个库一个文件用户数据单独一个)）。
 英文词表没装/读不了时，引擎会用二进制里那份兜底，英文候选不会凭空消失。
 英文那个库是**启动时一次性读进内存**的（两万五千行，几十毫秒），每次按键还是内存里扫一遍 ——
 用 SQLite 当存储和发布格式，不等于把每次按键的查询交给 SQL。
@@ -73,7 +74,7 @@ seat」然后退出，所以别同时跑两个。
 想确认自己没跑歪：
 
 ```bash
-cargo test --workspace        # 219 个单测，不需要合成器、不需要词库
+cargo test --workspace        # 222 个单测，不需要合成器、不需要词库
 ./tools/run_mock_tests.sh     # mock 合成器跑 27 个场景 + 2 项在线改配置检查
 ```
 

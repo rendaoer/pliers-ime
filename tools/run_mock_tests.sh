@@ -53,7 +53,7 @@ if [ -z "$DICT" ] || [ ! -f "$DICT" ]; then
     exit 1
 fi
 # 测试用自己的一份词库副本：选词/记整句都会写进库里，别污染真库
-SRC_DICT="$DICT"   # 原始词库，一直保持"干净"：需要候选顺序确定的场景从它拷
+SRC_DICT="$DICT"   # 原始词库，我们只从它拷一份来用，从不写它
 TEST_DICT="$(mktemp -d)/dict.db"
 cp "$SRC_DICT" "$TEST_DICT"
 # 还没并回主库的 WAL 也得一起拷：刚导入完的库、或者输入法正开着的库，
@@ -62,6 +62,10 @@ cp "$SRC_DICT" "$TEST_DICT"
 DICT="$TEST_DICT"
 echo "词库：$DICT（测试用的副本）"
 LOGS="$(mktemp -d)"
+# 用户数据（选过哪些词、自己拼的句子、拉黑的词）是**另一个文件**：
+# 每个场景一个全新的空文件 —— 既不会动你自己那份 user.db，
+# 也不会让上一个场景选过的词把候选顺序顶乱
+users() { echo "$LOGS/$1-user.db"; }
 pass=0
 fail=0
 
@@ -75,8 +79,9 @@ run_control() {
     python3 tools/mock_compositor.py "$sock" "nihc " 你好 control >"$log" 2>&1 &
     local mock=$!
     sleep 0.4
-    env PLIERS_DICT="$DICT" PLIERS_CONFIG="$CFG" PLIERS_SOCKET="$ctl" \
-        WAYLAND_DISPLAY="$sock" timeout 30 ./target/debug/pliers >>"$log" 2>&1 &
+    env PLIERS_DICT="$DICT" PLIERS_USER_DB="$(users control)" PLIERS_CONFIG="$CFG" \
+        PLIERS_SOCKET="$ctl" WAYLAND_DISPLAY="$sock" \
+        timeout 30 ./target/debug/pliers >>"$log" 2>&1 &
     local ime=$!
     sleep 0.4
 
@@ -153,8 +158,9 @@ TOML
     python3 tools/mock_compositor.py "$sock" "nihc " 你好 watch >"$log" 2>&1 &
     local mock=$!
     sleep 0.4
-    env PLIERS_DICT="$DICT" PLIERS_CONFIG="$cfg" PLIERS_SOCKET="$ctl" \
-        WAYLAND_DISPLAY="$sock" timeout 30 ./target/debug/pliers >>"$log" 2>&1 &
+    env PLIERS_DICT="$DICT" PLIERS_USER_DB="$(users watch)" PLIERS_CONFIG="$cfg" \
+        PLIERS_SOCKET="$ctl" WAYLAND_DISPLAY="$sock" \
+        timeout 30 ./target/debug/pliers >>"$log" 2>&1 &
     local ime=$!
     sleep 0.5
 
@@ -196,23 +202,16 @@ run() { # run <名字> <按键> <期望提交> <模式> [额外环境变量]
     local png=""
     [ "$name" = "active" ] && png="${PNG_ARG:-}"
 
-    # 这几个场景的断言跟"第几个候选"有关，得从**没被前面场景写过**的词库拷一份：
-    #   segment/forget —— 前面场景会把拼过的句子记进去（记性会顶到第一位）
-    #   pick/nav       —— 前一个场景选过的词会加 100 万权重，把候选顺序顶乱
-    #                     （pick 选「事件」之后，nav 的「事件」就跑到第一位了）
+    # 词库和用户数据分成两个文件之后，这里就简单了：词库所有场景共用一份只读的副本
+    #（运行期只往里读，写的全是 user.db），每个场景再发一份**全新的空 user.db** ——
+    # 既不会动你自己那份，也不会有"上一个场景选过的词把候选顺序顶乱"这种事
     local dict="$DICT"
-    case "$name" in
-        segment|forget|pick|nav)
-            dict="$LOGS/$name.db"
-            cp "$SRC_DICT" "$dict"
-            [ -f "$SRC_DICT-wal" ] && cp "$SRC_DICT-wal" "$dict-wal"
-            ;;
-    esac
 
     MOCK_PNG="$png" python3 tools/mock_compositor.py "$SOCK" "$keys" "$expect" "$mode" >"$log" 2>&1 &
     local mock=$!
     sleep 0.4
-    env PLIERS_DICT="$dict" PLIERS_CONFIG="$CFG" $extra WAYLAND_DISPLAY="$SOCK" timeout 30 ./target/debug/pliers >>"$log" 2>&1
+    env PLIERS_DICT="$dict" PLIERS_USER_DB="$(users "$name")" PLIERS_CONFIG="$CFG" $extra \
+        WAYLAND_DISPLAY="$SOCK" timeout 30 ./target/debug/pliers >>"$log" 2>&1
     wait "$mock"
 
     if grep -q "PASS" "$log"; then

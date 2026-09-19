@@ -75,6 +75,11 @@ kind = "full-pinyin"
 # 见仓库里的 docs/dictionary.md）
 # path = "~/.local/share/pliers/dict.db"
 
+# 用户数据文件：选过哪些词（调频）、你自己分段拼出来的句子、按 Del 拉黑的词。
+# 它跟词库是**两个文件**，所以重新下载/重建词库不会把这些弄丢 ——
+# 想让输入法"忘掉你的习惯"就删掉这个文件（词库不用动）
+# user_path = "~/.local/share/pliers/user.db"
+
 # 候选框一页显示几个（数字键 1-9 选的是这一页的第几个）
 # max_candidates = 9
 

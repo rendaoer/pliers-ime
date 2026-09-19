@@ -40,6 +40,7 @@ fn help() -> String {
          \x20 scheme.sentence       true | false                    （整句候选）\n\
          \x20 scheme.name           <码表名>                        （kind = table 时）\n\
          \x20 dict.path             <词库文件>\n\
+         \x20 dict.user_path        <用户数据文件>                  （选过的词/自己拼的句子）\n\
          \x20 dict.max_candidates   1-9\n\
          \x20 dict.pool_size        <正整数>\n\
          \x20 engine.toggle_keys    ctrl+space,shift                （逗号分隔）\n\
@@ -289,6 +290,7 @@ fn status_lines(fields: &Fields) -> Vec<String> {
                 fields.get("pool")
             ),
         ),
+        row("用户数据", fields.get("user").to_string()),
         row("英文候选", english_status(fields)),
         row(
             "中英切换",
@@ -429,6 +431,7 @@ const ITEMS: &[(&str, &str, Kind, &str)] = &[
         "english_limit",
     ),
     ("english.path", "英文词表", Kind::Text, "english_path"),
+    ("dict.user_path", "用户数据文件", Kind::Text, "user_path"),
 ];
 
 /// 菜单里除了改配置，还有这两件事
@@ -590,6 +593,18 @@ fn fields_from_config(config: &Config) -> Fields {
         format!("sentence={sentence}"),
         format!("dict={dict}"),
         format!("dict_path={}", config.dict_path().display()),
+        format!(
+            "user={}",
+            match std::fs::metadata(config.user_path()) {
+                Ok(meta) => format!(
+                    "{}（{} KB）",
+                    config.user_path().display(),
+                    meta.len().max(1024) / 1024
+                ),
+                Err(_) => format!("{}（还没有，用着会自动建）", config.user_path().display()),
+            }
+        ),
+        format!("user_path={}", config.user_path().display()),
         format!("candidates={}", config.dict.max_candidates),
         format!("pool={}", config.dict.pool_size),
         format!("toggle={}", config.engine.toggle_keys.join(",")),
@@ -799,6 +814,8 @@ mod tests {
         "kind=double-pinyin\tlayout=flypy\tname=\tsentence=true\t",
         "dict=/home/dao/.local/share/pliers/dict.db（131 MB）\t",
         "dict_path=/home/dao/.local/share/pliers/dict.db\t",
+        "user=/home/dao/.local/share/pliers/user.db（8 KB）\t",
+        "user_path=/home/dao/.local/share/pliers/user.db\t",
         "candidates=9\tpool=90\ttoggle=ctrl+space\tstart=chinese\tindicator=true\t",
         "chinese_punctuation=true\tenglish=true\tenglish_limit=5\tenglish_path=\t",
         "english_words=25223\tmode=中\tconfig=/home/dao/.config/pliers/config.toml\t",
@@ -809,7 +826,7 @@ mod tests {
     fn 状态按字段渲染成多行() {
         let fields = Fields::parse(PAYLOAD);
         let lines = status_lines(&fields);
-        assert_eq!(lines.len(), 9, "一项一行：{lines:?}");
+        assert_eq!(lines.len(), 10, "一项一行：{lines:?}");
         assert!(lines[0].contains("双拼（小鹤）"), "{:?}", lines[0]);
         assert!(
             lines[1].contains("/home/dao/.local/share"),
@@ -817,12 +834,13 @@ mod tests {
             lines[1]
         );
         assert!(lines[2].contains("一页 9 个，池子 90 个"), "{:?}", lines[2]);
+        assert!(lines[3].contains("user.db"), "{:?}", lines[3]);
         assert!(
-            lines[3].contains("开（词表 25223 个词，一次最多 5 个）"),
+            lines[4].contains("开（词表 25223 个词，一次最多 5 个）"),
             "{:?}",
-            lines[3]
+            lines[4]
         );
-        assert!(lines[6].contains("中（启动时 chinese）"), "{:?}", lines[6]);
+        assert!(lines[7].contains("中（启动时 chinese）"), "{:?}", lines[7]);
     }
 
     #[test]
@@ -832,6 +850,7 @@ mod tests {
             "方案",
             "词库",
             "候选",
+            "用户数据",
             "英文候选",
             "中英切换",
             "中英提示",
@@ -861,7 +880,7 @@ mod tests {
     #[test]
     fn 没设切换键时说清楚() {
         let fields = Fields::parse("kind=full-pinyin\ttoggle=");
-        assert!(status_lines(&fields)[4].contains("（没设）"));
+        assert!(status_lines(&fields)[5].contains("（没设）"));
     }
 
     #[test]

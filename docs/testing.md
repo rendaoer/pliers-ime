@@ -5,8 +5,8 @@
 ## 单测：不需要合成器、不需要词库
 
 ```bash
-cargo test --workspace        # 全部 205 个
-cargo test -p pliers-engine   # 只看引擎（157 个）：切词、方案、词库、英文候选、按键状态机
+cargo test --workspace        # 全部 208 个
+cargo test -p pliers-engine   # 只看引擎（160 个）：切词、方案、词库、英文候选、按键状态机
 cargo test -p pliers-ime      # 命令行那套（12 个）：状态输出、配置校验、交互选择
 cargo test -p pliers-popup    # 候选框布局与像素（18 个）
 cargo test -p pliers-wayland  # 模式提示的超时、长按重复的节拍、命令 socket 一问一答（13 个）
@@ -67,10 +67,10 @@ cp ~/.local/share/pliers/dict.db target/dict-copy.db
 ./tools/run_mock_tests.sh --dict target/dict-copy.db
 ```
 
-脚本自己也会拷两份：所有场景共用一份（随便写），而断言跟"第几个候选"有关的
-`pick` / `nav` / `segment` / `forget` 各自从**原始词库**再拷一份 —— 不然前一个场景
-选过的词会加 100 万权重，把后一个场景的候选顺序顶乱（真踩过：`pick` 选完「事件」，
-`nav` 里「事件」就跑到第一位了）。
+脚本会拷一份词库来用（从不写原始那份），另外**每个场景发一个全新的空 `user.db`**
+（`PLIERS_USER_DB`）—— 用户数据跟词库分家之后，"上一个场景选过的词把候选顺序顶乱"
+这种事就不可能发生了（以前真踩过：`pick` 选完「事件」，`nav` 里「事件」就跑到第一位），
+你自己那份 `user.db` 也不会被测试动到。
 
 ### 场景
 

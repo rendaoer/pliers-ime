@@ -35,10 +35,20 @@ pub fn config_path() -> PathBuf {
 
 /// 默认词库路径
 pub fn default_dict_path() -> PathBuf {
-    let base = std::env::var_os("XDG_DATA_HOME")
+    data_dir().join("dict.db")
+}
+
+/// 默认的**用户数据**路径。跟词库放在同一个目录，但是**两个文件** ——
+/// 词库是派生物（重新下载/重建会整个换掉），用户数据是你自己的
+pub fn default_user_path() -> PathBuf {
+    data_dir().join("user.db")
+}
+
+fn data_dir() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".local").join("share"));
-    base.join("pliers").join("dict.db")
+        .unwrap_or_else(|| home().join(".local").join("share"))
+        .join("pliers")
 }
 
 fn home() -> PathBuf {
@@ -188,6 +198,10 @@ pub struct DictConfig {
     /// 词库文件（`pliers-dict` 导入出来的那个 SQLite）
     #[serde(default = "default_dict")]
     pub path: String,
+    /// 用户数据文件（选过的词、自己拼的句子、拉黑的词）。
+    /// 跟词库**分开存**：换词库不会丢它
+    #[serde(default = "default_user")]
+    pub user_path: String,
     /// 候选框一页显示几个
     #[serde(default = "default_max_candidates")]
     pub max_candidates: usize,
@@ -200,6 +214,7 @@ impl Default for DictConfig {
     fn default() -> Self {
         Self {
             path: default_dict(),
+            user_path: default_user(),
             max_candidates: default_max_candidates(),
             pool_size: default_pool_size(),
         }
@@ -208,6 +223,10 @@ impl Default for DictConfig {
 
 fn default_dict() -> String {
     default_dict_path().to_string_lossy().into_owned()
+}
+
+fn default_user() -> String {
+    default_user_path().to_string_lossy().into_owned()
 }
 
 fn default_max_candidates() -> usize {
@@ -241,6 +260,14 @@ impl Config {
         match std::env::var_os("PLIERS_DICT") {
             Some(path) => PathBuf::from(path),
             None => expand(&self.dict.path),
+        }
+    }
+
+    /// 用户数据文件路径（展开过 `~`）。`PLIERS_USER_DB` 优先级最高，跟词库一个规矩
+    pub fn user_path(&self) -> PathBuf {
+        match std::env::var_os("PLIERS_USER_DB") {
+            Some(path) => PathBuf::from(path),
+            None => expand(&self.dict.user_path),
         }
     }
 
@@ -303,9 +330,9 @@ impl Config {
         })
     }
 
-    /// 打开词库 + 建好方案，一步到位
+    /// 打开词库（+ 用户数据）+ 建好方案，一步到位
     pub fn build_engine_parts(&self) -> Result<(Dict, Box<dyn Scheme>)> {
-        let dict = Dict::open(&self.dict_path())?;
+        let dict = Dict::open(&self.dict_path(), &self.user_path())?;
         let scheme = self.build_scheme(&dict)?;
         Ok((dict, scheme))
     }
@@ -321,6 +348,7 @@ impl Config {
     /// | `scheme.sentence` | `true` / `false`（整句候选） |
     /// | `scheme.name` | 码表名（`kind = "table"` 时用） |
     /// | `dict.path` | 词库文件 |
+    /// | `dict.user_path` | 用户数据文件（选过的词/自己拼的句子/拉黑的词） |
     /// | `dict.max_candidates` | 1–9（数字键选词） |
     /// | `dict.pool_size` | 候选池深度 |
     /// | `engine.toggle_keys` | 逗号分隔，如 `ctrl+space,shift` |
@@ -402,6 +430,12 @@ impl Config {
                 }
                 self.dict.path = value.to_string();
             }
+            "dict.user_path" => {
+                if value.trim().is_empty() {
+                    return Err("用户数据路径不能是空的（想清空用户数据就删那个文件）".into());
+                }
+                self.dict.user_path = value.to_string();
+            }
             "dict.max_candidates" => {
                 let count: usize = value
                     .parse()
@@ -462,8 +496,9 @@ impl Config {
             other => {
                 return Err(format!(
                     "不认识的配置项 {other:?}（能改的：scheme.kind / scheme.layout / \
-                     scheme.sentence / scheme.name / dict.path / dict.max_candidates / \
-                     dict.pool_size / engine.toggle_keys / engine.start_mode / engine.indicator / \
+                     scheme.sentence / scheme.name / dict.path / dict.user_path / \
+                     dict.max_candidates / dict.pool_size / engine.toggle_keys / \
+                     engine.start_mode / engine.indicator / \
                      engine.chinese_punctuation / english.enabled / english.limit / english.path）"
                 ));
             }

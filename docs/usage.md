@@ -201,7 +201,8 @@ woshiyigexuesheng  →  [我是一个学生] [卧室一个学生] [我是一个]
 * 只有**两次以上**的选择才算"你自己拼的句子"（只挑一次的话，词库里本来就有，记了也是噪音）。
 * 每挑一段也照常记进 `user_word`（选过的词下次排更前）。
 * 按 Esc 取消、或者把拼音删光，这次就不记了 —— 你不要它了。
-* 想清空记性：`sqlite3 ~/.local/share/pliers/dict.db "delete from user_phrase"`；
+* 想清空记性：`sqlite3 ~/.local/share/pliers/user.db "delete from user_phrase"`（**用户数据在
+  `user.db`，不是词库那个文件** —— 换词库不会动它）；
   只想删某一条的话，把它打到候选框里**按 `Del`**（选中的那个）。
 
 ## `Del`：删掉自己拼出来的词
@@ -217,7 +218,7 @@ woshiyigexuesheng  →  [我是一个学生] [卧室一个学生] [我是一个]
 删完候选列表会**接着显示**（选中回到第一个），所以"删没删掉"一眼就能看见，
 也不至于手一抖接着按 `Del` 就把下一个也删了。**词库里原本就有的词删不了**，
 只会回一句「不是自己拼的，删不了」—— 那是导入进来的数据。
-删错了想找回来：`sqlite3 ~/.local/share/pliers/dict.db "delete from user_hidden where text='你好啊'"`。
+删错了想找回来：`sqlite3 ~/.local/share/pliers/user.db "delete from user_hidden where text='你好啊'"`。
 
 英文候选是"补全"，同一个词在 `con`/`conf`/`confi` 上都会冒出来，所以它的黑名单**按词记**
 （`user_hidden` 里 `code` 固定是 `#english`）：删一次，`con`/`conf`/`confi` 上都不会再有它。

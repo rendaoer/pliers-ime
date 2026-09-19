@@ -34,7 +34,7 @@ pliers-engine  ←──┬──  pliers-popup  ──┐
 | `config.rs` | 读 TOML 配置 |
 | `fetch.rs` | 下载 + 解压（`pliers --init` / `pliers dict ...` 装词库用） |
 
-这么切的好处：**输入方案、词库、候选框长相都能脱离合成器跑测试**（205 个单测），
+这么切的好处：**输入方案、词库、候选框长相都能脱离合成器跑测试**（208 个单测），
 协议层里剩下的全是"Wayland 要求这么做"的东西。想改哪块就只动哪块：
 
 * 加词 / 调词频 → 用 SQL 改词库，或者重新跑一遍 `pliers-dict`
@@ -137,6 +137,31 @@ SELECT text FROM word WHERE code LIKE 'ni%' ORDER BY weight DESC LIMIT 9
 
 一元词频模型的局限见[已知不足](pitfalls.md#已知不足)——想要"只出库里真有的词"，
 配置里 `sentence = false` 关掉。分段上屏（用户自己挑前缀）见[使用](usage.md#分段上屏--记性)。
+
+### 词库和用户数据：两个文件 + `ATTACH`
+
+词库（86 MB、别人整理的数据、`dict fetch --force` / `dict build` 会整个换掉）和用户数据
+（几十 KB、你自己选过的词和拼过的句子）**生命周期完全不一样**，所以放在两个文件里：
+`dict.db` + `user.db`。以前混在一个文件里，换一次词库就把用户习惯一起丢了 ——
+导入工具是先把输出文件删了重建的。
+
+分家之后最大的问题是排序：中文候选的顺序是**一句 SQL** 算出来的
+（`weight + 用户次数 ×100 万`）。两个文件怎么在一句 SQL 里 JOIN？用 SQLite 的 `ATTACH`：
+
+```sql
+ATTACH '~/.local/share/pliers/user.db' AS user;
+SELECT w.text, w.weight + MIN(COALESCE(u.count, 0), 50) * 1000000 AS score
+FROM word w LEFT JOIN user.user_word u ON u.text = w.text
+WHERE w.scheme = ?1 AND w.code = ?2 ORDER BY score DESC LIMIT ?3
+```
+
+turso 里这个功能还叫 `experimental_attach`（得在 `Builder` 上显式打开），但本地 attach
+一个文件、跨库建表/写入/JOIN 实测都正常。另一条路是开两个连接、把用户词频读进内存再在
+Rust 里重排 —— 那样"权重最高的前 N 个"就得先按语料权重截断，一个被你选过很多次、
+但语料权重排在窗口外的词会浮不上来。`ATTACH` 保住了原来的语义，代价只有一个实验性开关。
+
+老布局（用户表还混在词库里）会在第一次打开时自动搬过去，见
+[词库](dictionary.md#表结构词库和用户数据是两个文件)。
 
 ### 英文候选：另一半不进词库
 

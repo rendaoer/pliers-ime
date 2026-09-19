@@ -6,15 +6,28 @@
 //! * 词库、权重、用户词频都是"数据"，可以随时用 SQL 改、加、导出，不用重新编译
 //! * 一次装好，多进程共享；以后要做设置界面也直接读这个库
 //!
-//! 表结构（`SCHEMA`，导入工具和运行时共用同一份 DDL）：
+//! **词库和用户数据分成两个文件**（`dict.db` / `user.db`）：
 //!
 //! ```sql
+//! -- dict.db：派生物，随时可以从语料重新生成、下载覆盖
 //! word(scheme, code, text, weight)   -- 词库本体：'pinyin' / 'wubi' / …
-//! user_word(text, count, last_used)  -- 用户选过多少次（调频用，跟词库分开存，
-//!                                    --   重新导入词库不会把它冲掉）
 //! syllable(syl)                      -- 412 个合法音节，切词用
 //! meta(key, value)                   -- 词库来源 / 导入时间之类
+//!
+//! -- user.db：用户自己的东西，换词库/重建词库都不碰它
+//! user_word(text, count, last_used)  -- 你选过多少次（调频用）
+//! user_phrase(code, text, …)         -- 你自己分段拼出来的整句（记性）
+//! user_hidden(code, text)            -- 你按 Del 拉黑的词
 //! ```
+//!
+//! 分成两个文件是因为**它们的生命周期完全不一样**：词库 86 MB、是别人整理的数据、
+//! `pliers dict fetch --force` / `pliers dict build` 会把它整个换掉（导入工具是直接把
+//! 输出文件删了重建的）；用户数据只有几十 KB，是你自己的东西，换词库时丢一次就再也不
+//! 想用了。分家之后 `dict.db` 随便删、随便换。
+//!
+//! 两个文件用 SQLite 的 `ATTACH` 连起来（turso 的 `experimental_attach`），
+//! 所以排序还是**一条 SQL**：`... LEFT JOIN user.user_word u ON u.text = w.text
+//! ORDER BY w.weight + ... DESC`。查询全都写成 `user.xxx`，主库里没有这几张表。
 //!
 //! **查询只有两种，而且都是精确/短前缀**，这一点很关键：turso（以及任何 SQL 引擎）
 //! 做"按前缀扫一大片再排序"会慢到没法用 —— 实测在 20 万行上，`code LIKE 'ni%'`
@@ -26,11 +39,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use turso::{Builder, Connection};
 
-/// 建库用的 DDL。导入工具（`pliers-dict`）和测试共用同一份，免得两边写岔。
+/// **词库**的 DDL（`dict.db`）。导入工具（`pliers-dict`）和运行时共用同一份，免得两边写岔。
 ///
 /// 注意是一条一条执行的：turso 的 `execute()` 一次只认一条语句
-/// （把四条 DDL 拼成一个字符串喂进去，它只会建第一张表）
-pub const SCHEMA: &[&str] = &[
+/// （把几条 DDL 拼成一个字符串喂进去，它只会建第一张表）
+pub const DICT_SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS word (
         scheme TEXT NOT NULL,
         code   TEXT NOT NULL,
@@ -38,14 +51,23 @@ pub const SCHEMA: &[&str] = &[
         weight INTEGER NOT NULL,
         PRIMARY KEY (scheme, code, text)
     )",
-    "CREATE TABLE IF NOT EXISTS user_word (
+    "CREATE TABLE IF NOT EXISTS syllable (syl TEXT PRIMARY KEY)",
+    "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+];
+
+/// **用户数据**的 DDL（`user.db`，挂在 `ATTACH` 进来的 `user` 库上，所以表名都带前缀）。
+///
+/// 导入工具**不碰**这几张表 —— 它只建 [`DICT_SCHEMA`]，所以新构建出来的词库里
+/// 根本没有用户表（以前是有的，混在一起）
+pub const USER_SCHEMA: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS user.user_word (
         text TEXT PRIMARY KEY,
         count INTEGER NOT NULL DEFAULT 0,
         last_used INTEGER NOT NULL DEFAULT 0
     )",
     // 用户用"分段上屏"自己拼出来的句子：键是**他敲的那串原文**，
     // 下次敲同一串就直接把这句话给他。跟 user_word 分开是因为这里要带拼音（键）
-    "CREATE TABLE IF NOT EXISTS user_phrase (
+    "CREATE TABLE IF NOT EXISTS user.user_phrase (
         code      TEXT NOT NULL,
         text      TEXT NOT NULL,
         count     INTEGER NOT NULL DEFAULT 0,
@@ -53,19 +75,18 @@ pub const SCHEMA: &[&str] = &[
         PRIMARY KEY (code, text)
     )",
     // 用户在候选框里按 Del"删掉"的词：这个词/这句话以后不再出现在这串键的候选里。
-    // 词库里的词条不动（那是导入出来的），所以另开一张"黑名单"
-    "CREATE TABLE IF NOT EXISTS user_hidden (
+    // 词库里的词条不动（那是导入出来的），所以另开一张"黑名单"。
+    // 英文候选的黑名单也在这儿（`code` 固定是 `#english`）
+    "CREATE TABLE IF NOT EXISTS user.user_hidden (
         code TEXT NOT NULL,
         text TEXT NOT NULL,
         PRIMARY KEY (code, text)
     )",
-    "CREATE TABLE IF NOT EXISTS syllable (syl TEXT PRIMARY KEY)",
-    "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
 ];
 
-/// 建表（幂等）
+/// 建词库的表（幂等）。导入工具用它 —— 它只建词库那几张表
 pub fn create_schema(conn: &Connection) -> Result<()> {
-    for statement in SCHEMA {
+    for statement in DICT_SCHEMA {
         pollster::block_on(conn.execute(statement, ()))?;
     }
     Ok(())
@@ -77,6 +98,14 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
 pub const USER_BOOST: i64 = 1_000_000;
 /// 用户词频最多算多少次（防止某一个词被刷到天上去）
 pub const USER_BOOST_CAP: i64 = 50;
+
+/// `ATTACH '<用户数据文件>' AS user`。路径里的单引号要写成两个（SQL 字符串转义）
+fn attach_user(path: &Path) -> String {
+    format!(
+        "ATTACH '{}' AS user",
+        path.to_string_lossy().replace('\'', "''")
+    )
+}
 
 /// 英文候选的黑名单键（`user_hidden.code`）。
 ///
@@ -90,6 +119,8 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 /// 词库
 pub struct Dict {
     conn: Connection,
+    /// 用户数据那个文件（`user` 库）。换词库/重建词库都不碰它
+    user_path: std::path::PathBuf,
     /// 合法音节表（从库里读出来，412 个）
     syllables: Vec<String>,
     /// 出错只吼一次，别每个按键都刷屏
@@ -97,8 +128,11 @@ pub struct Dict {
 }
 
 impl Dict {
-    /// 打开词库。缺表 / 缺数据都会返回明确的错误，提示去跑导入工具
-    pub fn open(path: &Path) -> Result<Self> {
+    /// 打开词库 + 用户数据。缺表 / 缺数据都会返回明确的错误，提示去跑导入工具。
+    ///
+    /// `user_path` 是**用户数据那个文件**（`user.db`）：它被 `ATTACH` 进来当 `user` 库，
+    /// 不存在就建一个空的。词库本身换掉（重新下载/重建）不会碰到它
+    pub fn open(path: &Path, user_path: &Path) -> Result<Self> {
         if !path.exists() {
             return Err(format!(
                 "词库不存在：{}\n装一份（写配置 + 下载词库）：\n  pliers --init\n\
@@ -107,16 +141,33 @@ impl Dict {
             )
             .into());
         }
-        let db = pollster::block_on(Builder::new_local(&path.to_string_lossy()).build())?;
+        if let Some(dir) = user_path.parent() {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("建不了目录 {}：{e}", dir.display()))?;
+        }
+        // attach 要开着才认 `ATTACH` / `user.xxx` 这种跨库写法（turso 里它还是 experimental）
+        let db = pollster::block_on(
+            Builder::new_local(&path.to_string_lossy())
+                .experimental_attach(true)
+                .build(),
+        )?;
         let conn = db.connect()?;
+        // 用户数据那个文件挂成 `user` 库（文件不存在的话 SQLite 会建一个）
+        pollster::block_on(conn.execute(&attach_user(user_path), ()))
+            .map_err(|e| format!("挂不上用户数据 {}：{e}", user_path.display()))?;
         // 顺手补一下表结构：全是 CREATE TABLE IF NOT EXISTS，成本可以忽略，
-        // 但老词库（用户表、整句表）就不用重新导入了 —— 加新表时省事
+        // 但老库（新加的表）就不用重新导入了 —— 加新表时省事
         create_schema(&conn)?;
+        for statement in USER_SCHEMA {
+            pollster::block_on(conn.execute(statement, ()))?;
+        }
         let mut dict = Self {
             conn,
+            user_path: user_path.to_path_buf(),
             syllables: Vec::new(),
             complained: std::cell::Cell::new(false),
         };
+        dict.migrate_legacy_user_tables()?;
         dict.syllables = dict.load_syllables()?;
         if dict.syllables.is_empty() {
             return Err(format!(
@@ -126,6 +177,58 @@ impl Dict {
             .into());
         }
         Ok(dict)
+    }
+
+    /// 用户数据那个文件在哪（`pliers status` 报给用户看）
+    pub fn user_path(&self) -> &Path {
+        &self.user_path
+    }
+
+    /// 老布局的用户数据（三张表混在词库里）搬到 `user.db` 去。
+    ///
+    /// 这是**一次性**升级：以前用户数据和词库在同一个文件里，分家之后得把原来那些
+    /// `user_word` / `user_phrase` / `user_hidden` 搬过来，不然"选过的词、自己拼的句子、
+    /// 拉黑的词"就全丢了。只在"词库里有、用户库里还没有"的时候搬（搬完自然就不再触发），
+    /// 两边都有的话不动手 —— 不替用户做合并这种决定
+    fn migrate_legacy_user_tables(&self) -> Result<()> {
+        if !self.has_legacy_user_tables()? {
+            return Ok(());
+        }
+        if self.count("user.user_word")? > 0 || self.count("user.user_phrase")? > 0 {
+            return Ok(()); // 用户库里已经有东西了，不合并
+        }
+        let mut moved = 0;
+        for table in ["user_word", "user_phrase", "user_hidden"] {
+            moved += pollster::block_on(self.conn.execute(
+                &format!("INSERT OR IGNORE INTO user.{table} SELECT * FROM main.{table}"),
+                (),
+            ))?;
+        }
+        if moved > 0 {
+            eprintln!(
+                "pliers: 把词库里的用户数据搬到了 {}（{moved} 条）—— 以后换词库不会丢它们了",
+                self.user_path.display()
+            );
+        }
+        Ok(())
+    }
+
+    /// 词库那个文件里还有没有老布局的用户表
+    fn has_legacy_user_tables(&self) -> Result<bool> {
+        let mut stmt = pollster::block_on(self.conn.prepare(
+            "SELECT name FROM main.sqlite_master WHERE type = 'table' AND name = 'user_word'",
+        ))?;
+        let mut rows = pollster::block_on(stmt.query(()))?;
+        Ok(pollster::block_on(rows.next())?.is_some())
+    }
+
+    /// 数一张表有多少行（`user.xxx` 这种带库名的也认）
+    fn count(&self, table: &str) -> Result<i64> {
+        let mut stmt =
+            pollster::block_on(self.conn.prepare(&format!("SELECT count(*) FROM {table}")))?;
+        let mut rows = pollster::block_on(stmt.query(()))?;
+        let row = pollster::block_on(rows.next())?.ok_or("查不到")?;
+        Ok(row.get_value(0)?.as_integer().copied().unwrap_or(0))
     }
 
     /// 合法音节表（切词用）
@@ -152,7 +255,7 @@ impl Dict {
     pub fn exact(&self, scheme: &str, code: &str, limit: usize) -> Vec<(String, i64)> {
         self.query(
             "SELECT w.text, w.weight + MIN(COALESCE(u.count, 0), ?3) * ?4 AS score
-             FROM word w LEFT JOIN user_word u ON u.text = w.text
+             FROM word w LEFT JOIN user.user_word u ON u.text = w.text
              WHERE w.scheme = ?1 AND w.code = ?2
              ORDER BY w.weight + MIN(COALESCE(u.count, 0), ?3) * ?4 DESC
              LIMIT ?5",
@@ -174,7 +277,7 @@ impl Dict {
         let upper = format!("{prefix}\u{10ffff}"); // 排在所有以 prefix 开头的串之后
         self.query(
             "SELECT w.text, w.weight + MIN(COALESCE(u.count, 0), ?4) * ?5 AS score
-             FROM word w LEFT JOIN user_word u ON u.text = w.text
+             FROM word w LEFT JOIN user.user_word u ON u.text = w.text
              WHERE w.scheme = ?1 AND w.code >= ?2 AND w.code < ?3
              ORDER BY w.weight + MIN(COALESCE(u.count, 0), ?4) * ?5 DESC
              LIMIT ?6",
@@ -231,7 +334,7 @@ impl Dict {
             .join(", ");
         let params: Vec<turso::Value> = texts.iter().map(|text| text.clone().into()).collect();
         self.query(
-            &format!("SELECT text, count FROM user_word WHERE text IN ({placeholders})"),
+            &format!("SELECT text, count FROM user.user_word WHERE text IN ({placeholders})"),
             &params,
         )
         .into_iter()
@@ -241,7 +344,7 @@ impl Dict {
     /// 这个键（用户敲的原文）上，他自己拼过的句子。按用得多的排前面
     pub fn phrases(&self, code: &str, limit: usize) -> Vec<String> {
         self.query(
-            "SELECT text, count FROM user_phrase WHERE code = ?1
+            "SELECT text, count FROM user.user_phrase WHERE code = ?1
              ORDER BY count DESC, last_used DESC LIMIT ?2",
             &[code.into(), (limit as i64).into()],
         )
@@ -254,7 +357,7 @@ impl Dict {
     pub fn note_phrase(&self, code: &str, text: &str) -> Result<()> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
         pollster::block_on(self.conn.execute(
-            "INSERT INTO user_phrase (code, text, count, last_used) VALUES (?1, ?2, 1, ?3)
+            "INSERT INTO user.user_phrase (code, text, count, last_used) VALUES (?1, ?2, 1, ?3)
              ON CONFLICT(code, text) DO UPDATE SET count = count + 1, last_used = ?3",
             turso::params![code, text, now],
         ))?;
@@ -265,7 +368,7 @@ impl Dict {
     /// 返回是否真的删掉了一行 —— 词库（`word` 表）里的词条不动，那是导入出来的
     pub fn forget_phrase(&self, code: &str, text: &str) -> Result<bool> {
         let changed = pollster::block_on(self.conn.execute(
-            "DELETE FROM user_phrase WHERE code = ?1 AND text = ?2",
+            "DELETE FROM user.user_phrase WHERE code = ?1 AND text = ?2",
             turso::params![code, text],
         ))?;
         Ok(changed > 0)
@@ -274,7 +377,7 @@ impl Dict {
     /// 这串键上"用户删掉过"的词（候选框里按 Del）。查候选时要按它过滤
     pub fn hidden(&self, code: &str) -> Vec<String> {
         self.query(
-            "SELECT text, 0 FROM user_hidden WHERE code = ?1",
+            "SELECT text, 0 FROM user.user_hidden WHERE code = ?1",
             &[code.into()],
         )
         .into_iter()
@@ -285,7 +388,7 @@ impl Dict {
     /// 记下"这串键上别再给我这个词"（`Del` 用）。返回是不是新记的
     pub fn hide(&self, code: &str, text: &str) -> Result<bool> {
         let changed = pollster::block_on(self.conn.execute(
-            "INSERT OR IGNORE INTO user_hidden (code, text) VALUES (?1, ?2)",
+            "INSERT OR IGNORE INTO user.user_hidden (code, text) VALUES (?1, ?2)",
             turso::params![code, text],
         ))?;
         Ok(changed > 0)
@@ -295,7 +398,7 @@ impl Dict {
     /// 词库里真有的词不该因为一次误操作就消失
     pub fn forget_boost(&self, text: &str) -> Result<bool> {
         let changed = pollster::block_on(self.conn.execute(
-            "DELETE FROM user_word WHERE text = ?1",
+            "DELETE FROM user.user_word WHERE text = ?1",
             turso::params![text],
         ))?;
         Ok(changed > 0)
@@ -305,7 +408,7 @@ impl Dict {
     pub fn note_used(&self, text: &str) -> Result<()> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
         pollster::block_on(self.conn.execute(
-            "INSERT INTO user_word (text, count, last_used) VALUES (?1, 1, ?2)
+            "INSERT INTO user.user_word (text, count, last_used) VALUES (?1, 1, ?2)
              ON CONFLICT(text) DO UPDATE SET count = count + 1, last_used = ?2",
             turso::params![text, now],
         ))?;
@@ -354,8 +457,8 @@ impl Dict {
             words: count("SELECT count(*) FROM word")?,
             singles: count("SELECT count(*) FROM word WHERE length(text) = 1")?,
             phrasal: count("SELECT count(*) FROM word WHERE length(text) > 1")?,
-            user_words: count("SELECT count(*) FROM user_word")?,
-            user_phrases: count("SELECT count(*) FROM user_phrase")?,
+            user_words: count("SELECT count(*) FROM user.user_word")?,
+            user_phrases: count("SELECT count(*) FROM user.user_phrase")?,
             schemes,
         })
     }
@@ -388,6 +491,21 @@ mod tests {
     /// 只关心词，不关心分数
     fn words(rows: Vec<(String, i64)>) -> Vec<String> {
         rows.into_iter().map(|(text, _)| text).collect()
+    }
+
+    /// 每个测试一个干净的临时目录
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "pliers-dict-{tag}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 目录要活到进程结束：turso 随时可能回写 -wal / -shm
+        super::testing::keep_dir(dir.clone());
+        dir
     }
 
     #[test]
@@ -493,9 +611,184 @@ mod tests {
         assert!(hits.contains(&"你哈".to_string()), "{hits:?}");
     }
 
+    // ---- 词库和用户数据分成两个文件 ----------------------------------------
+
+    /// 造一个临时的库文件（`legacy = true` 时按**老布局**把用户表也建在里面）
+    fn make_dict(path: &Path, legacy: bool) {
+        let db = pollster::block_on(Builder::new_local(&path.to_string_lossy()).build()).unwrap();
+        let conn = db.connect().unwrap();
+        create_schema(&conn).unwrap();
+        if legacy {
+            // 老版本的 DDL：三张用户表就建在词库这个文件里
+            for statement in [
+                "CREATE TABLE user_word (
+                    text TEXT PRIMARY KEY,
+                    count INTEGER NOT NULL DEFAULT 0,
+                    last_used INTEGER NOT NULL DEFAULT 0
+                )",
+                "CREATE TABLE user_phrase (
+                    code TEXT NOT NULL, text TEXT NOT NULL,
+                    count INTEGER NOT NULL DEFAULT 0, last_used INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (code, text)
+                )",
+                "CREATE TABLE user_hidden (code TEXT NOT NULL, text TEXT NOT NULL,
+                    PRIMARY KEY (code, text))",
+            ] {
+                pollster::block_on(conn.execute(statement, ())).unwrap();
+            }
+            pollster::block_on(conn.execute(
+                "INSERT INTO user_word (text, count) VALUES ('泥', 3),
+                        ('你好马', 5)",
+                (),
+            ))
+            .unwrap();
+            pollster::block_on(conn.execute(
+                "INSERT INTO user_phrase (code, text, count) VALUES ('nihaoma', '你好马', 2)",
+                (),
+            ))
+            .unwrap();
+        }
+        pollster::block_on(conn.execute(
+            "INSERT INTO word (scheme, code, text, weight)
+             VALUES ('pinyin', 'ni', '泥', 7000), ('pinyin', 'ni', '你', 2345870)",
+            (),
+        ))
+        .unwrap();
+        for syllable in ["ni", "hao", "ma"] {
+            pollster::block_on(conn.execute(
+                "INSERT INTO syllable (syl) VALUES (?1)",
+                turso::params![syllable],
+            ))
+            .unwrap();
+        }
+    }
+
+    /// 单独打开一个文件数行数（不 attach 任何东西）。表不存在就返回 Err
+    fn rows_in(path: &Path, sql: &str) -> Result<i64> {
+        let db = pollster::block_on(Builder::new_local(&path.to_string_lossy()).build())?;
+        let conn = db.connect()?;
+        let mut stmt = pollster::block_on(conn.prepare(sql))?;
+        let mut rows = pollster::block_on(stmt.query(()))?;
+        let row = pollster::block_on(rows.next())?.ok_or("查不到")?;
+        Ok(row.get_value(0)?.as_integer().copied().unwrap_or(0))
+    }
+
+    #[test]
+    fn 用户数据写在另一个文件里() {
+        let dir = temp_dir("split");
+        let dict_path = dir.join("dict.db");
+        let user_path = dir.join("user.db");
+        make_dict(&dict_path, false);
+
+        {
+            let dict = Dict::open(&dict_path, &user_path).unwrap();
+            // 三次：一次（+100 万）还压不过「你」的 234 万
+            for _ in 0..3 {
+                dict.note_used("泥").unwrap();
+            }
+            dict.note_phrase("nihaoma", "你好马").unwrap();
+            dict.hide("nihaoma", "你好马").unwrap();
+            assert_eq!(dict.user_path(), user_path, "报出来的路径该是 user.db");
+            assert_eq!(dict.boosts(&["泥".to_string()]).get("泥"), Some(&3));
+        }
+
+        // 词库那个文件里**没有**用户表
+        assert!(
+            rows_in(&dict_path, "SELECT count(*) FROM user_word").is_err(),
+            "词库里不该再有 user_word 表"
+        );
+        // 用户数据在自己的文件里
+        assert_eq!(
+            rows_in(&user_path, "SELECT count(*) FROM user_word").unwrap(),
+            1
+        );
+        assert_eq!(
+            rows_in(&user_path, "SELECT count(*) FROM user_phrase").unwrap(),
+            1
+        );
+        assert_eq!(
+            rows_in(&user_path, "SELECT count(*) FROM user_hidden").unwrap(),
+            1
+        );
+
+        // 重新打开：用户数据还在，而且照样参与排序 / 过滤
+        let dict = Dict::open(&dict_path, &user_path).unwrap();
+        assert_eq!(
+            words(dict.exact("pinyin", "ni", 2))[0],
+            "泥",
+            "选过的排前面"
+        );
+        assert_eq!(dict.phrases("nihaoma", 9), ["你好马"]);
+        assert_eq!(dict.hidden("nihaoma"), ["你好马"]);
+    }
+
+    #[test]
+    fn 换掉词库也不丢用户数据() {
+        let dir = temp_dir("swap");
+        let dict_path = dir.join("dict.db");
+        let user_path = dir.join("user.db");
+        make_dict(&dict_path, false);
+        {
+            let dict = Dict::open(&dict_path, &user_path).unwrap();
+            for _ in 0..3 {
+                dict.note_used("泥").unwrap();
+            }
+        }
+
+        // 模拟 pliers dict build / fetch --force：把词库文件删了重建一份新的
+        std::fs::remove_file(&dict_path).unwrap();
+        make_dict(&dict_path, false);
+
+        let dict = Dict::open(&dict_path, &user_path).unwrap();
+        assert_eq!(
+            rows_in(&user_path, "SELECT count(*) FROM user_word").unwrap(),
+            1,
+            "用户数据该在 user.db 里活着"
+        );
+        assert_eq!(words(dict.exact("pinyin", "ni", 2))[0], "泥", "偏好也还在");
+    }
+
+    #[test]
+    fn 老布局的用户数据会搬到新文件() {
+        // 以前用户表和词库混在一个文件里：升级之后得把原来那些数据搬过来，
+        // 不然"选过的词、自己拼的句子"就丢了
+        let dir = temp_dir("legacy");
+        let dict_path = dir.join("dict.db");
+        let user_path = dir.join("user.db");
+        make_dict(&dict_path, true);
+
+        let dict = Dict::open(&dict_path, &user_path).unwrap();
+        assert_eq!(
+            words(dict.exact("pinyin", "ni", 2))[0],
+            "泥",
+            "搬过来的偏好生效"
+        );
+        assert_eq!(dict.phrases("nihaoma", 9), ["你好马"]);
+        assert_eq!(
+            rows_in(&user_path, "SELECT count(*) FROM user_word").unwrap(),
+            2,
+            "两行都搬过来了"
+        );
+
+        // 搬完之后不再重复搬：往用户库里加一行，再开一次还是 2+1 行
+        {
+            let dict = Dict::open(&dict_path, &user_path).unwrap();
+            dict.note_used("你").unwrap();
+        }
+        let dict = Dict::open(&dict_path, &user_path).unwrap();
+        assert_eq!(
+            rows_in(&user_path, "SELECT count(*) FROM user_word").unwrap(),
+            3
+        );
+        assert_eq!(words(dict.exact("pinyin", "ni", 2)).len(), 2);
+    }
+
     #[test]
     fn 缺词库时报错要说人话() {
-        let message = match Dict::open(Path::new("/nonexistent/pliers.db")) {
+        let message = match Dict::open(
+            Path::new("/nonexistent/pliers.db"),
+            Path::new("/nonexistent/user.db"),
+        ) {
             Ok(_) => panic!("不该打开成功"),
             Err(e) => e.to_string(),
         };
@@ -527,6 +820,11 @@ pub(crate) mod testing {
     thread_local! {
         /// 临时目录要活到进程结束：turso 随时可能回写 -wal / -shm 文件
         static DIRS: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// 把临时目录记下来，活到进程结束（turso 随时可能回写 -wal / -shm 文件）
+    pub fn keep_dir(dir: PathBuf) {
+        DIRS.with(|dirs| dirs.borrow_mut().push(dir));
     }
 
     /// 造一份小词库
@@ -596,6 +894,7 @@ pub(crate) mod testing {
             }
         }
 
-        Dict::open(&path).unwrap()
+        // 用户数据是**另一个文件**：测试里也分开建，跟真机一致
+        Dict::open(&path, &dir.join("user.db")).unwrap()
     }
 }

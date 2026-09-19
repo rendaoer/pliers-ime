@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 
 use pliers_engine::{Config, Dict};
 
+use crate::pick;
+
 /// 预构建词库的地址：挂在仓库的 Release 上。
 /// `releases/latest/download/` 永远指向最新 Release 里的同名资产，所以不用跟着版本号改。
 /// 想换源：`PLIERS_DICT_URL=... pliers dict fetch`（公司镜像、自己搭的服务器都行）
@@ -181,24 +183,40 @@ fn build_dict(dest: &Path, refresh: bool) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
+/// 这个文件多大（小文件也别显示成 0 MB）
+fn size(path: &Path) -> String {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.len() >= 1024 * 1024 => format!("{} MB", meta.len() / 1024 / 1024),
+        Ok(meta) => format!("{} KB", meta.len().max(1024) / 1024),
+        Err(_) => "还没有，用着会自动建".to_string(),
+    }
+}
+
+/// 一项一行（标签补到 10 列 —— 中文一个字算两列，所以"用户数据"和"词库"照样对齐）
+fn row(label: &str, value: impl std::fmt::Display) -> String {
+    format!("{} {value}", pick::pad(label, 10))
+}
+
 /// `pliers dict status`：现在用的是哪个库、有没有、多大、里面是什么
 fn status() -> Result<(), Box<dyn std::error::Error>> {
     let dest = target_path();
-    println!("词库    {}", dest.display());
+    let user = user_target_path();
+    println!("{}", row("词库", dest.display()));
+    println!(
+        "{}",
+        row("用户数据", format!("{}（{}）", user.display(), size(&user)))
+    );
     if !dest.exists() {
-        println!("        还没有 —— pliers --init 装一份（或 pliers dict build 自己构建）");
+        println!("          还没有 —— pliers --init 装一份（或 pliers dict build 自己构建）");
         return Ok(());
     }
-    println!(
-        "大小    {} MB",
-        std::fs::metadata(&dest)?.len() / 1024 / 1024
-    );
+    println!("{}", row("大小", size(&dest)));
     if let Err(e) = describe_contents(&dest) {
         // 输入法开着的时候词库被它独占（turso 是独占锁），读不进去很正常 ——
         // 这不是词库坏了，所以只说清楚原因，不当成错误
-        println!("内容    读不了：{e}");
+        println!("{}", row("内容", format!("读不了：{e}")));
         println!(
-            "        输入法正开着的话词库被它独占着，退掉再看；它自己报的现状用 pliers status"
+            "          输入法正开着的话词库被它独占着，退掉再看；它自己报的现状用 pliers status"
         );
     }
     Ok(())
@@ -207,35 +225,55 @@ fn status() -> Result<(), Box<dyn std::error::Error>> {
 /// 报一下这个库的体检结果：大小、词条数、来源、用户数据。
 /// `Dict::open` 本身就是校验 —— 表缺了、音节表空了都会报错
 fn describe_path(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    println!(
-        "大小    {} MB",
-        std::fs::metadata(path)?.len() / 1024 / 1024
-    );
+    println!("{}", row("大小", size(path)));
     describe_contents(path)
 }
 
 /// 打开来数一数里面有什么（下载完 / 构建完用它验一遍）
 fn describe_contents(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let dict = Dict::open(path)?;
+    let user = user_target_path();
+    let dict = Dict::open(path, &user)?;
     let stats = dict.stats()?;
     println!(
-        "词条    {}（单字 {} + 词 {}）",
-        stats.words, stats.singles, stats.phrasal
+        "{}",
+        row(
+            "词条",
+            format!(
+                "{}（单字 {} + 词 {}）",
+                stats.words, stats.singles, stats.phrasal
+            )
+        )
     );
+    // 一个库里可以放好几套方案（全拼 / 五笔 / …），分开报
     for (scheme, rows) in &stats.schemes {
-        println!("        {scheme}：{rows} 条");
+        println!("           {scheme}：{rows} 条");
     }
     if let Some(source) = dict.meta("source") {
-        println!("来源    {source}");
+        println!("{}", row("来源", source));
     }
     if let Some(freq) = dict.meta("freq") {
-        println!("权重    {freq}");
+        println!("{}", row("权重", freq));
     }
     println!(
-        "用户    选过 {} 个词，自己拼的句子 {} 条",
-        stats.user_words, stats.user_phrases
+        "{}",
+        row(
+            "用户数据",
+            format!(
+                "选过 {} 个词，自己拼的句子 {} 条（{}）",
+                stats.user_words,
+                stats.user_phrases,
+                user.display()
+            )
+        )
     );
     Ok(())
+}
+
+/// 输入法实际会用的那个**用户数据**文件（认 `PLIERS_USER_DB`）
+fn user_target_path() -> PathBuf {
+    Config::load()
+        .map(|config| config.user_path())
+        .unwrap_or_else(|_| pliers_engine::config::default_user_path())
 }
 
 /// 输入法实际会用的那个词库文件：配置文件里的 `dict.path`（认 `PLIERS_DICT`）。

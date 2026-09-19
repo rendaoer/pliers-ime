@@ -105,38 +105,92 @@ cargo run -p pliers-dict --release -- --rime cn_dicts/base.dict.yaml --rime cn_d
 
 ## 码表方案（五笔 / 郑码 / 仓颉）
 
-码表用 `--table` 导入：`--table wubi.txt --table-scheme wubi`，
-每行 `词<TAB>码[<TAB>权重]`（rime 那种 .txt 码表就是这个格式）。见[配置](config.md#五笔--码表方案)。
+码表和拼音**可以放在同一个库里**，靠 `word.scheme` 那个字段区分（`pinyin` / `wubi` / …，
+`pliers dict status` 会分行数）。码表每行是 `词<TAB>码[<TAB>权重]`（rime 那种 .txt 码表就是这个格式）。
 
-## 表结构
+注意**每次导入都是重建输出文件**（词库是派生物，旧库直接覆盖，用户数据在 `user.db` 里不受影响），
+所以想"拼音 + 五笔"都在，就在同一条命令里把两种语料都给上：
 
-```sql
-word(scheme, code, text, weight)    -- 词库本体：scheme='pinyin' / 'wubi' / …
-user_word(text, count, last_used)   -- 用户选过多少次（调频用）
-user_phrase(code, text, count, last_used)  -- 用户自己分段拼出来的句子
-user_hidden(code, text)             -- 用户按 Del 删掉的词（黑名单）
-syllable(syl)                       -- 412 个合法音节，切词用
-meta(key, value)                    -- 词库来源、权重来源、导入时间、词条数
+```bash
+pliers-dict --rime ~/.cache/pliers/rime-frost \
+            --table wubi.txt --table-scheme wubi \
+            --out ~/.local/share/pliers/dict.db
 ```
 
-* `scheme` 字段就是"多方案"的落点：一套方案一批行，互不干扰。一个库里可以同时有
-  `pinyin` 和 `wubi` 的条目（`pliers dict status` 会分行数）
-* 词库是**只读的派生物**：重新导入不会碰 `user_word`，用户习惯留得住
-* 权重 = 语料权重（缩放后）+ 用户选过的次数 ×100 万（最多算 50 次）。
-  所以选过十次的词能压过绝大多数常用词，但压不过「的」「你」这种顶级高频词 ——
-  避免误选一次就再也翻不了身
+（顺手说一句：`pliers dict build` 只会导 `--rime` 那部分，码表得自己用 `pliers-dict` 加。）
+见[配置](config.md#五笔--码表方案)。
 
-排序就是一句 SQL：
+## 表结构：词库和用户数据是**两个文件**
+
+| 文件 | 里面有什么 | 谁写的 |
+| --- | --- | --- |
+| `~/.local/share/pliers/dict.db`（86 MB） | `word` 词条 + 权重、`syllable` 音节表、`meta` 来源 | 导入工具（`pliers-dict`） |
+| `~/.local/share/pliers/user.db`（几十 KB） | `user_word` 选过多少次、`user_phrase` 你自己拼的整句、`user_hidden` 按 Del 拉黑的词 | 输入法运行时 |
+
+```sql
+-- dict.db：派生物，随时可以重新生成 / 下载覆盖
+word(scheme, code, text, weight)    -- 词库本体：scheme='pinyin' / 'wubi' / …
+syllable(syl)                       -- 412 个合法音节，切词用
+meta(key, value)                    -- 词库来源、权重来源、导入时间、词条数
+
+-- user.db：你自己的东西，换词库不会碰它
+user_word(text, count, last_used)   -- 选过多少次（调频用）
+user_phrase(code, text, count, last_used)  -- 你自己分段拼出来的句子
+user_hidden(code, text)             -- 按 Del 删掉的词（黑名单，英文候选那条是 `#english`）
+```
+
+**为什么分成两个文件**：它们的生命周期完全不一样。词库 86 MB、是别人整理的数据、
+`pliers dict fetch --force` 和 `pliers dict build` 会把它整个换掉（导入工具是先把输出文件
+删了重建的）；用户数据只有几十 KB，是你自己的东西 —— 混在一个文件里，换一次词库就把
+"选过的词、自己拼的句子、拉黑的词"全丢了。分家之后 **`dict.db` 随便删、随便换**。
+
+两个文件用 SQLite 的 `ATTACH` 连起来（turso 的 `experimental_attach`），所以排序还是
+一句 SQL，不用把用户词频搬到内存里再排：
 
 ```sql
 SELECT w.text, w.weight + MIN(COALESCE(u.count, 0), 50) * 1000000 AS score
-FROM word w LEFT JOIN user_word u ON u.text = w.text
+FROM word w LEFT JOIN user.user_word u ON u.text = w.text
 WHERE w.scheme = ?1 AND w.code = ?2
 ORDER BY score DESC LIMIT ?3
 ```
 
-选中的词会在 `Engine::pick()` 里写一笔 `user_word`，下次它自己就往前排了 ——
-这就是"用户使用频率权重"。`user_phrase` / `user_hidden` 的语义见[使用](usage.md#分段上屏--记性)。
+* `scheme` 字段就是"多方案"的落点：一套方案一批行，互不干扰。一个库里可以同时有
+  `pinyin` 和 `wubi` 的条目（`pliers dict status` 会分行数）
+* 权重 = 语料权重（缩放后）+ 用户选过的次数 ×100 万（最多算 50 次）。
+  所以选过十次的词能压过绝大多数常用词，但压不过「的」「你」这种顶级高频词 ——
+  避免误选一次就再也翻不了身
+* 选中的词会在 `Engine::pick()` 里写一笔 `user.user_word`，下次它自己就往前排了 ——
+  这就是"用户使用频率权重"。`user_phrase` / `user_hidden` 的语义见[使用](usage.md#分段上屏--记性)
+* 升级上来的老库（用户表还混在词库里）会在第一次打开时**自动搬**到 `user.db`，
+  终端上会打一句"把词库里的用户数据搬到了 …（N 条）"。两边都有数据的话不合并，
+  免得替你乱做决定
+
+## 维护
+
+**改词库之前先把输入法退掉**：turso 开着的时候会一直占着这个库，别的进程连只读连接都进不去
+（`database is locked`）。用户数据现在是另一个文件，所以"清空用户词频"不用碰词库：
+
+```bash
+# 加词 / 改权重（改的是词库）
+sqlite3 ~/.local/share/pliers/dict.db "INSERT OR REPLACE INTO word (scheme, code, text, weight) VALUES ('pinyin','ni hao','你好',3000000);"
+
+# 想把用户词频清零（改的是用户数据）
+sqlite3 ~/.local/share/pliers/user.db "DELETE FROM user_word;"
+
+# 想让输入法彻底忘掉你的习惯：直接删文件就行（词库不用动）
+rm ~/.local/share/pliers/user.db
+```
+
+只想看看数据（输入法开着也能读，因为读的是副本）。
+**一定要连 `-wal` 一起拷**：最新的写入还在 WAL 里，只拷 `.db` 会看到旧数据。
+
+```bash
+mkdir -p /tmp/dbcopy
+cp ~/.local/share/pliers/user.db     /tmp/dbcopy/          # 用户数据（小，一眼能看完）
+cp ~/.local/share/pliers/user.db-wal /tmp/dbcopy/ 2>/dev/null   # 没有就是刚 checkpoint 过
+
+sqlite3 /tmp/dbcopy/user.db "SELECT text, count, last_used FROM user_word ORDER BY last_used DESC LIMIT 10;"
+```
 
 ## 维护
 

@@ -75,14 +75,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("输出     ：{}", args.out.display());
     println!();
 
-    // 每次重新导入都从零开始：词库是可以随时重建的派生物，用户数据在 user_word 表里，
-    // 但那也一起重建更省事 —— 所以先备份掉（如果存在）
+    // 每次重新导入都从零开始：词库是**可以随时重建的派生物**，用户数据在另一个文件
+    //（user.db）里，跟这个文件无关 —— 所以旧库直接扔，不留 .bak（以前留，是因为用户数据
+    // 混在里面；现在那 90 MB 的备份只是占地方，重建一次也就几秒）
     if args.out.exists() {
-        let backup = args.out.with_extension("db.bak");
-        std::fs::rename(&args.out, &backup)?;
-        println!("旧词库已备份到 {}", backup.display());
+        std::fs::remove_file(&args.out)?;
+        println!("覆盖旧词库 {}", args.out.display());
     }
-    // 备份完还留着旧库的 WAL 的话，新库会被它污染
+    // 旧库的 WAL / SHM 还留着的话，新库会被它污染
     for extra in ["-wal", "-shm"] {
         let _ = std::fs::remove_file(PathBuf::from(format!("{}{extra}", args.out.display())));
     }

@@ -75,8 +75,10 @@ name = "wubi"             # 词库里 word.scheme 用哪个名字
 ```
 
 码表用 pliers-dict 的 `--table` 导入：`--table wubi.txt --table-scheme wubi`
-（每行 `词<TAB>码[<TAB>权重]`，rime 那种 .txt 码表就是这个格式）。仓库里**没有**带码表数据，
-所以这条路目前只有骨架 —— 见[已知不足](pitfalls.md#已知不足)。
+（每行 `词<TAB>码[<TAB>权重]`，rime 那种 .txt 码表就是这个格式）。全拼和码表**可以在同一个
+`dict.db` 里共存**（`word.scheme` 字段区分），但每次导入都会重建那个文件 ——
+想两套都有就在同一条命令里带上 `--rime`，见[词库](dictionary.md#码表方案五笔--郑码--仓颉)。
+仓库里**没有**带码表数据，所以这条路目前只有骨架 —— 见[已知不足](pitfalls.md#已知不足)。
 
 ### 整句候选（全拼/双拼共用）
 
@@ -93,13 +95,19 @@ sentence = true           # 想要"只出词库里真有的词"就设 false
 
 ```toml
 [dict]
-path = "~/.local/share/pliers/dict.db"   # 也可以指向任何一份词库副本
+path = "~/.local/share/pliers/dict.db"   # 词库（派生物，可以随时换/重建）
+user_path = "~/.local/share/pliers/user.db"  # 用户数据（选过的词/自己拼的句子/拉黑的词）
 max_candidates = 9                       # 一页显示几个候选
 pool_size = 90                           # 一次准备多少个候选 = 最多能翻多少页（90 就是 10 页，得 ≥ max_candidates）
 ```
 
-`path` 认 `~`；也可以整个用环境变量顶掉：`PLIERS_DICT=/path/to/dict.db`。
-词库怎么生成见[词库](dictionary.md)。
+`path` 和 `user_path` 都认 `~`；也可以整个用环境变量顶掉：
+`PLIERS_DICT=/path/to/dict.db`、`PLIERS_USER_DB=/path/to/user.db`。
+
+**词库和用户数据是两个文件**：换词库（`pliers dict fetch --force` / `pliers dict build`）
+只会动 `path`，`user_path` 里那些"你选过的词、你自己拼出来的句子、你按 Del 拉黑的词"
+不受影响；反过来想把输入法的记性清掉，删 `user_path` 那个文件就行，词库不用重装。
+两个文件内部用 SQLite 的 `ATTACH` 连起来，所以排序还是一条 SQL —— 见[词库](dictionary.md#表结构词库和用户数据是两个文件)。
 
 ## 输入习惯（engine）
 
@@ -160,7 +168,8 @@ pliers reload                             # 手动让它重读一遍配置文件
 
 ```
 方案      双拼（小鹤）
-词库      /home/dao/.local/share/pliers/dict.db（131 MB）
+词库      /home/dao/.local/share/pliers/dict.db（86 MB）
+用户数据  /home/dao/.local/share/pliers/user.db（8 KB）
 候选      一页 9 个，池子 90 个
 英文候选  开（词表 25223 个词，一次最多 5 个）
 中英切换  ctrl+space

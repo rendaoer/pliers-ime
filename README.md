@@ -34,6 +34,11 @@ text-input 协议**：Firefox / GTK / Qt 应用都行，alacritty 0.17（基于 
 看现在装的是哪份：`pliers dict status` —— 见 [docs/dictionary.md](docs/dictionary.md)。
 发布出来的词库资产按 GPL-3.0 分发（语料是 GPL-3.0 的），代码本身不受影响。
 
+**词库和用户数据是两个文件**：`dict.db` 是派生物（下载/重建随你），`user.db` 里放
+「你选过哪些词、你自己拼出来的句子、你按 `Del` 拉黑的词」—— 重新装词库不会把这些弄丢；
+反过来想让输入法忘掉你的习惯，删 `user.db` 就行，不用动词库（两个文件内部用 SQLite 的
+`ATTACH` 连起来，见 [docs/dictionary.md](docs/dictionary.md#表结构词库和用户数据是两个文件)）。
+
 配置默认是全拼，不用写任何文件；要一份带注释的模板就 `pliers --init-config`。
 跑着的时候另开一个终端 `pliers status` 看现状、`pliers set` 上下选着改 —— 不用重启。
 
@@ -43,7 +48,7 @@ seat」然后退出，所以别同时跑两个。
 想确认自己没跑歪：
 
 ```bash
-cargo test --workspace        # 205 个单测，不需要合成器、不需要词库
+cargo test --workspace        # 208 个单测，不需要合成器、不需要词库
 ./tools/run_mock_tests.sh     # mock 合成器跑 27 个场景 + 2 项在线改配置检查
 ```
 

@@ -386,6 +386,16 @@ impl State {
             Ok(meta) => format!("{}（{} MB）", dict_path.display(), meta.len() / 1024 / 1024),
             Err(_) => format!("{}（打不开？）", dict_path.display()),
         };
+        // 用户数据是**另一个文件**（换词库不会碰它），现状里也报一下
+        let user_path = config.user_path();
+        let user = match std::fs::metadata(&user_path) {
+            Ok(meta) => format!(
+                "{}（{} KB）",
+                user_path.display(),
+                meta.len().max(1024) / 1024
+            ),
+            Err(_) => format!("{}（还没有，用着会自动建）", user_path.display()),
+        };
         let (kind, layout, name, sentence) = match &config.scheme {
             pliers_engine::SchemeConfig::FullPinyin { sentence } => {
                 ("full-pinyin", String::new(), String::new(), *sentence)
@@ -405,6 +415,8 @@ impl State {
             format!("sentence={sentence}"),
             format!("dict={dict}"),
             format!("dict_path={}", dict_path.display()),
+            format!("user={user}"),
+            format!("user_path={}", user_path.display()),
             format!("candidates={}", config.dict.max_candidates),
             format!("pool={}", config.dict.pool_size),
             format!("toggle={}", config.engine.toggle_keys.join(",")),
@@ -445,7 +457,8 @@ impl State {
             "dict.path" if std::env::var_os("PLIERS_DICT").is_some() => {
                 "；但 PLIERS_DICT 环境变量优先级更高，实际用的还是它".to_string()
             }
-            "dict.path" => "；词库已经重新打开了，用户词频还在库里".to_string(),
+            "dict.path" => "；词库已经重新打开了，用户词频在 user.db 里、不受影响".to_string(),
+            "dict.user_path" => "；用户数据换了个文件，选过的词也跟着换了".to_string(),
             // 词表是起引擎的时候读进内存的，改完 path 得重新读一遍 —— 这里重建引擎了
             "english.path" | "english.enabled" => "；英文词表已经重新读了".to_string(),
             "english.limit" if self.config.english.enabled => {

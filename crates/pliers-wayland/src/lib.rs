@@ -18,6 +18,7 @@ pub mod control;
 mod keyboard;
 mod poll;
 mod popup;
+mod repeat;
 
 use std::error::Error;
 use std::os::fd::{AsFd, AsRawFd};
@@ -41,6 +42,7 @@ use keyboard::Keyboard;
 use pliers_engine::{Action, Config, Engine, KeyInput, Mode, Preedit};
 use pliers_popup::Painter;
 use popup::PopupSurface;
+use repeat::Repeat;
 
 /// keysym 常量留给引擎用，这里重导出一份方便主程序看
 pub use pliers_engine;
@@ -164,6 +166,7 @@ fn run_loop(
         // 提示到点了就自己收掉，别等下一个按键（切完中英文不打字的话，
         // 等按键就等于一直挂在那儿）
         state.expire_notice();
+        state.repeat_due();
         state.serve_control();
         state.reload_if_config_changed();
     }
@@ -224,6 +227,9 @@ struct State {
     caps_lock: bool,
     /// 上一次同步给虚拟键盘的修饰键掩码（depressed, latched, locked, group）
     last_mods: (u32, u32, u32, u32),
+    /// 键盘自动重复：合成器只给速率和延迟（`repeat_info`），重复得我们自己做 ——
+    /// 不做的表现就是"按住退格只删一个字母"。见 [`repeat`]
+    repeat: Repeat,
 
     // 候选框
     popup: Option<PopupSurface>,
@@ -580,14 +586,30 @@ impl State {
     }
 
     /// 这一轮 `poll(2)` 最多睡多久：既要定期看一眼配置文件，
-    /// 也要赶在提示到点之前醒过来（不然它得等到下一次按键或下一轮超时才消失）
+    /// 也要赶在提示到点之前醒过来（不然它得等到下一次按键或下一轮超时才消失），
+    /// 还要赶在"该重复下一个键"之前醒过来（按住退格得一下一下地删）
     fn poll_timeout(&self) -> std::time::Duration {
-        match self.notice_until {
-            Some(until) => {
-                WATCH_INTERVAL.min(until.saturating_duration_since(std::time::Instant::now()))
-            }
-            None => WATCH_INTERVAL,
+        let now = std::time::Instant::now();
+        let mut timeout = WATCH_INTERVAL;
+        if let Some(until) = self.notice_until {
+            timeout = timeout.min(until.saturating_duration_since(now));
         }
+        if let Some(next) = self.repeat.timeout(now) {
+            timeout = timeout.min(next);
+        }
+        timeout
+    }
+
+    /// 到点了：按住的键当成"又按了一次"，走同一条路（引擎吃掉的还是吃掉、
+    /// 该转发给应用的还是转发）—— 所以按住退格能连删、终端里按住退格也能连删
+    fn repeat_due(&mut self) {
+        let Some((keycode, keysym)) = self.repeat.due(std::time::Instant::now()) else {
+            return;
+        };
+        if self.debug {
+            eprintln!("pliers:   → 长按重复 keycode={keycode} keysym=0x{keysym:04x}");
+        }
+        self.handle_key(keycode, keysym, true);
     }
 
     /// 把预编辑串发给应用（应用把它显示在输入框里），并同步候选框
@@ -803,6 +825,8 @@ impl Dispatch<im::ZwpInputMethodV2, ()> for State {
             // 焦点离开输入框：按住没放的键不会再有抬起事件，账本一起清掉
             im::Event::Deactivate => {
                 state.active = false;
+                // 按住没放的键不会再有抬起事件了，重复也跟着停
+                state.repeat.clear();
                 // 这里**上屏不了**，只能丢掉正在打的拼音。原因是合成器的时序：
                 // 它先发 deactivate 给我们，紧接着就把这次 text-input 会话收掉了
                 //（niri/smithay: keyboard.rs 里 deactivate_input_method() 之后
@@ -836,6 +860,32 @@ impl Dispatch<im::ZwpInputMethodV2, ()> for State {
             _ => {}
         }
     }
+}
+
+/// 这个键值不值得重复。修饰键（Shift/Ctrl/Alt/Super/Caps）不重复，
+/// 输入法自己的切换键（Ctrl+空格）也不重复 —— 它是"切一下"，不是"按着不放"
+fn repeatable(state: &State, keysym: u32) -> bool {
+    if is_modifier(keysym) {
+        return false;
+    }
+    if keysym == pliers_engine::KEY_SPACE
+        && state.ctrl_held
+        && state
+            .config
+            .engine
+            .toggle_keys
+            .iter()
+            .any(|key| key == "ctrl+space")
+    {
+        return false;
+    }
+    true
+}
+
+/// X11 里的修饰键 keysym：Shift_L(0xffe1)…Hyper_R(0xffee)，外加 ISO_Level3_Shift(0xfe03)。
+/// 真键盘按住 Shift 也不会重复
+fn is_modifier(keysym: u32) -> bool {
+    (0xffe1..=0xffee).contains(&keysym) || keysym == 0xfe03
 }
 
 impl Dispatch<grab::ZwpInputMethodKeyboardGrabV2, ()> for State {
@@ -881,6 +931,13 @@ impl Dispatch<grab::ZwpInputMethodKeyboardGrabV2, ()> for State {
                     None => return,
                 };
                 state.refresh_mods();
+                // 自动重复：记下"现在按着谁"。修饰键和输入法自己的切换键不重复 ——
+                // 按住 Shift 不放会在松手时被当成"轻按 Shift"切模式，
+                // 按住 Ctrl+空格不放会来回切中英文
+                let repeatable = repeatable(state, keysym);
+                state
+                    .repeat
+                    .key(key, keysym, pressed, repeatable, std::time::Instant::now());
                 if state.debug {
                     let preedit = state.engine().text().to_string();
                     eprintln!(
@@ -909,6 +966,15 @@ impl Dispatch<grab::ZwpInputMethodKeyboardGrabV2, ()> for State {
                     );
                 }
                 state.sync_mods_to_vk((mods_depressed, mods_latched, mods_locked, group));
+            }
+
+            // 合成器报"按住多久开始重复、每秒重复几次"。它自己**不会**替我们重复
+            //（协议跟 wl_keyboard 一个规矩），所以这个值是我们唯一的依据
+            grab::Event::RepeatInfo { rate, delay } => {
+                if state.debug {
+                    eprintln!("pliers: 合成器报的重复速率 rate={rate}/s delay={delay}ms");
+                }
+                state.repeat.set_info(rate, delay);
             }
 
             _ => {}
@@ -1021,5 +1087,47 @@ mod tests {
         let timeout = state.poll_timeout();
         assert!(timeout <= left, "poll 睡太久了：{timeout:?} > {left:?}");
         assert!(timeout > std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn 按住键时_poll_按重复的节拍醒() {
+        // 什么都没按：平时那样（只为自动重读配置文件醒）
+        let mut state = State::default();
+        assert_eq!(state.poll_timeout(), WATCH_INTERVAL);
+
+        // 按住退格：poll 得在"该重复下一个"之前醒过来，不然按住不放就是不删
+        state.repeat.set_info(25, 10);
+        state.repeat.key(
+            14,
+            pliers_engine::KEY_BACKSPACE,
+            true,
+            true,
+            std::time::Instant::now(),
+        );
+        let timeout = state.poll_timeout();
+        assert!(
+            timeout <= std::time::Duration::from_millis(10),
+            "按住退格时 poll 睡太久了：{timeout:?}"
+        );
+    }
+
+    #[test]
+    fn 修饰键和切换键不重复() {
+        let state = State::default();
+        // Shift_L / Control_L / Caps_Lock：真键盘按住也不重复
+        for keysym in [0xffe1, 0xffe2, 0xffe3, 0xffe5] {
+            assert!(!repeatable(&state, keysym), "0x{keysym:04x} 不该重复");
+        }
+        // 普通字母键：重复
+        assert!(repeatable(&state, 0x61));
+
+        // Ctrl+空格是默认的切换键：按住不放会来回切中英文，所以不重复
+        let ctrl = State {
+            ctrl_held: true,
+            ..State::default()
+        };
+        assert!(!repeatable(&ctrl, pliers_engine::KEY_SPACE));
+        // 没按 Ctrl 的空格照旧重复（组词完了按住空格就是一直打空格）
+        assert!(repeatable(&state, pliers_engine::KEY_SPACE));
     }
 }

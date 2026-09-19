@@ -43,8 +43,8 @@ seat」然后退出，所以别同时跑两个。
 想确认自己没跑歪：
 
 ```bash
-cargo test --workspace        # 192 个单测，不需要合成器、不需要词库
-./tools/run_mock_tests.sh     # mock 合成器跑 26 个场景 + 2 项在线改配置检查
+cargo test --workspace        # 205 个单测，不需要合成器、不需要词库
+./tools/run_mock_tests.sh     # mock 合成器跑 27 个场景 + 2 项在线改配置检查
 ```
 
 ## 按键速查
@@ -61,8 +61,8 @@ cargo test --workspace        # 192 个单测，不需要合成器、不需要�
 | 其他符号 | **先把候选上屏、再把符号转给应用**（反了屏幕上就是 `,你好`） |
 | 大写字母 | 没组词 → 原样转发；组词当中 → 并进预编辑，整串当英文原文 |
 | 回车 / Esc | 原样提交 / 取消这次组词（这个键不给应用） |
-| 退格 | 删掉一个字符 |
-| `Del` | 删掉**自己拼出来的**候选（词库里原本就有的删不了） |
+| 退格 | 删掉一个字符；**按住不放会一直删**（跟普通键盘一样） |
+| `Del` | 删掉**自己拼出来的**候选（词库里原本就有的删不了）；按住不放会重复 |
 | `Ctrl` + 空格 | 切中英文（切换时半截拼音先上屏） |
 | Ctrl / Alt / Super + 任何键 | 不组词，原样转发 |
 
@@ -75,9 +75,9 @@ cargo test --workspace        # 192 个单测，不需要合成器、不需要�
 | [docs/usage.md](docs/usage.md) | 按键全表、大写字母为什么不参与匹配、中英文切换、中文标点、分段上屏 + 记性、`Del` 的语义 |
 | [docs/config.md](docs/config.md) | `config.toml` 每一项（全拼/双拼/码表/engine/english）、`pliers set` vs `pliers config set`、自动重读、交互模式、Nushell 写法 |
 | [docs/dictionary.md](docs/dictionary.md) | 词库怎么装（`pliers --init`）、换成别的源、自己从语料构建、表结构与权重、用 SQL 加词、`lookup` 看候选 |
-| [docs/internals.md](docs/internals.md) | crate 划分、用了哪些 Wayland 协议、**为什么拼音查询不能交给 SQL**、整句候选、候选框是怎么画出来的 |
-| [docs/pitfalls.md](docs/pitfalls.md) | 10 条实测踩出来的坑（Ctrl+A 被吃掉、焦点一走拼音就没了……）+ 已知不足 |
-| [docs/testing.md](docs/testing.md) | 单测、跑起来、`PLIERS_DEBUG`、mock 合成器的 26 个场景都验了什么 |
+| [docs/internals.md](docs/internals.md) | crate 划分、用了哪些 Wayland 协议、**为什么拼音查询不能交给 SQL**、整句候选、长按重复为什么得自己做、候选框是怎么画出来的 |
+| [docs/pitfalls.md](docs/pitfalls.md) | 11 条实测踩出来的坑（Ctrl+A 被吃掉、松手后应用以为键还按着……）+ 已知不足 |
+| [docs/testing.md](docs/testing.md) | 单测、跑起来、`PLIERS_DEBUG`、mock 合成器的 27 个场景都验了什么 |
 
 ## 代码结构
 

@@ -243,6 +243,11 @@ echo "== 英文候选（英文单词补全）=="
 # 只敲了 kuber，空格上屏的是补全后的 kubernetes —— 词表编译在二进制里，跟词库无关
 run englishword    "kuber "  kubernetes englishword
 
+echo "== 长按重复 =="
+# 按住退格不放：合成器只报了 repeat_info，重复得输入法自己做 ——
+# 预编辑该 nihao → niha → nih → ni → n → 空，删空之后按键接着转发给应用
+run repeat         "nihao"   ""    repeat
+
 echo "== 中英文切换 =="
 run english        "hello "   ""    english       # Ctrl+空格 切英文后打英文
 run switch         "nihao"   nihao switch        # 组词中切英文：半截拼音先上屏

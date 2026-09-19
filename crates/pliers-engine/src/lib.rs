@@ -595,6 +595,15 @@ impl Engine {
         );
     }
 
+    /// 记下"这一次按下被我们吃掉了"：它的抬起也得吃掉，不然应用会收到一个
+    /// 没按下过的抬起。同一个键只记一笔 —— 长按重复会把同一个键喂很多次，
+    /// 记成一堆没有意义（抬起时本来就一次清光）
+    fn eat(&mut self, keycode: u32) {
+        if !self.consumed.contains(&keycode) {
+            self.consumed.push(keycode);
+        }
+    }
+
     /// 输入框失焦：按住没放的键不会再有抬起事件了，账本一起清掉。
     /// 注意**不动 mode** —— 切到英文之后换个窗口，还是英文
     pub fn reset(&mut self) {
@@ -626,8 +635,25 @@ impl Engine {
         self.pool.clear();
     }
 
-    /// 处理一个按键，返回该做什么
+    /// 处理一个按键，返回该做什么。
+    ///
+    /// 外面这层只干一件事：**转发出去的按下，它的抬起也得转发**。
+    /// 不转发的话应用会以为这个键一直按着 —— 在 X11/XWayland 那边就是一个"卡住的
+    /// 退格键"：它会自己一直重复，表现是"我松开了，可再输入什么都被删掉"。
+    ///
+    /// 为什么要在外面套一层：长按重复会让**同一个物理按键**一会儿被我们吃掉
+    /// （删预编辑）、一会儿被转发（预编辑删空之后每一拍都转发给应用），
+    /// 账本得跟着这一次的决定走，而不是按下时的第一次决定
     pub fn on_key(&mut self, key: KeyInput) -> Action {
+        let action = self.decide(key);
+        if key.pressed && matches!(action, Action::Forward | Action::CommitAndForward(_)) {
+            self.consumed.retain(|code| *code != key.keycode);
+        }
+        action
+    }
+
+    /// 按键状态机本体（`on_key` 外面那层负责记账）
+    fn decide(&mut self, key: KeyInput) -> Action {
         // 没有输入框在用（焦点在 XWayland 应用、或不支持 text-input 的应用上）时，
         // 键盘抓取仍然在我们手里，所以必须原样转发，绝不能组词吞键
         if !key.active {
@@ -656,7 +682,7 @@ impl Engine {
         // 注意必须认准 Ctrl：Alt+空格在很多应用里是窗口菜单
         if key.pressed && self.toggle.ctrl_space && key.ctrl && key.keysym == KEY_SPACE {
             let leftover = self.switch_mode();
-            self.consumed.push(key.keycode);
+            self.eat(key.keycode);
             // 组词当中按了切换键：先把打了一半的字母上屏，别让它们凭空消失
             return match leftover {
                 Some(text) => Action::Commit(text),
@@ -701,7 +727,7 @@ impl Engine {
             && self.scheme.accepts(ch.to_ascii_lowercase())
         {
             self.buffer.push(ch);
-            self.consumed.push(key.keycode);
+            self.eat(key.keycode);
             return self.changed();
         }
 
@@ -714,7 +740,7 @@ impl Engine {
             && ch.is_ascii_uppercase()
         {
             self.buffer.push(ch);
-            self.consumed.push(key.keycode);
+            self.eat(key.keycode);
             return self.changed();
         }
 
@@ -727,7 +753,7 @@ impl Engine {
             && let Some(ch) = char::from_u32(key.keysym)
         {
             self.buffer.push(ch);
-            self.consumed.push(key.keycode);
+            self.eat(key.keycode);
             return self.changed();
         }
 
@@ -737,7 +763,7 @@ impl Engine {
         if self.chinese_punctuation
             && let Some(punctuation) = chinese_punctuation(key.keysym)
         {
-            self.consumed.push(key.keycode);
+            self.eat(key.keycode);
             let word = if composing {
                 self.take_whole()
             } else {
@@ -753,7 +779,7 @@ impl Engine {
             // 回车：把还没转换的内容原样提交，不把回车交给应用
             //（否则表单会被顺手提交掉）
             KEY_RETURN | KEY_KP_ENTER if composing => {
-                self.consumed.push(key.keycode);
+                self.eat(key.keycode);
                 let text = std::mem::take(&mut self.buffer);
                 self.abandon();
                 Action::Commit(text) // 账本不动：回车自己的抬起还得吃掉
@@ -761,7 +787,7 @@ impl Engine {
 
             // Esc：取消这次组词，这个键谁也不给（否则会顺手退出全屏、关掉弹窗）
             KEY_ESCAPE if composing => {
-                self.consumed.push(key.keycode);
+                self.eat(key.keycode);
                 self.abandon();
                 Action::UpdatePreedit(Preedit::default())
             }
@@ -769,13 +795,13 @@ impl Engine {
             // Del：把选中的候选"忘掉" —— 用户自己拼出来的整句能删掉；
             // 词库里真有的词只能清掉"我用过它"的偏好（词条是导入的，不该被删）
             KEY_DELETE if composing => {
-                self.consumed.push(key.keycode);
+                self.eat(key.keycode);
                 self.forget()
             }
 
             // 退格：删掉一个字符（候选列表跟着重算，选中回到第一个）
             KEY_BACKSPACE if composing => {
-                self.consumed.push(key.keycode);
+                self.eat(key.keycode);
                 self.buffer.pop();
                 self.changed()
             }
@@ -785,31 +811,31 @@ impl Engine {
             //   ↑↓ 整页翻（跟 , . / - = / PgUp PgDn 一样）
             // 组词当中方向键一律不去动输入框里的光标
             KEY_RIGHT | KEY_TAB if composing => {
-                self.consumed.push(key.keycode);
+                self.eat(key.keycode);
                 self.step(1)
             }
 
             KEY_LEFT | KEY_ISO_LEFT_TAB if composing => {
-                self.consumed.push(key.keycode);
+                self.eat(key.keycode);
                 self.step(-1)
             }
 
             // ↑ / , / - / PageUp：上一页；↓ / . / = / PageDown：下一页。
             // 一页一页翻，页内位置保持（光标 ±整页，取模绕圈）
             KEY_UP | KEY_COMMA | KEY_MINUS | KEY_PAGE_UP if composing => {
-                self.consumed.push(key.keycode);
+                self.eat(key.keycode);
                 self.step(-(self.limit as i32))
             }
 
             KEY_DOWN | KEY_PERIOD | KEY_EQUAL | KEY_PAGE_DOWN if composing => {
-                self.consumed.push(key.keycode);
+                self.eat(key.keycode);
                 self.step(self.limit as i32)
             }
 
             // 数字 1-9：直接选第几个候选上屏（拼音里的数字没法组词，吃掉不亏）
             KEY_1..=KEY_9 if composing => {
                 let index = (key.keysym - KEY_1) as usize;
-                self.consumed.push(key.keycode);
+                self.eat(key.keycode);
                 // 数字选的是**这一页**的第几个：超出一页（`limit`）或者这一页没那么多个，
                 // 都当没按过 —— 池子里后面的候选得先翻页才轮得到
                 if index < self.limit && self.pool.get(self.page_start() + index).is_some() {
@@ -857,7 +883,7 @@ impl Engine {
 
     /// 上屏当前选中的候选（可能只吃掉前面一段：`nihaoma` 选「你好」还剩 `ma`）
     fn commit_candidate(&mut self, keycode: u32) -> Action {
-        self.consumed.push(keycode);
+        self.eat(keycode);
         let picked = self.take_word();
         match picked {
             // 整串都吃掉了：这次组词结束
@@ -1431,6 +1457,47 @@ mod tests {
         // 没在组词时照旧是应用的键
         let mut idle = engine();
         assert_eq!(idle.on_key(key(KEY_DELETE)), Action::Forward);
+    }
+
+    #[test]
+    fn 长按重复时_转发过的按下_抬起也要转发() {
+        // 回归：按住退格连删（自动重复把同一个 keycode 喂很多次）。
+        // 开始的几拍被我们吃掉（删预编辑），删空之后每一拍都转发给应用 ——
+        // 这时候抬起**必须**也转发，不然应用以为退格一直按着：
+        // X11/XWayland 那边会自己一直重复，表现就是"我松开了，再输入什么都被删掉"
+        let mut engine = engine();
+        type_letters(&mut engine, "nihao");
+        let backspace = key(KEY_BACKSPACE);
+        let release = KeyInput {
+            pressed: false,
+            ..backspace
+        };
+
+        // 前五拍删预编辑（我们吃掉），后面几拍转发给应用
+        for _ in 0..5 {
+            assert!(
+                matches!(engine.on_key(backspace), Action::UpdatePreedit(_)),
+                "预编辑还该在删"
+            );
+        }
+        assert_eq!(engine.text(), "", "五拍之后预编辑该空了");
+        assert_eq!(engine.on_key(backspace), Action::Forward, "删空之后转发");
+        // 松手：抬起跟着转发
+        assert_eq!(engine.on_key(release), Action::Forward);
+    }
+
+    #[test]
+    fn 吃掉的按键_抬起照旧不转发() {
+        // 反面：全程被我们吃掉的键（没转发过按下），抬起也不该漏给应用
+        let mut engine = engine();
+        type_letters(&mut engine, "nihao");
+        let backspace = key(KEY_BACKSPACE);
+        assert!(matches!(engine.on_key(backspace), Action::UpdatePreedit(_)));
+        let release = KeyInput {
+            pressed: false,
+            ..backspace
+        };
+        assert_eq!(engine.on_key(release), Action::Swallow);
     }
 
     #[test]

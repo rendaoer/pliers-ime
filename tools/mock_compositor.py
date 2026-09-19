@@ -30,6 +30,7 @@ Usage: mock_compositor.py <socket-path> [keys] [expected-committed-text] [mode]
 Modes: active | inactive | shortcut | shift | mixed | enter | escape | caps |
        pick (数字选词) | nav (方向键换候选) | page (翻页) | symbol (组词中敲符号) |
        englishword (英文补全：kuber + 空格 → kubernetes) |
+       repeat (长按退格：按住不放要一下一下地删) |
        switch (组词中切中英文) | control (先等一会儿再打字，留给 `pliers set` 用) |
        watch (等 6 秒，留给"改配置文件看它自动重读"用) |
        segment (分段上屏 + 记住拼出来的句子) | forget (Del 忘掉自己拼的句子) |
@@ -447,6 +448,24 @@ def main():
                         for st in (1, 0):
                             conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, EVDEV[ch], st))
                             time.sleep(0.03)
+                elif base_mode == "repeat":
+                    # 长按重复：合成器**不替输入法重复按键**，只报一个 repeat_info
+                    #（速率 + 延迟）—— 重复是客户端自己的事（跟 wl_keyboard 一个规矩）。
+                    # 先把速率调快（协议允许中途改），再把退格**按住不放**：
+                    # 输入法该按这个节拍一下一下地删，而不是只删一个字母
+                    conn.send(grab_id, 3, struct.pack("<ii", 40, 100))  # 40 次/秒，100ms 后开始
+
+                    def send(code, state):
+                        conn.send(grab_id, 1, struct.pack("<IIII", 0, 0, code, state))
+
+                    for ch in KEYS:
+                        for st in (1, 0):
+                            send(EVDEV[ch], st)
+                            time.sleep(0.03)
+                    time.sleep(0.05)
+                    send(EVDEV["\x08"], 1)   # 退格：按住不放
+                    time.sleep(1.0)           # 远超延迟 + 好几拍
+                    send(EVDEV["\x08"], 0)   # 松开
                 elif base_mode == "notice":
                     # 只按一次 Ctrl+空格（切到英文，弹一下「英」），之后**一个键都不按**：
                     # 提示必须自己到点消失。以前是"等下一个按键才收"，
@@ -985,6 +1004,30 @@ def main():
             f"mock: {'PASS' if ok else 'FAIL'}: committed {committed!r}（期望补全成 {EXPECT!r}）, "
             f"预编辑 {nonempty[-1] if nonempty else None!r}, forwarded {len(forwards)} keys, "
             f"贴框 {len(shows)} 次",
+            flush=True,
+        )
+    elif mode == "repeat":
+        # 长按退格：打好的 nihao 该被一下一下地删光（每一拍都是一次"预编辑变短"），
+        # 删空之后再按住，按键就该转发给应用了（终端里按住退格就是这个效果）。
+        # 只删一个字母的话 tail 就只有 ["niha"]，这里明确要求五拍
+        typed = KEYS
+        tail = preedits[preedits.index(typed) + 1 :] if typed in preedits else []
+        want = [typed[:-1], typed[:-2], typed[:-3], typed[:-4], ""]
+        # 删空之后每一拍都转发给应用，**最后那次抬起也必须转发** —— 少了它，
+        # 应用会以为退格一直按着（X11/XWayland 那边就是一个卡住的键：一直删）
+        last = forwards[-1] if forwards else None
+        released = last is not None and last[1] == EVDEV["\x08"] and last[2] == 0
+        ok = (
+            grab_id is not None
+            and not commits
+            and tail[:5] == want
+            and len(forwards) >= 2
+            and released
+        )
+        print(
+            f"mock: {'PASS' if ok else 'FAIL'}: 长按退格删掉的预编辑 {tail[:5]}（期望 {want}）, "
+            f"commits {commits}, 转发 {len(forwards)} 个按键，最后一次是抬起"
+            f"{'✓' if released else '✗' + repr(last)}",
             flush=True,
         )
     elif mode == "enter":

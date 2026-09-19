@@ -381,7 +381,7 @@ impl State {
         let mode = self.engine().mode().label();
         let config = &self.config;
         // 给两种用法：`dict` 是给人看的（带大小），`dict_path` 是原文（编辑框预填要用）。
-        // 开的是哪个库由方案决定：拼音开 dict.db，五笔这类码表开 wubi.db（两个文件）
+        // 开的是哪个库由方案决定：拼音开 pinyin.db，五笔这类码表开 wubi.db（两个文件）
         let dict_path = config.active_dict_path();
         let dict = match std::fs::metadata(&dict_path) {
             Ok(meta) => format!("{}（{} MB）", dict_path.display(), meta.len() / 1024 / 1024),
@@ -461,9 +461,9 @@ impl State {
     fn status_note(&self, key: &str) -> String {
         match key {
             "engine.start_mode" => "；start_mode 下次启动才生效".to_string(),
-            // PLIERS_DICT 的优先级比配置文件高，指了它的话改 dict.path 是白改
-            "dict.path" if std::env::var_os("PLIERS_DICT").is_some() => {
-                "；但 PLIERS_DICT 环境变量优先级更高，实际用的还是它".to_string()
+            // PLIERS_PINYIN 的优先级比配置文件高，指了它的话改 dict.path 是白改
+            "dict.path" if std::env::var_os("PLIERS_PINYIN").is_some() => {
+                "；但 PLIERS_PINYIN 环境变量优先级更高，实际用的还是它".to_string()
             }
             "dict.path" => "；词库已经重新打开了，用户词频在 user.db 里、不受影响".to_string(),
             // 跟 dict.path 一个道理，但这个是码表库：只有方案是码表时它才真的被打开
@@ -471,7 +471,9 @@ impl State {
                 "；但 PLIERS_WUBI 环境变量优先级更高，实际用的还是它".to_string()
             }
             "dict.wubi_path" => "；换成五笔（scheme.kind = wubi）时就会用这个库".to_string(),
-            "scheme.kind" => "；换方案会重新开对应的库（拼音 dict.db / 码表 wubi.db）".to_string(),
+            "scheme.kind" => {
+                "；换方案会重新开对应的库（拼音 pinyin.db / 码表 wubi.db）".to_string()
+            }
             "dict.user_path" => "；用户数据换了个文件，选过的词也跟着换了".to_string(),
             // 词表是起引擎的时候读进内存的，改完 path 得重新读一遍 —— 这里重建引擎了
             "english.path" | "english.enabled" => "；英文词表已经重新读了".to_string(),

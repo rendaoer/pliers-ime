@@ -6,10 +6,10 @@
 //! * 词库、权重、用户词频都是"数据"，可以随时用 SQL 改、加、导出，不用重新编译
 //! * 一次装好，多进程共享；以后要做设置界面也直接读这个库
 //!
-//! **词库和用户数据分成两个文件**（`dict.db` / `user.db`）：
+//! **词库和用户数据分成两个文件**（`pinyin.db` / `user.db`）：
 //!
 //! ```sql
-//! -- dict.db：派生物，随时可以从语料重新生成、下载覆盖
+//! -- pinyin.db：派生物，随时可以从语料重新生成、下载覆盖
 //! word(scheme, code, text, weight)   -- 词库本体：'pinyin' / 'wubi' / …
 //! syllable(syl)                      -- 412 个合法音节，切词用
 //! meta(key, value)                   -- 词库来源 / 导入时间之类
@@ -23,7 +23,7 @@
 //! 分成两个文件是因为**它们的生命周期完全不一样**：词库 86 MB、是别人整理的数据、
 //! `pliers fetch pinyin --force` / `pliers build pinyin` 会把它整个换掉（导入工具是直接把
 //! 输出文件删了重建的）；用户数据只有几十 KB，是你自己的东西，换词库时丢一次就再也不
-//! 想用了。分家之后 `dict.db` 随便删、随便换。
+//! 想用了。分家之后 `pinyin.db` 随便删、随便换。
 //!
 //! 两个文件用 SQLite 的 `ATTACH` 连起来（turso 的 `experimental_attach`），
 //! 所以排序还是**一条 SQL**：`... LEFT JOIN user.user_word u ON u.text = w.text
@@ -39,7 +39,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use turso::{Builder, Connection};
 
-/// **词库**的 DDL（`dict.db`）。导入工具（`pliers-dict`）和运行时共用同一份，免得两边写岔。
+/// **词库**的 DDL（`pinyin.db`）。导入工具（`pliers-dict`）和运行时共用同一份，免得两边写岔。
 ///
 /// 注意是一条一条执行的：turso 的 `execute()` 一次只认一条语句
 /// （把几条 DDL 拼成一个字符串喂进去，它只会建第一张表）
@@ -676,7 +676,7 @@ mod tests {
     #[test]
     fn 用户数据写在另一个文件里() {
         let dir = temp_dir("split");
-        let dict_path = dir.join("dict.db");
+        let dict_path = dir.join("pinyin.db");
         let user_path = dir.join("user.db");
         make_dict(&dict_path, false);
 
@@ -725,7 +725,7 @@ mod tests {
     #[test]
     fn 换掉词库也不丢用户数据() {
         let dir = temp_dir("swap");
-        let dict_path = dir.join("dict.db");
+        let dict_path = dir.join("pinyin.db");
         let user_path = dir.join("user.db");
         make_dict(&dict_path, false);
         {
@@ -753,7 +753,7 @@ mod tests {
         // 以前用户表和词库混在一个文件里：升级之后得把原来那些数据搬过来，
         // 不然"选过的词、自己拼的句子"就丢了
         let dir = temp_dir("legacy");
-        let dict_path = dir.join("dict.db");
+        let dict_path = dir.join("pinyin.db");
         let user_path = dir.join("user.db");
         make_dict(&dict_path, true);
 
@@ -837,7 +837,7 @@ pub(crate) mod testing {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         DIRS.with(|dirs| dirs.borrow_mut().push(dir.clone()));
-        let path = dir.join("dict.db");
+        let path = dir.join("pinyin.db");
 
         {
             let db =

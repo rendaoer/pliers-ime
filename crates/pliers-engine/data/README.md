@@ -60,7 +60,7 @@ python3 tools/build_english_list.py --source ~/en_50k.txt --limit 30000
 不一样就给个 warning）。生成脚本只认第一列，所以上游换成正体字、BNC、自己统计的词频表都行。
 
 生成完想让装好的用户拿到新词表：推上去 → 跑一次 `词库` 工作流（它会同时更新
-`dict.db.zst` 和 `english.db.zst`）→ 用户 `pliers fetch english`。
+`pinyin.db.zst` 和 `english.db.zst`）→ 用户 `pliers fetch english`。
 
 **想加自己的词不用改这里**：配置里写
 

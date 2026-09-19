@@ -36,7 +36,7 @@ text-input 协议**：Firefox / GTK / Qt 应用都行，alacritty 0.17（基于 
 
 词库默认用[白霜拼音 rime-frost](https://github.com/gaboolic/rime-frost)（约 100 万条，自带字频词频，
 多音字一行一个读音；资产 27 MB）。不想下载现成的、想自己从语料构建：`cargo install pliers-dict` 之后 `pliers build pinyin`；
-换源或离线装：`PLIERS_DICT_URL=... pliers fetch pinyin --url file:///...`；
+换源或离线装：`PLIERS_PINYIN_URL=... pliers fetch pinyin --url file:///...`；
 看现在装的是哪份：`pliers status pinyin`；想把词库和英文词表**一起更新到最新**：`pliers update`
 （已经是最新的会跳过，不白下 27 MB）—— 见 [docs/dictionary.md](docs/dictionary.md)。
 发布出来的词库资产按 GPL-3.0 分发（语料是 GPL-3.0 的），代码本身不受影响。
@@ -45,7 +45,7 @@ text-input 协议**：Firefox / GTK / Qt 应用都行，alacritty 0.17（基于 
 
 ```nushell
 pliers status [种类]         # 看现状：不给种类 = 正在跑的实例 + 所有库
-pliers path   [名字]         # 文件都在哪（config / dict / wubi / user / english / corpus / socket）
+pliers path   [名字]         # 文件都在哪（config / pinyin / wubi / user / english / corpus / socket）
 pliers build  <种类> [文件]   # 自己构建（pinyin 下语料；wubi 用自己的码表；english 可给自己的词表）
 pliers fetch  <种类|all>     # 从 Release 下载预构建的；pliers update = 哪个旧更新哪个
 ```
@@ -54,10 +54,13 @@ pliers fetch  <种类|all>     # 从 Release 下载预构建的；pliers update 
 
 | 文件 | 是什么 | 怎么更新 |
 | --- | --- | --- |
-| `~/.local/share/pliers/dict.db` | 拼音词库 + 音节表（86 MB） | `pliers fetch pinyin --force` / `pliers build pinyin` |
+| `~/.local/share/pliers/pinyin.db` | 拼音词库 + 音节表（86 MB） | `pliers fetch pinyin --force` / `pliers build pinyin` |
 | `~/.local/share/pliers/wubi.db` | 码表库（五笔/郑码/仓颉，用自己的码表建） | `pliers build wubi <码表.txt>` |
-| `~/.local/share/pliers/user.db` | 你选过的词、自己拼的句子、按 `Del` 拉黑的词（两个库共用） | 自动写；想清空就删掉它 |
+| `~/.local/share/pliers/user.db` | 你选过的词、自己拼的句子、按 `Del` 拉黑的词（几个库共用） | 自动写；想清空就删掉它 |
 | `~/.local/share/pliers/english.db` | 英文候选词表（SQLite，25223 词） | `pliers fetch english`（**可以单独更新**）/ `pliers build english 词表.txt` |
+
+（老版本里拼音词库叫 `dict.db`，第一次用新版本时会**自动改名**成 `pinyin.db` —— 不用手动搬；
+改名失败（文件系统只读之类）就继续用老名字那份，能用最重要。）
 
 所以重导拼音词库既不会弄丢你的习惯，也不会把五笔抹掉（那是另一个文件）；
 库和用户数据内部用 SQLite 的 `ATTACH` 连起来（见 [docs/dictionary.md](docs/dictionary.md#表结构每个库一个文件用户数据单独一个)）。
@@ -74,7 +77,7 @@ seat」然后退出，所以别同时跑两个。
 想确认自己没跑歪：
 
 ```bash
-cargo test --workspace        # 222 个单测，不需要合成器、不需要词库
+cargo test --workspace        # 223 个单测，不需要合成器、不需要词库
 ./tools/run_mock_tests.sh     # mock 合成器跑 27 个场景 + 2 项在线改配置检查
 ```
 
@@ -133,7 +136,7 @@ cargo test --workspace        # 222 个单测，不需要合成器、不需要�
 ## 许可
 
 * **代码**：[MIT](LICENSE-MIT) 或 [Apache-2.0](LICENSE-APACHE)，随你挑一个用
-* **词库资产**（Release 里的 `dict.db.zst`）：**GPL-3.0** —— 它是
+* **词库资产**（Release 里的 `pinyin.db.zst`）：**GPL-3.0** —— 它是
   [rime-frost](https://github.com/gaboolic/rime-frost) 那份 GPL-3.0 语料的衍生作品，
   跟代码的许可是两回事。不想碰它就 `pliers build pinyin` 自己从上游构建（那只是下载语料，
   不涉及再分发）—— 见 [docs/dictionary.md](docs/dictionary.md#许可)

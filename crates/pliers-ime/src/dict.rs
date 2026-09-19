@@ -1,12 +1,13 @@
-//! 字典的 `pinyin` 那种：中文词库（五笔的条目也在**同一份**库里，靠 `word.scheme` 分）
-//! 加它旁边的用户数据 `user.db`。
+//! 字典的 `pinyin` 那种：拼音词库（`pinyin.db`）加它旁边的用户数据 `user.db`。
+//! 五笔这类码表是**另一个库**（`wubi.db`），文档里也在这篇 —— 见 `build_wubi` / `wubi_report`
 //!
 //! 词库是几百 MB 的派生物，不进仓库（GitHub 也不让放这么大的文件），
 //! 但也不该让你自己去哪儿找一份词表、再守着跑一遍导入：
 //!
 //! * `pliers --init`        写配置 + 装一份能用的（下载预构建的，或 `--build` 自己构建）
-//! * `pliers fetch pinyin`  只装词库（下载统一在 `fetch` 那边，跟英文词表一套）
+//! * `pliers fetch pinyin`  只装拼音词库（下载统一在 `fetch` 那边，跟英文词表一套）
 //! * `pliers build pinyin`  自己下语料、自己构建（Release 上还没有东西时走这条）
+//! * `pliers build wubi`    用你自己的码表建码表库（`wubi.db`）
 //! * `pliers status pinyin` 现在用的是哪个库、多少词、来源是什么
 //!
 //! 语料用的是[白霜拼音 rime-frost](https://github.com/gaboolic/rime-frost)（GPL-3.0）：
@@ -60,7 +61,7 @@ pub fn init(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // ---- 英文词表（另一种字典，顺带装一份；离线也能装，写的是二进制里那份兜底）----
     crate::english::install_if_missing(force)?;
 
-    // ---- 中文词库 ----
+    // ---- 拼音词库 ----
     let dest = path();
     if dest.exists() && !force {
         println!("词库：{}（已有，没动它）", dest.display());
@@ -195,7 +196,7 @@ pub fn report() -> Result<(), Box<dyn std::error::Error>> {
     let how_big = size(&dest).unwrap_or_else(|| "还没有".to_string());
     println!(
         "{}",
-        row("中文词库", format!("{}（{how_big}）", dest.display()))
+        row("拼音词库", format!("{}（{how_big}）", dest.display()))
     );
     if !dest.exists() {
         println!(
@@ -216,7 +217,27 @@ pub fn report() -> Result<(), Box<dyn std::error::Error>> {
         );
         println!("{}", user_row(&user, None));
     }
+    // 老名字那份还在？说一句 —— 迁移之后又被写出来一份（比如老版本的实例刚好在下载），
+    // 或者当初改名没成功。几十上百 MB 占地方，而且看久了容易看花眼
+    if let Some((legacy, how_big)) = leftover_legacy(&dest) {
+        println!(
+            "{}",
+            note(format!(
+                "注意：{}（{how_big}）是老名字那份，已经不读了 —— 确认没用了可以删掉",
+                legacy.display()
+            ))
+        );
+    }
     Ok(())
+}
+
+/// 新名字的库在、旁边还躺着一份老名字的 `dict.db`（已经不读了）
+fn leftover_legacy(path: &Path) -> Option<(PathBuf, String)> {
+    if !path.exists() || path.file_name()? != "pinyin.db" {
+        return None;
+    }
+    let legacy = path.with_file_name("dict.db");
+    Some((legacy.clone(), size(&legacy)?))
 }
 
 /// `pliers status wubi`：码表库（五笔/郑码/仓颉）这一块 —— 它跟拼音词库是**两个文件**
@@ -250,7 +271,7 @@ pub fn wubi_report() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     // 用户数据不在这儿报：两个库共用同一个 user.db（记的是"你选过哪个词"），
-    // 中文词库那一块已经报过了
+    // 拼音词库那一块已经报过了
     match contents(&dest, false) {
         Ok(schemes) => {
             let want = wubi_scheme_name();
@@ -366,7 +387,7 @@ pub fn user_path() -> PathBuf {
         .unwrap_or_else(|_| pliers_engine::config::default_user_path())
 }
 
-/// 输入法实际会用的那个词库文件：配置文件里的 `dict.path`（认 `PLIERS_DICT`）。
+/// 输入法实际会用的那个词库文件：配置文件里的 `dict.path`（认 `PLIERS_PINYIN`）。
 /// 配置坏了也不至于装不了 —— 那就退回默认路径
 pub fn path() -> PathBuf {
     Config::load()

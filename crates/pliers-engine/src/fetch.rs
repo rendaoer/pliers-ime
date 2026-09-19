@@ -116,7 +116,10 @@ mod tests {
             local_path("file:///tmp/a.db"),
             Some(PathBuf::from("/tmp/a.db"))
         );
-        assert_eq!(local_path("./dict.db"), Some(PathBuf::from("./dict.db")));
+        assert_eq!(
+            local_path("./pinyin.db"),
+            Some(PathBuf::from("./pinyin.db"))
+        );
         assert_eq!(local_path("https://example.com/a.db"), None);
     }
 

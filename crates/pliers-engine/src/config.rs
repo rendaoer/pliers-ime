@@ -9,7 +9,7 @@
 //! kind = "full-pinyin"          # full-pinyin | double-pinyin | wubi
 //!
 //! [dict]
-//! path = "~/.local/share/pliers/dict.db"
+//! path = "~/.local/share/pliers/pinyin.db"
 //! max_candidates = 9
 //! ```
 
@@ -33,9 +33,10 @@ pub fn config_path() -> PathBuf {
     base.join("pliers").join("config.toml")
 }
 
-/// 默认词库路径（拼音）
+/// 默认词库路径（拼音）。跟 `wubi.db` / `english.db` 一个命名法：
+/// 一个库一个文件，文件名就是它的种类
 pub fn default_dict_path() -> PathBuf {
-    data_dir().join("dict.db")
+    data_dir().join("pinyin.db")
 }
 
 /// 默认的**码表库**路径（五笔/郑码/仓颉）。它跟拼音词库**分开一个文件**：
@@ -61,6 +62,35 @@ fn data_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| home().join(".local").join("share"))
         .join("pliers")
+}
+
+/// 这几个环境变量里第一个有值的（给"新名字 + 老名字"用）
+fn env_path(names: &[&str]) -> Option<PathBuf> {
+    names.iter().find_map(std::env::var_os).map(PathBuf::from)
+}
+
+/// 改过名的库过渡：拼音词库以前叫 `dict.db`，现在跟 `wubi.db` / `english.db` 对齐叫
+/// `pinyin.db`。**只在新名字那份还没有的时候**把老的改名过来 —— 派生文件，改名不丢东西，
+/// 连 `-wal` / 下载到一半的 `.part` / sha256 小抄一起搬（小抄搬过去，`pliers update`
+/// 才不会觉得"这份没小抄"又白下 27 MB）。只做一次，之后自然不再触发。
+///
+/// 改不动（只读文件系统之类）就继续用老名字那份 —— 能用最重要
+fn adopt_legacy_name(path: PathBuf) -> PathBuf {
+    if path.exists() || path.file_name() != Some(std::ffi::OsStr::new("pinyin.db")) {
+        return path;
+    }
+    let legacy = path.with_file_name("dict.db");
+    if !legacy.exists() {
+        return path;
+    }
+    let moved = std::fs::rename(&legacy, &path).is_ok();
+    for suffix in ["-wal", "-shm", ".part", ".asset-sha256"] {
+        let from = PathBuf::from(format!("{}{suffix}", legacy.display()));
+        if from.exists() {
+            let _ = std::fs::rename(&from, PathBuf::from(format!("{}{suffix}", path.display())));
+        }
+    }
+    if moved { path } else { legacy }
 }
 
 fn home() -> PathBuf {
@@ -295,13 +325,15 @@ impl Config {
         Ok(toml::from_str(text)?)
     }
 
-    /// 词库文件路径（展开过 `~`）。
-    /// `PLIERS_DICT` 环境变量优先级最高 —— 临时换个库看看效果时很方便
+    /// 拼音词库文件路径（展开过 `~`）。
+    /// `PLIERS_PINYIN` 环境变量优先级最高 —— 临时换个库看看效果时很方便
+    ///（以前叫 `PLIERS_DICT`，还认）
     pub fn dict_path(&self) -> PathBuf {
-        match std::env::var_os("PLIERS_DICT") {
-            Some(path) => PathBuf::from(path),
+        let path = match env_path(&["PLIERS_PINYIN", "PLIERS_DICT"]) {
+            Some(path) => path,
             None => expand(&self.dict.path),
-        }
+        };
+        adopt_legacy_name(path)
     }
 
     /// 码表库文件路径（`PLIERS_WUBI` 优先，跟词库一个规矩）
@@ -399,7 +431,7 @@ impl Config {
 
     /// 打开词库（+ 用户数据）+ 建好方案，一步到位。
     ///
-    /// 开哪个文件由方案决定（[`Config::active_dict_path`]）：拼音开 `dict.db`，
+    /// 开哪个文件由方案决定（[`Config::active_dict_path`]）：拼音开 `pinyin.db`，
     /// 五笔这类码表开 `wubi.db` —— 库不存在时给的提示也不一样（各自的构建命令不同）
     pub fn build_engine_parts(&self) -> Result<(Dict, Box<dyn Scheme>)> {
         let path = self.active_dict_path();
@@ -747,25 +779,27 @@ mod tests {
 
     #[test]
     fn 码表库跟拼音词库是两个文件() {
-        let mut config = Config::default();
+        // 默认名字跟 wubi.db / english.db 一个命名法：文件名就是种类
         assert!(
-            config.dict_path().ends_with("dict.db"),
+            default_dict_path().ends_with("pinyin.db"),
             "{:?}",
-            config.dict_path()
+            default_dict_path()
         );
-        assert!(
-            config.wubi_path().ends_with("wubi.db"),
-            "{:?}",
-            config.wubi_path()
-        );
-        assert_ne!(config.wubi_path(), config.dict_path());
+        assert!(default_wubi_path().ends_with("wubi.db"));
+        assert_ne!(default_dict_path(), default_wubi_path());
 
+        // 下面都用显式路径 —— 默认路径在开发机上可能真有库，测试不该去碰它
+        let mut config = Config::default();
+        config.set("dict.path", "/tmp/我的拼音库.db").unwrap();
         config.set("dict.wubi_path", "/tmp/我的五笔.db").unwrap();
+        assert_eq!(
+            config.dict_path(),
+            std::path::PathBuf::from("/tmp/我的拼音库.db")
+        );
         assert_eq!(
             config.wubi_path(),
             std::path::PathBuf::from("/tmp/我的五笔.db")
         );
-        // 拼音词库没被带着改
         assert_ne!(config.dict_path(), config.wubi_path());
         assert!(config.set("dict.wubi_path", "   ").is_err(), "空的路径不认");
     }
@@ -773,12 +807,43 @@ mod tests {
     #[test]
     fn 换到五笔就开码表库() {
         let mut config = Config::default();
+        // 显式路径：别让测试顺着默认路径去看（更别去动）开发机上那份真库
+        config.set("dict.path", "/tmp/拼音.db").unwrap();
+        config.set("dict.wubi_path", "/tmp/五笔.db").unwrap();
         for kind in ["full-pinyin", "double-pinyin"] {
             config.set("scheme.kind", kind).unwrap();
             assert_eq!(config.active_dict_path(), config.dict_path(), "{kind}");
         }
         config.set("scheme.kind", "wubi").unwrap();
         assert_eq!(config.active_dict_path(), config.wubi_path());
+    }
+
+    #[test]
+    fn 老名字的词库会自动改名过来() {
+        let dir = std::env::temp_dir().join(format!("pliers-rename-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 老名字（dict.db）那份在、新名字（pinyin.db）那份不在：问路径时就该改名过来，
+        // 连 sha256 小抄一起搬 —— 不然 pliers update 会白下 27 MB
+        std::fs::write(dir.join("dict.db"), "假装是个库").unwrap();
+        std::fs::write(dir.join("dict.db.asset-sha256"), "abc\n").unwrap();
+
+        let mut config = Config::default();
+        let want = dir.join("pinyin.db");
+        config
+            .set("dict.path", &want.display().to_string())
+            .unwrap();
+        assert_eq!(config.dict_path(), want);
+        assert!(want.exists(), "老名字那份该被改名成新名字");
+        assert!(!dir.join("dict.db").exists(), "老名字不该留着");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("pinyin.db.asset-sha256")).unwrap(),
+            "abc\n"
+        );
+
+        // 只做一次：再问还是它，也不会把别的东西搬来搬去
+        assert_eq!(config.dict_path(), want);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

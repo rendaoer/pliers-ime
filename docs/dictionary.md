@@ -9,7 +9,7 @@
 pliers --init          # 写配置 + 下载词库
 ```
 
-> 这篇讲的是**中文词库**（SQLite 里的 word / syllable / meta 那几张表）。
+> 这篇讲的是**拼音词库**（SQLite 里的 word / syllable / meta 那几张表）。
 > 打英文单词时的补全**不在词库里** —— 它是另一个独立的库（`english.db`，
 > 跟词库一起挂在同一个 Release 上，但可以单独更新：`pliers fetch english`），
 > 见[使用](usage.md#英文单词补全英文候选)。
@@ -28,21 +28,21 @@ pliers --init          # 写配置 + 下载词库
 | 自己下语料、自己构建拼音词库 | `pliers build pinyin [--refresh]` |
 | 用自己的码表建五笔库 | `pliers build wubi <码表.txt>` |
 | 看现在用的是哪个库、多少词、什么来源 | `pliers status pinyin`（不给种类 = 连实例和别的库一起看） |
-| 拿到某个库的路径（脚本用） | `pliers path dict` / `pliers path wubi` |
-| 手动下载一份放进去 | 放到 `pliers path dict` 打印的那个路径 |
+| 拿到某个库的路径（脚本用） | `pliers path pinyin` / `pliers path wubi` |
+| 手动下载一份放进去 | 放到 `pliers path pinyin` 打印的那个路径 |
 
 `--init` 和 `pliers fetch pinyin` 是从**仓库 Release 的资产**拿的：
 
 ```
-https://github.com/rendaoer/pliers-ime/releases/latest/download/dict.db.zst
+https://github.com/rendaoer/pliers-ime/releases/latest/download/pinyin.db.zst
 ```
 
 `releases/latest/download/` 永远指向最新 Release 里的同名文件，所以这个地址不用跟着版本号改。
 换源（公司镜像、自己搭的服务器、本地文件都行）：
 
 ```bash
-PLIERS_DICT_URL=https://内网镜像/dict.db.zst pliers fetch pinyin
-pliers fetch pinyin --url file:///mnt/u盘/dict.db.zst      # 离线装
+PLIERS_PINYIN_URL=https://内网镜像/pinyin.db.zst pliers fetch pinyin
+pliers fetch pinyin --url file:///mnt/u盘/pinyin.db.zst      # 离线装
 ```
 
 下载落在 `<目标>.part`，解压到 `<目标>.unpacked`，最后一步才改名 —— 中途断网不会把
@@ -79,7 +79,7 @@ rime 词库的格式是 `词<TAB>拼音<TAB>权重`，拼音用空格分音节 �
 
 ## 英文词表（同一个 Release 里的另一个资产）
 
-Release 上除了 `dict.db.zst`，还有一个 **`english.db.zst`**（约 500 KB）：英文候选用的词表库
+Release 上除了 `pinyin.db.zst`，还有一个 **`english.db.zst`**（约 500 KB）：英文候选用的词表库
 （一张 `english(word, weight)` 表）。上游是
 [FrequencyWords](https://github.com/hermitdave/FrequencyWords) 的 `en_50k`（字幕词频）
 加上仓库里 `tools/english-extra.txt` 那份开发常用词：`tools/build_english_list.py` 合成文本，
@@ -170,10 +170,10 @@ kubernetes
 
 ### 一次只导一种
 
-三种输入各写各的库（`dict.db` / `wubi.db` / `english.db`），所以分几次跑：
+三种输入各写各的库（`pinyin.db` / `wubi.db` / `english.db`），所以分几次跑：
 
 ```bash
-pliers-dict --rime ~/.cache/pliers/rime-frost --out ~/.local/share/pliers/dict.db
+pliers-dict --rime ~/.cache/pliers/rime-frost --out ~/.local/share/pliers/pinyin.db
 pliers-dict --table 我的五笔.txt --table-scheme wubi --out ~/.local/share/pliers/wubi.db
 pliers-dict --english 词表.txt --out ~/.local/share/pliers/english.db
 ```
@@ -208,14 +208,14 @@ cargo build --release          # pliers + pliers-dict 一起编
 想完全手工：
 
 ```bash
-cargo run -p pliers-dict --release -- --rime ~/.cache/pliers/rime-frost --out ~/.local/share/pliers/dict.db
+cargo run -p pliers-dict --release -- --rime ~/.cache/pliers/rime-frost --out ~/.local/share/pliers/pinyin.db
 ```
 
 `--rime` 给目录（读里面所有 `.dict.yaml`）或单个文件都行，也可以给多个：
 
 ```bash
 # 只用核心词库 + 单字（小一点、快一点）
-cargo run -p pliers-dict --release -- --rime cn_dicts/base.dict.yaml --rime cn_dicts/8105.dict.yaml --out dict.db
+cargo run -p pliers-dict --release -- --rime cn_dicts/base.dict.yaml --rime cn_dicts/8105.dict.yaml --out pinyin.db
 ```
 
 ## 码表方案（五笔 / 郑码 / 仓颉）
@@ -251,7 +251,7 @@ name = "wubi"             # 跟构建时的 --table-scheme 对上
 
 | 种类 | 存在哪 | 资产 | 怎么更新 |
 | --- | --- | --- | --- |
-| `pinyin` | `dict.db`（`word` 表里 `scheme='pinyin'`） | `dict.db.zst` | `pliers fetch pinyin` / `pliers build pinyin` |
+| `pinyin` | `pinyin.db`（`word` 表里 `scheme='pinyin'`） | `pinyin.db.zst` | `pliers fetch pinyin` / `pliers build pinyin` |
 | `wubi` 等码表 | `wubi.db`（自己的库，行是 `scheme='wubi'` 这种） | 没有资产（各家码表不同） | `pliers build wubi <码表.txt>` |
 | `english` | `english.db`（一张 `english(word, weight)` 表） | `english.db.zst` | `pliers fetch english` / `pliers build english` |
 
@@ -259,17 +259,22 @@ name = "wubi"             # 跟构建时的 --table-scheme 对上
 `pliers status` 不带种类 = 正在跑的实例 + 每个库的现状（码表库没建就不占地方，
 `pliers status wubi` 随时能单独看）。
 
+> 老版本里拼音词库叫 `dict.db`（`dict.db.zst`），现在跟 `wubi.db` / `english.db` 对齐成
+> `pinyin.db`。**不用手动搬**：第一次用新版本时会自动改名过去（`-wal`、下载到一半的 `.part`、
+> sha256 小抄一起搬，所以 `pliers update` 不会白下 27 MB）；改名失败就继续用老名字那份。
+> 环境变量也从 `PLIERS_PINYIN` / `PLIERS_PINYIN_URL` 起算，老名字一样认。
+
 ## 表结构：每个库一个文件，用户数据单独一个
 
 | 文件 | 里面有什么 | 谁写的 |
 | --- | --- | --- |
-| `~/.local/share/pliers/dict.db`（86 MB） | 拼音：`word` 词条 + 权重、`syllable` 音节表、`meta` 来源 | 导入工具（`pliers-dict --rime`） |
+| `~/.local/share/pliers/pinyin.db`（86 MB） | 拼音：`word` 词条 + 权重、`syllable` 音节表、`meta` 来源 | 导入工具（`pliers-dict --rime`） |
 | `~/.local/share/pliers/wubi.db`（看码表多大） | 码表：同样的三张表，行是 `scheme='wubi'` 那种 | 导入工具（`pliers-dict --table`） |
 | `~/.local/share/pliers/user.db`（几十 KB） | `user_word` 选过多少次、`user_phrase` 你自己拼的整句、`user_hidden` 按 Del 拉黑的词 | 输入法运行时 |
 | `~/.local/share/pliers/english.db`（约 900 KB） | 英文候选词表（一张 `english(word, weight)` 表，25223 个词） | `pliers --init` 装，`pliers fetch english` 更新 |
 
 ```sql
--- dict.db / wubi.db：派生物，随时可以重新生成 / 下载覆盖。两张库结构一模一样
+-- pinyin.db / wubi.db：派生物，随时可以重新生成 / 下载覆盖。两张库结构一模一样
 word(scheme, code, text, weight)    -- 词条本体（一个库里一种方案：pinyin 或 wubi）
 syllable(syl)                       -- 412 个合法音节，切词用（码表用不着，但结构保持一致）
 meta(key, value)                    -- 来源、权重来源、导入时间、词条数
@@ -319,7 +324,7 @@ ORDER BY score DESC LIMIT ?3
 
 ```bash
 # 加词 / 改权重（改的是词库）
-sqlite3 ~/.local/share/pliers/dict.db "INSERT OR REPLACE INTO word (scheme, code, text, weight) VALUES ('pinyin','ni hao','你好',3000000);"
+sqlite3 ~/.local/share/pliers/pinyin.db "INSERT OR REPLACE INTO word (scheme, code, text, weight) VALUES ('pinyin','ni hao','你好',3000000);"
 
 # 想把用户词频清零（改的是用户数据）
 sqlite3 ~/.local/share/pliers/user.db "DELETE FROM user_word;"
@@ -346,10 +351,10 @@ sqlite3 /tmp/dbcopy/user.db "SELECT text, count, last_used FROM user_word ORDER 
 
 ```bash
 # 加词 / 改权重
-sqlite3 ~/.local/share/pliers/dict.db "INSERT OR REPLACE INTO word (scheme, code, text, weight) VALUES ('pinyin','ni hao','你好',3000000);"
+sqlite3 ~/.local/share/pliers/pinyin.db "INSERT OR REPLACE INTO word (scheme, code, text, weight) VALUES ('pinyin','ni hao','你好',3000000);"
 
 # 想把用户词频清零
-sqlite3 ~/.local/share/pliers/dict.db "DELETE FROM user_word;"
+sqlite3 ~/.local/share/pliers/pinyin.db "DELETE FROM user_word;"
 ```
 
 只想看看数据（输入法开着也能读，因为读的是副本）。
@@ -357,10 +362,10 @@ sqlite3 ~/.local/share/pliers/dict.db "DELETE FROM user_word;"
 
 ```bash
 mkdir -p /tmp/dbcopy
-cp ~/.local/share/pliers/dict.db     /tmp/dbcopy/
-cp ~/.local/share/pliers/dict.db-wal /tmp/dbcopy/    # 没有这个文件就是刚 checkpoint 过，跳过
+cp ~/.local/share/pliers/pinyin.db     /tmp/dbcopy/
+cp ~/.local/share/pliers/pinyin.db-wal /tmp/dbcopy/    # 没有这个文件就是刚 checkpoint 过，跳过
 
-sqlite3 /tmp/dbcopy/dict.db "SELECT text, count, last_used FROM user_word ORDER BY last_used DESC LIMIT 10;"
+sqlite3 /tmp/dbcopy/pinyin.db "SELECT text, count, last_used FROM user_word ORDER BY last_used DESC LIMIT 10;"
 ```
 
 ## `lookup`：不开输入法看候选
@@ -369,7 +374,7 @@ sqlite3 /tmp/dbcopy/dict.db "SELECT text, count, last_used FROM user_word ORDER 
 
 ```bash
 cargo run -p pliers-engine --release --example lookup -- shijian
-# 方案 pinyin，词库 /home/dao/.local/share/pliers/dict.db（打开用了 1.2ms）
+# 方案 pinyin，词库 /home/dao/.local/share/pliers/pinyin.db（打开用了 1.2ms）
 #
 # s             1.50ms   [上] 说 三 省 手 谁 受 水 山
 # sh            1.13ms   [是] 上 说 时 使 事 市 省 手
@@ -386,7 +391,7 @@ cargo run -p pliers-engine --release --example lookup -- shijian
 
 ## 许可
 
-**发布的词库资产（`dict.db.zst`）按 GPL-3.0 分发** —— 它是
+**发布的词库资产（`pinyin.db.zst`）按 GPL-3.0 分发** —— 它是
 [rime-frost](https://github.com/gaboolic/rime-frost)（GPL-3.0）那份语料的衍生作品。
 上游仓库和构建脚本（`.github/workflows/dict.yml`）都是公开的，符合 GPL 对"随附相应源码"的要求。
 `pliers` 自己的代码不受影响。

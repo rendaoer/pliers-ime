@@ -34,7 +34,7 @@ pliers-engine  ←──┬──  pliers-popup  ──┐
 | `config.rs` | 读 TOML 配置 |
 | `fetch.rs` | 下载 + 解压（`pliers --init` / `pliers build pinyin` 装词库用） |
 
-这么切的好处：**输入方案、词库、候选框长相都能脱离合成器跑测试**（222 个单测），
+这么切的好处：**输入方案、词库、候选框长相都能脱离合成器跑测试**（223 个单测），
 协议层里剩下的全是"Wayland 要求这么做"的东西。想改哪块就只动哪块：
 
 * 加词 / 调词频 → 用 SQL 改词库，或者重新跑一遍 `pliers-dict`
@@ -160,7 +160,7 @@ turso 里这个功能还叫 `experimental_attach`（得在 `Builder` 上显式�
 Rust 里重排 —— 那样"权重最高的前 N 个"就得先按语料权重截断，一个被你选过很多次、
 但语料权重排在窗口外的词会浮不上来。`ATTACH` 保住了原来的语义，代价只有一个实验性开关。
 
-打开哪个库由方案决定（`Config::active_dict_path()`，见 `config.rs`）：拼音那几套开 `dict.db`，
+打开哪个库由方案决定（`Config::active_dict_path()`，见 `config.rs`）：拼音那几套开 `pinyin.db`，
 `kind = "wubi"` 开 `wubi.db` —— 一次只开一个，所以同一套 `Dict` 代码两边通用
 （两个库的表结构一模一样，连那 412 个音节都是导入时一起写进去的）。
 

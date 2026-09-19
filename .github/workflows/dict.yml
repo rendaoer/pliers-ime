@@ -1,12 +1,14 @@
 # 构建**两个**资产，挂到 Release 上：
-#   dict.db.zst     中文词库（86 MB → 27 MB），pliers --init 下载它
-#   english.db.zst  英文候选词表（SQLite，25k 词 → 约 500 KB），pliers fetch english 下载它
+#   pinyin.db.zst    拼音词库（86 MB → 27 MB），pliers --init 下载它
+#   english.db.zst   英文候选词表（SQLite，25k 词 → 约 500 KB），pliers fetch english 下载它
 # 两者分开，是为了能各自独立更新：换词表不用重发词库，反之亦然。
+# （五笔这类码表**不进这里**：各家的码不一样、许可也各不相同，用户自己
+#  pliers build wubi <码表.txt> 建到 wubi.db 里）
 #
 # 为什么走 Release 而不是直接进仓库：词库是几百 MB 的派生物，GitHub 单文件上限 100 MB，
 # 而且每次重新导入都会产生一堆二进制 diff。`pliers --init` 就是从这个地址拿的：
 #
-#   https://github.com/<owner>/<repo>/releases/latest/download/dict.db.zst
+#   https://github.com/<owner>/<repo>/releases/latest/download/pinyin.db.zst
 #   （releases/latest/download/ 永远指向最新 Release 的同名资产，所以不用改代码）
 #
 # 怎么发一版：打个 tag 推上去就行
@@ -64,11 +66,11 @@ jobs:
           echo "CORPUS_SHA=$(curl -fsSL -H "Authorization: Bearer ${{ github.token }}" https://api.github.com/repos/gaboolic/rime-frost/commits/master | jq -r .sha)" >> "$GITHUB_ENV"
 
       - name: 构建
-        run: cargo run --release -p pliers-dict -- --rime corpus --out dict.db
+        run: cargo run --release -p pliers-dict -- --rime corpus --out pinyin.db
 
       # 英文词表：上游 en_50k（OpenSubtitles 词频）+ 我们自己那份开发词表，
       # 由 tools/build_english_list.py 合成，再用 pliers-dict 导成 english.db。
-      # 跟中文词库分开打包，可以单独更新
+      # 跟拼音词库分开打包，可以单独更新
       - name: 构建英文词表
         run: |
           curl -fsSL -o en_50k.txt \
@@ -93,11 +95,11 @@ jobs:
         run: |
           # WAL 文件的前 32 字节是文件头：只有头、没有帧 = 没有"还没并回主库的数据"。
           # 不能只看"文件非空"—— 打开过一次就会留下这个头（turso 也这样）
-          if [ -f dict.db-wal ] && [ "$(stat -c%s dict.db-wal)" -gt 32 ]; then
-            echo "::error::dict.db-wal 里有数据帧，说明没 checkpoint，发布出去会是个残缺的库"
+          if [ -f pinyin.db-wal ] && [ "$(stat -c%s pinyin.db-wal)" -gt 32 ]; then
+            echo "::error::pinyin.db-wal 里有数据帧，说明没 checkpoint，发布出去会是个残缺的库"
             exit 1
           fi
-          PLIERS_DICT="$PWD/dict.db" cargo run --release -p pliers-ime -- status pinyin | tee /tmp/status.txt
+          PLIERS_PINYIN="$PWD/pinyin.db" cargo run --release -p pliers-ime -- status pinyin | tee /tmp/status.txt
           grep -q "词条" /tmp/status.txt
 
       - name: 压缩 + 记指纹
@@ -105,44 +107,51 @@ jobs:
           # 自检那一步用 pliers 打开过词库，会留下一个只有头的 -wal（数据都在主库里）。
           # 这里正式 checkpoint 一次：万一旁边的 -wal 里真有帧，也一并并回主库，
           # 然后要求它归零 —— 资产必须是自包含的一个文件
-          sqlite3 dict.db "PRAGMA wal_checkpoint(TRUNCATE);"
-          if [ -f dict.db-wal ] && [ -s dict.db-wal ]; then
-            echo "::error::checkpoint 之后 dict.db-wal 还有数据，压缩出来会是个残缺的库"
+          sqlite3 pinyin.db "PRAGMA wal_checkpoint(TRUNCATE);"
+          if [ -f pinyin.db-wal ] && [ -s pinyin.db-wal ]; then
+            echo "::error::checkpoint 之后 pinyin.db-wal 还有数据，压缩出来会是个残缺的库"
             exit 1
           fi
-          rm -f dict.db-wal dict.db-shm english.db-wal english.db-shm
-          zstd -19 -T0 dict.db -o dict.db.zst
+          rm -f pinyin.db-wal pinyin.db-shm english.db-wal english.db-shm
+          zstd -19 -T0 pinyin.db -o pinyin.db.zst
           zstd -19 -T0 english.db -o english.db.zst
-          sha256sum dict.db.zst > dict.db.zst.sha256
+          sha256sum pinyin.db.zst > pinyin.db.zst.sha256
           sha256sum english.db.zst > english.db.zst.sha256
-          ls -l dict.db dict.db.zst english.db english.db.zst
-          cat dict.db.zst.sha256 english.db.zst.sha256
+          ls -l pinyin.db pinyin.db.zst english.db english.db.zst
+          cat pinyin.db.zst.sha256 english.db.zst.sha256
 
       # 许可：词库是从 GPL-3.0 的语料构建出来的衍生作品，发出来就得随附许可和来源
       #（来源就是 rime-frost 仓库本身 + 这个工作流，谁都拿得到）
       - name: 写 Release 说明
         run: |
           cat > release-body.md <<EOF
-          中文拼音词库，给 [pliers](https://github.com/${{ github.repository }}) 用。
+          拼音词库，给 [pliers](https://github.com/${{ github.repository }}) 用。
 
           \`\`\`
-          pliers --init          # 自动下载安装（就是拿这里的 dict.db.zst）
+          pliers --init          # 自动下载安装（就是拿这里的 pinyin.db.zst）
           \`\`\`
 
           | | |
           | --- | --- |
           | 语料 | [白霜拼音 rime-frost](https://github.com/gaboolic/rime-frost)（GPL-3.0） |
           | 语料版本 | \`$CORPUS_SHA\` |
-          | 构建方式 | \`pliers-dict --rime corpus --out dict.db\`（见 \`.github/workflows/dict.yml\`） |
+          | 构建方式 | \`pliers-dict --rime corpus --out pinyin.db\`（见 \`.github/workflows/dict.yml\`） |
           | 许可 | **GPL-3.0**（本资产是上述语料的衍生作品） |
 
           同一个 Release 里还有 **`english.db.zst`**（英文候选词表，SQLite，约 500 KB），
           来源 [FrequencyWords](https://github.com/hermitdave/FrequencyWords) 的 `en_50k`
-          （OpenSubtitles2018 词频，CC-BY-SA-4.0）+ 仓库里 `tools/english-extra.txt`
+          （OpenSubtitles2018 词频，CC-BY-SA-4.0）+ 仓库里 \`tools/english-extra.txt\`
           那份开发常用词。它跟词库**分开**，可以单独更新：
 
           \`\`\`
           pliers fetch english     # 只更新词表，不用重装输入法
+          \`\`\`
+
+          **五笔这类码表没有资产**（各家的码不一样、许可也各不相同）：用自己的码表建一份，
+          落到它自己的 \`wubi.db\` 里 —— 跟拼音词库互不影响：
+
+          \`\`\`
+          pliers build wubi 我的五笔.txt     # 每行 `词<TAB>码[<TAB>权重]`
           \`\`\`
 
           词条是 \`词 + 拼音 + 权重\`，多音字一行一个读音。想自己构建（不用这个资产）：
@@ -160,7 +169,24 @@ jobs:
           name: 词库 ${{ github.ref_type == 'tag' && github.ref_name || 'dict-latest' }}
           body_path: release-body.md
           files: |
-            dict.db.zst
-            dict.db.zst.sha256
+            pinyin.db.zst
+            pinyin.db.zst.sha256
             english.db.zst
             english.db.zst.sha256
+
+      # 拼音词库以前叫 dict.db（跟 wubi.db / english.db 不齐），现在统一成 pinyin.db。
+      # 老名字那两个资产留在 Release 上的话会跟新的混着（有人照着旧文档下），顺手删掉
+      - name: 删掉老名字的资产
+        if: ${{ github.ref_type != 'tag' }}
+        run: |
+          tag=dict-latest
+          for name in dict.db.zst dict.db.zst.sha256; do
+            id=$(curl -fsSL -H "Authorization: Bearer ${{ github.token }}" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/tags/$tag" \
+              | jq -r --arg name "$name" '.assets[] | select(.name == $name) | .id' | head -1)
+            if [ -n "$id" ]; then
+              curl -fsSL -X DELETE -H "Authorization: Bearer ${{ github.token }}" \
+                "https://api.github.com/repos/${{ github.repository }}/releases/assets/$id"
+              echo "删掉了老资产 $name"
+            fi
+          done

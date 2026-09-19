@@ -5,7 +5,7 @@
 ## 单测：不需要合成器、不需要词库
 
 ```bash
-cargo test --workspace        # 全部 222 个
+cargo test --workspace        # 全部 223 个
 cargo test -p pliers-engine   # 只看引擎（163 个）：切词、方案、词库、英文候选、按键状态机
 cargo test -p pliers-ime      # 命令行那套（13 个）：状态输出、配置校验、交互选择
 cargo test -p pliers-dict     # 导入工具（5 个）：rime 词库解析、权重缩放、格式不对要说清楚
@@ -63,11 +63,11 @@ wl_compositor / wl_shm / zwp_input_method_v2 / zwp_virtual_keyboard_v1 的够用
 ./tools/run_mock_tests.sh --png target/popup.png      # 顺便存一张候选框实拍
 ```
 
-词库默认依次找 `target/dict.db`、`~/.local/share/pliers/dict.db`，也可以 `--dict <路径>` 指定。
+词库默认依次找 `target/pinyin.db`、`~/.local/share/pliers/pinyin.db`，也可以 `--dict <路径>` 指定。
 测试里的选词会写进 `user_word`，**不想污染自己的词频就指向一份副本**：
 
 ```bash
-cp ~/.local/share/pliers/dict.db target/dict-copy.db
+cp ~/.local/share/pliers/pinyin.db target/dict-copy.db
 ./tools/run_mock_tests.sh --dict target/dict-copy.db
 ```
 
@@ -93,7 +93,7 @@ cp ~/.local/share/pliers/dict.db target/dict-copy.db
 | `shift` | `Shift+A` | 纯大写：4 个事件全转发 |
 | `english` | Ctrl+空格 + `hello ` | 切到英文后全部按键原样转发、零提交 |
 | `englishword` | `kuber ` | **英文补全**：只敲了 5 个字母，上屏的是补全后的 `kubernetes`（词表编译在二进制里，跟词库无关） |
-| `wubi` | `nin `（配置 `kind = "wubi"`，码表库是临时现搭的 `wubi.db`） | **两个库真的分家**：码表方案开的是 `wubi.db`，能出「你」；要是它还去开拼音的 `dict.db`，这里一个候选都没有 |
+| `wubi` | `nin `（配置 `kind = "wubi"`，码表库是临时现搭的 `wubi.db`） | **两个库真的分家**：码表方案开的是 `wubi.db`，能出「你」；要是它还去开拼音的 `pinyin.db`，这里一个候选都没有 |
 | `repeat` | `nihao` + 按住退格 1 秒 | **长按重复**：合成器只报了 `repeat_info`，输入法自己按节拍删 —— 预编辑一路 `niha`→`nih`→`ni`→`n`→空，删空之后每一拍转发给应用 |
 | `switch` | `nihao` + Ctrl+空格 + `hi` | 切换键把半截拼音 `nihao` 上屏，切完 `hi` 原样转发 |
 | `notice` | 只按 Ctrl+空格，之后一个键都不按 | 「英」提示**自己**到点消失（大约半秒后收掉），不是等下一个按键 |
@@ -118,7 +118,7 @@ cp ~/.local/share/pliers/dict.db target/dict-copy.db
 
 ```bash
 python3 tools/mock_compositor.py /tmp/mock-wl "nihao " 你好 &
-PLIERS_DICT=target/dict.db WAYLAND_DISPLAY=/tmp/mock-wl cargo run
+PLIERS_PINYIN=target/pinyin.db WAYLAND_DISPLAY=/tmp/mock-wl cargo run
 # mock: pre-edit updates: ['n', 'ni', 'nih', 'niha', 'nihao', '']
 # mock: popup shown     : [(90, 42), (168, 42), (318, 42), (318, 42), (318, 42)]
 # mock: 框里数出 581 个笔画像素（不透明 13298）

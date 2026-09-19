@@ -93,7 +93,7 @@ kuber      →  [kubernetes] …                 ← 词表里连开发词都有
 | `zzzz` | 什么候选都没有 | 词表里没有，空格照样原样上屏（不会吞掉） |
 
 词表是**自己一个 SQLite 库**（`~/.local/share/pliers/english.db`，一张 `english(word, weight)` 表，
-两万五千个词），跟中文词库分开、也不绑在二进制上 —— 可以单独更新：
+两万五千个词），跟拼音词库分开、也不绑在二进制上 —— 可以单独更新：
 
 ```nushell
 pliers --init            # 装一份（离线也行：先把二进制里那份兜底写出来）

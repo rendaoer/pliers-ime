@@ -1,21 +1,21 @@
 //! `pliers fetch ...` / `pliers update`：从 GitHub Release 把**预构建的字典**拿下来。
 //!
-//! **字典（dict）是个总概念**，按方案分成几块，各有各的资产、能各自更新：
+//! **字典（dict）是个总概念**，按方案分成几块，一个库一个文件、各有各的资产：
 //!
 //! | 种类 | 资产 | 落到哪 | 是什么 |
 //! | --- | --- | --- | --- |
-//! | `pinyin` | `dict.db.zst`（27 MB） | `~/.local/share/pliers/dict.db` | 中文词库 + 音节表（码表也在这个库里，靠 `word.scheme` 分） |
+//! | `pinyin` | `pinyin.db.zst`（27 MB） | `~/.local/share/pliers/pinyin.db` | 拼音词库 + 音节表 |
 //! | `english` | `english.db.zst`（约 500 KB） | `~/.local/share/pliers/english.db` | 英文候选词表 |
 //!
 //! ```text
-//! pliers fetch pinyin      # 只更新中文词库（pinyin + wubi 都在这个库里）
+//! pliers fetch pinyin      # 只更新拼音词库
 //! pliers fetch english     # 只更新英文词表
-//! pliers fetch all         # 整套字典
+//! pliers fetch all         # 两个预构建的都要
 //! pliers update            # 哪个不是最新的就更新哪个（先比 Release 上的 sha256，一样就跳过）
 //! ```
 //!
-//! 码表（五笔/郑码）**没有单独的资产**：它跟拼音在同一个 `dict.db` 里（`word.scheme` 区分），
-//! 因为导入是一次性重建整个文件的 —— 想加五笔得带上语料一起导（见 docs/dictionary.md）。
+//! 码表（五笔/郑码/仓颉）**没有资产**：各家的码不一样、许可也各不相同，得用自己那份
+//! `pliers build wubi <码表.txt>` 建到它自己的 `wubi.db` 里（见 docs/dictionary.md）。
 //!
 //! "是不是最新的"靠 Release 上那个 `<资产>.sha256`（构建时算的压缩包指纹）+ 本地一份小抄
 //!（`<文件>.asset-sha256`，装的时候写下来）。比不了（比如 sha256sum 没装、marker 是老版本
@@ -38,6 +38,8 @@ struct Asset {
     url: &'static str,
     /// 想换源就用这个环境变量
     url_env: &'static str,
+    /// 换源的环境变量的老名字（改过名的还认，见 `env_url`）
+    url_env_legacy: Option<&'static str>,
     /// 安装到哪
     dest: fn(&Config) -> PathBuf,
 }
@@ -46,9 +48,10 @@ struct Asset {
 const ASSETS: &[Asset] = &[
     Asset {
         name: "pinyin",
-        label: "中文词库（pinyin）",
-        url: "https://github.com/rendaoer/pliers-ime/releases/latest/download/dict.db.zst",
-        url_env: "PLIERS_DICT_URL",
+        label: "拼音词库（pinyin）",
+        url: "https://github.com/rendaoer/pliers-ime/releases/latest/download/pinyin.db.zst",
+        url_env: "PLIERS_PINYIN_URL",
+        url_env_legacy: Some("PLIERS_DICT_URL"),
         dest: |config| config.dict_path(),
     },
     Asset {
@@ -56,6 +59,7 @@ const ASSETS: &[Asset] = &[
         label: "英文词表（english）",
         url: "https://github.com/rendaoer/pliers-ime/releases/latest/download/english.db.zst",
         url_env: "PLIERS_ENGLISH_URL",
+        url_env_legacy: None,
         dest: |config| config.english_path(),
     },
 ];
@@ -83,14 +87,14 @@ fn targets(what: &str) -> Result<Vec<&'static Asset>, String> {
                 "五笔这类码表**没有**预构建的资产 —— 各家的码不一样（86 / 98 / 新世纪 / 极点…），\n\
                  \x20     许可也各不相同。它有自己的库（wubi.db），用自己的码表建一份就行：\n\
                  \x20     pliers build wubi <码表.txt>        # 每行 `词<TAB>码[<TAB>权重]`\n\
-                 \x20     （拼音词库不受影响：那是另一个文件 dict.db）"
+                 \x20     （拼音词库不受影响：那是另一个文件 pinyin.db）"
                     .to_string(),
             );
         }
         other => {
             return Err(format!(
                 "不认识的种类 {other:?}（fetch 收这些）：\n\
-                 \x20     pinyin   拼音词库（dict.db，27 MB）\n\
+                 \x20     pinyin   拼音词库（pinyin.db，27 MB）\n\
                  \x20     english  英文词表（english.db，约 500 KB）\n\
                  \x20     all      两个预构建的都要（也可以不写）\n\
                  \x20 想「哪个不是最新就更新哪个」用：pliers update\n\
@@ -182,12 +186,15 @@ pub fn update(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// 这个资产的下载地址：环境变量优先（`PLIERS_DICT_URL` / `PLIERS_ENGLISH_URL`），
+/// 这个资产的下载地址：环境变量优先（`PLIERS_PINYIN_URL` / `PLIERS_ENGLISH_URL`），
 /// 否则内置默认（`latest/download/` 永远指向最新 Release 里的同名资产）
 fn env_url(asset: &Asset) -> Option<String> {
-    std::env::var(asset.url_env)
-        .ok()
-        .or_else(|| Some(asset.url.to_string()))
+    let from_env = std::env::var(asset.url_env).ok().or_else(|| {
+        asset
+            .url_env_legacy
+            .and_then(|name| std::env::var(name).ok())
+    });
+    from_env.or_else(|| Some(asset.url.to_string()))
 }
 
 /// 下载一个资产。`url` 不给就用内置那个；`force = false` 时本地已经有就不动
@@ -211,7 +218,7 @@ fn fetch_one(
         format!(
             "{e}\n\n\
              下载不到也没关系：\n\
-             \x20 中文词库可以自己构建：pliers build pinyin（要 pliers-dict）\n\
+             \x20 拼音词库可以自己构建：pliers build pinyin（要 pliers-dict）\n\
              \x20 英文词表没装的话输入法会用二进制里那份兜底\n\
              或者手动下载后放到：{}",
             dest.display()
@@ -286,7 +293,7 @@ mod tests {
         // sha256sum 的输出：`<hash>  <文件名>`
         assert_eq!(
             parse_sha(
-                "0bd9c79a8a617a69986076979ca33407898486a8aeca077953bf70fa056da1cf  dict.db.zst\n"
+                "0bd9c79a8a617a69986076979ca33407898486a8aeca077953bf70fa056da1cf  pinyin.db.zst\n"
             ),
             Some("0bd9c79a8a617a69986076979ca33407898486a8aeca077953bf70fa056da1cf".to_string())
         );

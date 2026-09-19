@@ -5,15 +5,15 @@
 #
 #     ./tools/run_mock_tests.sh                        # 全部场景
 #     ./tools/run_mock_tests.sh --png target/popup.png # 顺便存一张候选框的图
-#     ./tools/run_mock_tests.sh --dict ~/.local/share/pliers/dict.db
+#     ./tools/run_mock_tests.sh --dict ~/.local/share/pliers/pinyin.db
 set -u
 cd "$(dirname "$0")/.."
 
 # 参数写法跟 shell 无关（${VAR=x cmd} 这种前缀在 zsh/bash/nushell 里写法不一样）：
-#   --dict <路径>   词库。不给就依次找 target/dict.db、~/.local/share/pliers/dict.db，
-#                   也认 PLIERS_DICT 环境变量。
+#   --dict <路径>   词库。不给就依次找 target/pinyin.db、~/.local/share/pliers/pinyin.db，
+#                   也认 PLIERS_PINYIN 环境变量。
 #                   注意测试里的选词会记进 user_word，不想污染自己的词频就指向一份副本：
-#                       cp ~/.local/share/pliers/dict.db target/dict-copy.db
+#                       cp ~/.local/share/pliers/pinyin.db target/dict-copy.db
 #   --png  <路径>   把 active 场景的候选框存成 PNG
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -42,21 +42,24 @@ indicator = true
 TOML
 
 SOCK="/tmp/pliers-mock-$$.sock"
-# 词库：默认用仓库里导入好的那份（装到 ~/.local/share/pliers/ 之后就不用设了）
-DICT="${DICT_ARG:-${PLIERS_DICT:-}}"
+# 词库：默认用仓库里导入好的那份（装到 ~/.local/share/pliers/ 之后就不用设了）。
+# 老名字 dict.db 也找一遍：引擎自己会把老名字的库改名成 pinyin.db，但测试脚本
+# 不该去动你那份文件 —— 找到哪个就用哪个（只读它的副本）
+DICT="${DICT_ARG:-${PLIERS_PINYIN:-}}"
 if [ -z "$DICT" ]; then
-    for candidate in "$PWD/target/dict.db" "$HOME/.local/share/pliers/dict.db"; do
+    for candidate in "$PWD/target/pinyin.db" "$HOME/.local/share/pliers/pinyin.db" \
+                     "$PWD/target/dict.db" "$HOME/.local/share/pliers/dict.db"; do
         if [ -f "$candidate" ]; then DICT="$candidate"; break; fi
     done
 fi
 if [ -z "$DICT" ] || [ ! -f "$DICT" ]; then
-    echo "找不到词库（试过 target/dict.db 和 ~/.local/share/pliers/dict.db）"
+    echo "找不到词库（试过 target/ 和 ~/.local/share/pliers/ 下的 pinyin.db、dict.db）"
     echo "先装一份：pliers --init（或 pliers build pinyin 自己构建）"
     exit 1
 fi
 # 测试用自己的一份词库副本：选词/记整句都会写进库里，别污染真库
 SRC_DICT="$DICT"   # 原始词库，我们只从它拷一份来用，从不写它
-TEST_DICT="$(mktemp -d)/dict.db"
+TEST_DICT="$(mktemp -d)/pinyin.db"
 cp "$SRC_DICT" "$TEST_DICT"
 # 还没并回主库的 WAL 也得一起拷：刚导入完的库、或者输入法正开着的库，
 # 最新的写入（很可能包括音节表）还在 -wal 里，只拷 .db 会拿到一个不完整的库
@@ -84,7 +87,7 @@ run_control() {
     python3 tools/mock_compositor.py "$sock" "nihc " 你好 control >"$log" 2>&1 &
     local mock=$!
     sleep 0.4
-    env PLIERS_DICT="$DICT" PLIERS_USER_DB="$(users control)" \
+    env PLIERS_PINYIN="$DICT" PLIERS_USER_DB="$(users control)" \
         PLIERS_ENGLISH="$(english control)" PLIERS_CONFIG="$CFG" \
         PLIERS_SOCKET="$ctl" WAYLAND_DISPLAY="$sock" \
         timeout 30 ./target/debug/pliers >>"$log" 2>&1 &
@@ -164,7 +167,7 @@ TOML
     python3 tools/mock_compositor.py "$sock" "nihc " 你好 watch >"$log" 2>&1 &
     local mock=$!
     sleep 0.4
-    env PLIERS_DICT="$DICT" PLIERS_USER_DB="$(users watch)" \
+    env PLIERS_PINYIN="$DICT" PLIERS_USER_DB="$(users watch)" \
         PLIERS_ENGLISH="$(english watch)" PLIERS_CONFIG="$cfg" \
         PLIERS_SOCKET="$ctl" WAYLAND_DISPLAY="$sock" \
         timeout 30 ./target/debug/pliers >>"$log" 2>&1 &
@@ -217,7 +220,7 @@ run() { # run <名字> <按键> <期望提交> <模式> [额外环境变量]
     MOCK_PNG="$png" python3 tools/mock_compositor.py "$SOCK" "$keys" "$expect" "$mode" >"$log" 2>&1 &
     local mock=$!
     sleep 0.4
-    env PLIERS_DICT="$dict" PLIERS_USER_DB="$(users "$name")" PLIERS_ENGLISH="$(english "$name")" \
+    env PLIERS_PINYIN="$dict" PLIERS_USER_DB="$(users "$name")" PLIERS_ENGLISH="$(english "$name")" \
         PLIERS_CONFIG="$CFG" $extra \
         WAYLAND_DISPLAY="$SOCK" timeout 30 ./target/debug/pliers >>"$log" 2>&1
     wait "$mock"
@@ -251,7 +254,7 @@ echo "== 英文候选（英文单词补全）=="
 run englishword    "kuber "  kubernetes englishword
 
 echo "== 五笔（码表库是**另一个文件**）=="
-# 现搭一个码表库，配置里 kind = "wubi" 指向它。要是引擎还去开拼音的 dict.db，
+# 现搭一个码表库，配置里 kind = "wubi" 指向它。要是引擎还去开拼音的 pinyin.db，
 # 这里一个候选都出不来，直接 FAIL —— 这一条就是"两个库真的分家"的回归测试
 WUBI_DIR="$LOGS/wubi"
 mkdir -p "$WUBI_DIR"

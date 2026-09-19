@@ -21,7 +21,7 @@ pliers --init-config        # 写到 ~/.config/pliers/config.toml，已存在就
 kind = "full-pinyin"      # full-pinyin | double-pinyin | wubi
 
 [dict]
-# path = "~/.local/share/pliers/dict.db"
+# path = "~/.local/share/pliers/pinyin.db"
 # max_candidates = 9
 ```
 
@@ -77,7 +77,7 @@ name = "wubi"             # 码表在库里的名字；就是 wubi 的话可以�
 wubi_path = "~/.local/share/pliers/wubi.db"   # 码表库；默认就是这个位置
 ```
 
-码表**在自己的一个库里**（跟拼音词库 `dict.db` 分开），用自己的码表构建：
+码表**在自己的一个库里**（跟拼音词库 `pinyin.db` 分开），用自己的码表构建：
 
 ```bash
 pliers build wubi 我的五笔.txt                  # 每行 `词<TAB>码[<TAB>权重]`（rime 那种 .txt 就这格式）
@@ -104,7 +104,7 @@ sentence = true           # 想要"只出词库里真有的词"就设 false
 
 ```toml
 [dict]
-path = "~/.local/share/pliers/dict.db"        # 拼音词库（派生物，可以随时换/重建）
+path = "~/.local/share/pliers/pinyin.db"        # 拼音词库（派生物，可以随时换/重建）
 wubi_path = "~/.local/share/pliers/wubi.db"   # 码表库（五笔/郑码/仓颉，自己用码表构建）
 user_path = "~/.local/share/pliers/user.db"   # 用户数据（选过的词/自己拼的句子/拉黑的词）
 max_candidates = 9                       # 一页显示几个候选
@@ -112,8 +112,10 @@ pool_size = 90                           # 一次准备多少个候选 = 最多�
 ```
 
 `path` / `wubi_path` / `user_path` 都认 `~`；也可以整个用环境变量顶掉：
-`PLIERS_DICT=/path/to/dict.db`、`PLIERS_WUBI=/path/to/wubi.db`、`PLIERS_USER_DB=/path/to/user.db`。
+`PLIERS_PINYIN=/path/to/pinyin.db`、`PLIERS_WUBI=/path/to/wubi.db`、`PLIERS_USER_DB=/path/to/user.db`。
 **哪个库被打开由方案决定**：`scheme.kind = "wubi"` 时用 `wubi_path`，别的方案用 `path`。
+（`path` 的默认值以前是 `dict.db`，现在跟另外两个对齐成 `pinyin.db` —— 第一次用新版本时
+会自动把老名字那份改名过来，不用手动搬；`PLIERS_DICT` / `PLIERS_DICT_URL` 这些老环境变量也还认。）
 
 **词库、码表库、用户数据是三个文件**：换词库（`pliers fetch pinyin --force` / `pliers build pinyin`）
 只会动 `path`，`wubi_path` 和 `user_path` 里那些"你的五笔码表、你选过的词、你自己拼出来的句子、
@@ -202,7 +204,7 @@ pliers reload                             # 手动让它重读一遍配置文件
 ```
 实例        正在跑（socket /run/user/1000/pliers.sock）
 方案        双拼（小鹤）
-词库        /home/dao/.local/share/pliers/dict.db（86 MB）
+词库        /home/dao/.local/share/pliers/pinyin.db（86 MB）
 用户数据    /home/dao/.local/share/pliers/user.db（8 KB）
 候选        一页 9 个，池子 90 个
 英文候选    开（词表 25223 个词，一次最多 5 个）
@@ -232,7 +234,7 @@ $ pliers set
 ❯   双拼键位     flypy              natural / flypy / mspy / none
     整句候选     开                 true / false
     码表名       —                  手输
-    拼音词库文件 /home/dao/.local/share/pliers/dict.db   手输
+    拼音词库文件 /home/dao/.local/share/pliers/pinyin.db   手输
     一页候选数   9                  1 / 2 / 3 / 4 / 5 / 6 / 7 / 8 / 9
     …
     用户数据文件 /home/dao/.local/share/pliers/user.db   手输

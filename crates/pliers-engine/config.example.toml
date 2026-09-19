@@ -73,7 +73,7 @@ kind = "full-pinyin"
 [dict]
 # 拼音词库（pliers --init 装一份，或 pliers build pinyin 自己构建；
 # 见仓库里的 docs/dictionary.md）
-# path = "~/.local/share/pliers/dict.db"
+# path = "~/.local/share/pliers/pinyin.db"
 
 # 码表库（五笔/郑码/仓颉）：跟拼音词库**分开一个文件**，用自己的码表构建 ——
 # 重导拼音词库不会碰到它，反过来也一样

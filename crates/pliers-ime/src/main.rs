@@ -29,7 +29,7 @@ fn help() -> String {
         "pliers —— 从零手写的 Wayland 中文输入法\n\n\
          用法：pliers [动词] [种类] [选项]        （不带动词 = 启动输入法）\n\n\
          \x20 字典是个总概念，按方案分成几种，**各有各的文件**：\n\
-         \x20 pinyin（拼音词库 dict.db）/ wubi（码表库 wubi.db，五笔/郑码/仓颉）/ english（英文词表）。\n\
+         \x20 pinyin（拼音词库 pinyin.db）/ wubi（码表库 wubi.db，五笔/郑码/仓颉）/ english（英文词表）。\n\
          \x20 下面四个动词收的都是这几个名字：\n\
          \x20 pliers status [种类]        看现状：不给种类 = 实例 + 所有库，给了 = 只看那一块\n\
          \x20 pliers path   [名字]        文件都在哪（config / dict / wubi / user / english / corpus / socket）\n\
@@ -53,7 +53,7 @@ fn help() -> String {
          \x20 scheme.layout         natural | flypy | mspy | none   （双拼键位）\n\
          \x20 scheme.sentence       true | false                    （整句候选）\n\
          \x20 scheme.name           <码表名>                        （kind = wubi 时，默认 wubi）\n\
-         \x20 dict.path             <拼音词库文件>                  （dict.db）\n\
+         \x20 dict.path             <拼音词库文件>                  （pinyin.db）\n\
          \x20 dict.wubi_path        <码表库文件>                    （wubi.db，五笔/郑码/仓颉）\n\
          \x20 dict.user_path        <用户数据文件>                  （选过的词/自己拼的句子；两个库共用）\n\
          \x20 dict.max_candidates   1-9\n\
@@ -234,7 +234,7 @@ fn path_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load().unwrap_or_default();
     let all = [
         ("config", "配置文件", pliers_engine::config::config_path()),
-        ("dict", "中文词库", config.dict_path()),
+        ("pinyin", "拼音词库", config.dict_path()),
         ("wubi", "码表库", config.wubi_path()),
         ("user", "用户数据", config.user_path()),
         ("english", "英文词表", config.english_path()),
@@ -245,9 +245,9 @@ fn path_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             pliers_wayland::control::socket_path(),
         ),
     ];
-    // 种类名也认：pinyin 就是 dict，wubi 有自己的文件
+    // 三个库的名字就是种类（pinyin / wubi / english）；`dict` 是拼音那个的老写法，还认
     let what = match args::kind(args) {
-        "pinyin" => "dict",
+        "dict" => "pinyin",
         other => other,
     };
     if what.is_empty() {
@@ -264,10 +264,10 @@ fn path_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         None => Err(format!(
             "不认识的名字 {what:?}（path 收这些）：\n\
              \x20     config   配置文件\n\
-             \x20     dict     拼音词库（pinyin 也是它）\n\
-             \x20     wubi     码表库（五笔/郑码/仓颉，跟拼音词库分开一个文件）\n\
-             \x20     user     用户数据（选过的词、自己拼的句子；两个库共用这一份）\n\
-             \x20     english  英文词表\n\
+             \x20     pinyin   拼音词库（pinyin.db；老写法 dict 也认）\n\
+             \x20     wubi     码表库（wubi.db，五笔/郑码/仓颉）\n\
+             \x20     user     用户数据（选过的词、自己拼的句子；几个库共用这一份）\n\
+             \x20     english  英文词表（english.db）\n\
              \x20     corpus   语料缓存（pliers build pinyin 下的那六个文件）\n\
              \x20     socket   遥控正在跑的实例用的 socket"
         )
@@ -299,7 +299,7 @@ fn build_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 fn unknown_kind(verb: &str, what: &str) -> Box<dyn std::error::Error> {
     format!(
         "不认识的种类 {what:?}（{verb} 收这些）：\n\
-         \x20     pinyin   拼音词库（dict.db，27 MB，能下载也能自己构建）\n\
+         \x20     pinyin   拼音词库（pinyin.db，27 MB，能下载也能自己构建）\n\
          \x20     wubi     码表库（wubi.db，五笔/郑码/仓颉，用自己的码表构建）\n\
          \x20     english  英文词表（english.db，约 500 KB）"
     )
@@ -311,7 +311,7 @@ fn retired(name: &str, rest: &[String]) -> Box<dyn std::error::Error> {
     let sub = rest.first().map(String::as_str).unwrap_or("");
     let hint = match (name, sub) {
         ("pliers dict", "build") => "pliers build pinyin",
-        ("pliers dict", "path") => "pliers path dict",
+        ("pliers dict", "path") => "pliers path pinyin",
         ("pliers dict", "") | ("pliers dict", "status") => "pliers status pinyin",
         ("pliers dict", _) => "pliers status pinyin / pliers fetch pinyin / pliers build pinyin",
         ("pliers english", "build") => "pliers build english",
@@ -470,7 +470,7 @@ impl Fields {
     }
 }
 
-/// 现状里的一行：标签补齐到 12 列（中文按两列算，所以"中文词库"和"来源"照样对齐），
+/// 现状里的一行：标签补齐到 12 列（中文按两列算，所以"拼音词库"和"来源"照样对齐），
 /// 值跟在后面。状态、字典、路径几块都用它排版，所以列是对齐的
 pub(crate) fn row(label: &str, value: impl std::fmt::Display) -> String {
     format!("{} {value}", pick::pad(label, 12))
@@ -1072,8 +1072,8 @@ mod tests {
     /// 服务端回话的样子（字段顺序跟 status_fields 一致）
     const PAYLOAD: &str = concat!(
         "kind=double-pinyin\tlayout=flypy\tname=\tsentence=true\t",
-        "dict=/home/dao/.local/share/pliers/dict.db（131 MB）\t",
-        "dict_path=/home/dao/.local/share/pliers/dict.db\t",
+        "dict=/home/dao/.local/share/pliers/pinyin.db（131 MB）\t",
+        "dict_path=/home/dao/.local/share/pliers/pinyin.db\t",
         "user=/home/dao/.local/share/pliers/user.db（8 KB）\t",
         "user_path=/home/dao/.local/share/pliers/user.db\t",
         "candidates=9\tpool=90\ttoggle=ctrl+space\tstart=chinese\tindicator=true\t",

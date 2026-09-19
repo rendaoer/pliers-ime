@@ -1,12 +1,12 @@
 //! 英文候选：打英文单词的时候给补全（`hel` + 空格 → `hello`）。
 //!
 //! 词表放在**自己的一个 SQLite 文件**里：`~/.local/share/pliers/english.db`
-//! （表就一张：`english(word, weight)`），跟中文词库 `dict.db`、用户数据 `user.db`
+//! （表就一张：`english(word, weight)`），跟拼音词库 `pinyin.db`、用户数据 `user.db`
 //! 各管各的、可以各自更新：
 //!
 //! 1. `english.db` —— 运行时用的就是它。`pliers --init` 装一份，
 //!    `pliers fetch english` 从 GitHub Release 更新（约 60 KB 的资产，能**单独更新**，
-//!    不用重装输入法、也不用重下 27 MB 的中文词库）；
+//!    不用重装输入法、也不用重下 27 MB 的拼音词库）；
 //! 2. `[english] extra` 指的文件（**文本**，一行一个词）—— 你自己额外加的词，排在最前面；
 //! 3. `data/english.txt`（`include_str!` 编译进来那份文本）—— **只当兜底**：
 //!    `english.db` 没装/读不了的时候用它，保证"装完就能用、离线也能用"。

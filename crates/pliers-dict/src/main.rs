@@ -3,7 +3,7 @@
 //! ```text
 //! cargo run -p pliers-dict --release -- \
 //!     --rime ~/.cache/pliers/rime-frost \
-//!     --out  ~/.local/share/pliers/dict.db
+//!     --out  ~/.local/share/pliers/pinyin.db
 //! ```
 //!
 //! rime 词库（[白霜拼音](https://github.com/gaboolic/rime-frost) /
@@ -604,7 +604,7 @@ fn import_table(
 /// 命令行参数
 struct Args {
     /// 输出文件。没显式给 `--out` 就按模式取默认值：
-    /// 拼音词库 → `dict.db`、码表库 → `wubi.db`、英文词表 → `english.db`
+    /// 拼音词库 → `pinyin.db`、码表库 → `wubi.db`、英文词表 → `english.db`
     out: PathBuf,
     rime: Vec<PathBuf>,
     table: Option<PathBuf>,
@@ -659,7 +659,7 @@ impl Args {
                          \x20          hello\n\
                          \x20          kubernetes\n\
                          \n\
-                         --out    输出的 SQLite 文件。默认：拼音词库 ~/.local/share/pliers/dict.db、\n\
+                         --out    输出的 SQLite 文件。默认：拼音词库 ~/.local/share/pliers/pinyin.db、\n\
                          \x20        码表库 ~/.local/share/pliers/wubi.db、英文词表 …/english.db\n\
                          \n\
                          （一次只导一种，各写各的库：拼音和码表混在一个文件里的老做法不支持了 ——\n\
@@ -691,7 +691,7 @@ impl Args {
         if kinds.len() > 1 {
             return Err(format!(
                 "一次只能给一种（给的是 {}）—— 三种输入各写各的库，分几次跑：\n\
-                 \x20 pliers-dict --rime <语料> --out ~/.local/share/pliers/dict.db\n\
+                 \x20 pliers-dict --rime <语料> --out ~/.local/share/pliers/pinyin.db\n\
                  \x20 pliers-dict --table <码表> --table-scheme wubi --out ~/.local/share/pliers/wubi.db\n\
                  \x20 pliers-dict --english <词表> --out ~/.local/share/pliers/english.db",
                 kinds.join(" + ")
@@ -757,7 +757,7 @@ QQ\tQQ\t10
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("test.dict.yaml"), FIXTURE).unwrap();
-        let out = dir.join("dict.db");
+        let out = dir.join("pinyin.db");
         let db = pollster::block_on(Builder::new_local(&out.to_string_lossy()).build()).unwrap();
         let conn = db.connect().unwrap();
         create_schema(&conn).unwrap();
@@ -781,7 +781,7 @@ QQ\tQQ\t10
         std::fs::create_dir_all(&dir).unwrap();
         // 一份"看起来是词表、其实不是 rime 词库"的文件：逗号分隔、没有拼音
         std::fs::write(dir.join("bad.dict.yaml"), "hello,world\nfoo,bar\n").unwrap();
-        let out = dir.join("dict.db");
+        let out = dir.join("pinyin.db");
         let db = pollster::block_on(Builder::new_local(&out.to_string_lossy()).build()).unwrap();
         let conn = db.connect().unwrap();
         create_schema(&conn).unwrap();

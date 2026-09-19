@@ -77,7 +77,7 @@ pub fn init(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
         println!();
         println!(
-            "想重装：pliers dict fetch --force（或 pliers dict build）"
+            "想重装：pliers fetch pinyin --force（整套字典：pliers fetch all；或 pliers dict build）"
         );
         return Ok(());
     }
@@ -88,13 +88,13 @@ pub fn init(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-/// `pliers dict fetch|build|status|path`
+/// `pliers dict build|status|path`（下载在顶层：`pliers fetch dict`）
 pub fn command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     match args.first().map(String::as_str) {
-        Some("fetch") => {
-            let force = args.iter().any(|arg| arg == "--force");
-            fetch_dict(&target_path(), value_of(args, "--url").as_deref(), force)
-        }
+        // 下载挪到顶层了：`pliers fetch dict`（两个资产放一起，还能 `pliers update`）
+        Some("fetch") => Err(
+            "`pliers dict fetch` 现在叫 `pliers fetch pinyin`（整套字典：pliers fetch all）".into(),
+        ),
         Some("build") => build_dict(&target_path(), args.iter().any(|arg| arg == "--refresh")),
         Some("path") => {
             println!("{}", target_path().display());
@@ -104,7 +104,8 @@ pub fn command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         Some("status") | None => status(),
         Some(other) => Err(format!(
             "不认识的：pliers dict {other}\n\
-             能用的是：fetch（下载预构建的）/ build（自己下语料构建）/ status / path"
+             能用的是：build（自己下语料构建）/ status / path\n\
+             下载预构建的那份在顶层：pliers fetch dict"
         )
         .into()),
     }
@@ -118,7 +119,7 @@ fn fetch_dict(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let url = url
         .map(str::to_string)
-        .or_else(|| std::env::var("PLIERS_DICT_URL").ok())
+        .or_else(|| crate::fetch::url_for("dict"))
         .unwrap_or_else(|| DEFAULT_URL.to_string());
 
     if dest.exists() && !force {
@@ -196,6 +197,14 @@ fn build_dict(dest: &Path, refresh: bool) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
+/// 英文词表（"字典"的另一块，在自己的库里）里的词；读不到就是 None
+fn english_words() -> Option<Vec<String>> {
+    let path = crate::english::target_path();
+    path.exists()
+        .then(|| pliers_engine::english::read_db(&path).ok())
+        .flatten()
+}
+
 /// 这个文件多大（小文件也别显示成 0 MB）
 fn size(path: &Path) -> String {
     match std::fs::metadata(path) {
@@ -260,6 +269,13 @@ fn describe_contents(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // 一个库里可以放好几套方案（全拼 / 五笔 / …），分开报
     for (scheme, rows) in &stats.schemes {
         println!("           {scheme}：{rows} 条");
+    }
+    // 英文词表也是"字典"的一块（只是存在自己的库里，见 pliers english status）
+    if let Some(words) = english_words() {
+        println!(
+            "           english：{} 个词（独立库，pliers english status 看细节）",
+            words.len()
+        );
     }
     if let Some(source) = dict.meta("source") {
         println!("{}", row("来源", source));

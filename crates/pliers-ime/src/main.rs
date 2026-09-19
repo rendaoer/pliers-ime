@@ -12,6 +12,7 @@
 
 mod dict;
 mod english;
+mod fetch;
 mod pick;
 
 use std::io::{IsTerminal, Write};
@@ -25,8 +26,10 @@ fn help() -> String {
         "pliers —— 从零手写的 Wayland 中文输入法\n\n\
          用法：pliers [启动选项]\n\
          \x20     pliers --init                装一份能用的：写配置 + 下载词库\n\
-         \x20     pliers dict fetch|build|status  词库（中文）：下载 / 自己构建 / 看现状\n\
-         \x20     pliers english fetch|status   英文词表：单独下载 / 看现状（跟词库分开的文件）\n\
+         \x20     pliers fetch pinyin|english|all  字典按方案分几种，从 Release 单独/整套更新\n\
+         \x20     pliers update                把两个都更新到最新（已经一样就跳过，不白下载）\n\
+         \x20     pliers dict build|status      中文词库：自己下语料构建 / 看现状\n\
+         \x20     pliers english status|path   英文词表：看现状（跟词库分开的那个库）\n\
          \x20     pliers status                看正在跑的实例现在是什么配置\n\
          \x20     pliers reload                让它重新读一遍配置文件\n\
          \x20     pliers set                   交互模式：上下选着改（↑↓ + Enter）\n\
@@ -60,6 +63,7 @@ fn help() -> String {
          配置：{}\n\
          词库：{}（pliers dict status 看里面有什么）\n\
          英文词表：{}（pliers english status 看现在用的是哪份）\n\
+         更新字典：pliers update（或只更新一种：pliers fetch pinyin / pliers fetch english）\n\
          调试：PLIERS_DEBUG=1 pliers 把每个按键的判定打到 stderr\n\
          遥控：命令走 Unix socket，路径看 $PLIERS_SOCKET（默认 $XDG_RUNTIME_DIR/pliers.sock）",
         pliers_engine::config::config_path().display(),
@@ -83,7 +87,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("--init") => return dict::init(&args[1..]),
         // 写一份带注释的配置模板，省得手敲（已存在就不覆盖）
         Some("--init-config") => return init_config(args.iter().any(|arg| arg == "--force")),
-        // 词库：下载 / 自己构建 / 看现状
+        // 从 Release 拿预构建的数据（词库 / 英文词表，各是各的，能单独更新）
+        Some("fetch") => return fetch::command(&args[1..]),
+        // 两个都更新到最新（已经一样的不重复下）
+        Some("update") => return fetch::update(&args[1..]),
+        // 词库：自己构建 / 看现状
         Some("dict") => return dict::command(&args[1..]),
         // 英文词表：看现状
         Some("english") => return english::command(&args[1..]),
@@ -351,9 +359,15 @@ fn english_status(fields: &Fields) -> String {
     }
     let limit = fields.get("english_limit");
     let limit = if limit.is_empty() { "—" } else { limit };
+    let source = fields.get("english_source");
+    let where_from = if source.is_empty() {
+        String::new()
+    } else {
+        format!(" · {source}")
+    };
     match fields.get("english_words") {
-        "" | "0" => format!("开（一次最多 {limit} 个）"),
-        words => format!("开（词表 {words} 个词，一次最多 {limit} 个）"),
+        "" | "0" => format!("开（一次最多 {limit} 个）{where_from}"),
+        words => format!("开（词表 {words} 个词，一次最多 {limit} 个{where_from}）"),
     }
 }
 
@@ -660,6 +674,8 @@ fn fields_from_config(config: &Config) -> Fields {
         format!("english={}", config.english.enabled),
         format!("english_limit={}", config.english.limit),
         format!("english_path={}", config.english.path),
+        format!("english_extra={}", config.english.extra),
+        format!("english_source={}", config.english_path().display()),
         format!("english_extra={}", config.english.extra),
         format!("config={}", pliers_engine::config::config_path().display()),
     ];

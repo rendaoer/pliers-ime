@@ -436,6 +436,10 @@ impl State {
                 "english_words={}",
                 self.engine().english_words().unwrap_or(0)
             ),
+            format!(
+                "english_source={}",
+                self.engine().english_source().unwrap_or_default()
+            ),
             format!("mode={mode}"),
             format!("config={}", pliers_engine::config::config_path().display()),
             format!(

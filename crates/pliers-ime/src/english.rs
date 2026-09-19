@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! pliers --init            # 装一份（先试 Release；下载不到就写二进制里那份兜底）
-//! pliers english fetch     # 从 GitHub Release 更新到最新那份
+//! pliers fetch english     # 从 GitHub Release 更新到最新那份
 //! pliers english status    # 现在用的是哪个库、多少个词
 //! ```
 //!
@@ -30,13 +30,20 @@ const DEFAULT_URL: &str =
 /// `pliers english <子命令>`
 pub fn command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     match args.first().map(String::as_str) {
-        Some("fetch") => fetch_command(args, true),
+        // 下载挪到顶层了：`pliers fetch english`
+        Some("fetch") => Err(
+            "`pliers english fetch` 现在叫 `pliers fetch english`（想两个都更新：pliers update）"
+                .into(),
+        ),
         Some("status") | None => status(),
         Some("path") => {
             println!("{}", target_path().display());
             Ok(())
         }
-        Some(other) => Err(format!("不认识的子命令 {other:?}（能用的：fetch / status / path）").into()),
+        Some(other) => Err(format!(
+            "不认识的子命令 {other:?}（能用的：status / path；下载在顶层：pliers fetch english）"
+        )
+        .into()),
     }
 }
 
@@ -48,7 +55,7 @@ pub fn install_if_missing(force: bool) -> Result<(), Box<dyn std::error::Error>>
     let path = target_path();
     if path.exists() && !force {
         println!("英文词表：{}（已有，没动它）", path.display());
-        println!("  想更新：pliers english fetch");
+        println!("  想更新：pliers fetch english");
         return Ok(());
     }
     fetch_command(&[], false)
@@ -59,7 +66,7 @@ pub fn install_if_missing(force: bool) -> Result<(), Box<dyn std::error::Error>>
 fn fetch_command(args: &[String], quiet: bool) -> Result<(), Box<dyn std::error::Error>> {
     let path = target_path();
     let url = value_of(args, "--url")
-        .or_else(|| std::env::var("PLIERS_ENGLISH_URL").ok())
+        .or_else(|| crate::fetch::url_for("english"))
         .unwrap_or_else(|| DEFAULT_URL.to_string());
     let force = args.iter().any(|arg| arg == "--force");
 
@@ -75,7 +82,7 @@ fn fetch_command(args: &[String], quiet: bool) -> Result<(), Box<dyn std::error:
         Err(e) => {
             // 离线 / 资产还没发版：退回二进制里那份兜底，装出同样结构的一个库
             println!("  下载不到（{e}）");
-            println!("  先把二进制里那份兜底写出来 —— 一样能用，想更新再 pliers english fetch");
+            println!("  先把二进制里那份兜底写出来 —— 一样能用，想更新再 pliers fetch english");
             let words = parse_list(BUILTIN);
             pliers_engine::english::write_db(&path, &words)?;
         }
@@ -102,20 +109,20 @@ fn status() -> Result<(), Box<dyn std::error::Error>> {
             Ok(words) => println!("词数       {}", words.len()),
             Err(e) => println!("词数       读不了：{e}"),
         }
-        println!("来源       外部那个库（pliers english fetch 更新它）");
+        println!("来源       外部那个库（pliers fetch english 更新它）");
     } else {
         println!(
             "           还没装 —— 现在用二进制里那份兜底（{} 个词）",
             parse_list(BUILTIN).len()
         );
-        println!("           装成文件：pliers --init（离线也行）或 pliers english fetch");
+        println!("           装成文件：pliers --init（离线也行）或 pliers fetch english");
     }
     Ok(())
 }
 
 /// 输入法实际会用的那个词表库（`[english] path`，认 `PLIERS_ENGLISH`）。
 /// 配置坏了也不至于用不了 —— 那就退回默认路径
-fn target_path() -> PathBuf {
+pub(crate) fn target_path() -> PathBuf {
     Config::load()
         .map(|config| config.english_path())
         .unwrap_or_else(|_| pliers_engine::config::default_english_path())

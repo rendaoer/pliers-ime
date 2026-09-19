@@ -15,6 +15,19 @@ use std::process::Command;
 ///
 /// `file://` 和普通本地路径也认 —— 离线安装、自己构建完从别处拷过来、跑测试都用得上
 pub fn download(url: &str, dest: &Path) -> Result<(), String> {
+    fetch(url, dest, false)
+}
+
+/// 跟 [`download`] 一样，但**不画进度条**。
+///
+/// 给"顺手拿一下"的小文件用（比如资产旁边那个 `.sha256`，一百来个字节）：
+/// 那种文件也画一条进度条的话，终端上看起来像"下个词库却出现两条进度"，
+/// 甚至以为下了两遍 —— 其实第一条是指纹、第二条才是词库本体
+pub fn download_quiet(url: &str, dest: &Path) -> Result<(), String> {
+    fetch(url, dest, true)
+}
+
+fn fetch(url: &str, dest: &Path, quiet: bool) -> Result<(), String> {
     if let Some(dir) = dest.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("建不了目录 {}：{e}", dir.display()))?;
     }
@@ -27,8 +40,8 @@ pub fn download(url: &str, dest: &Path) -> Result<(), String> {
     // 连接超时是必须的：国内直连 raw.githubusercontent 常常是"包被丢掉"而不是
     // 立刻报错，不给超时就会一直挂着，连换镜像的机会都没有
     curl.args(["-L", "--fail", "--connect-timeout", "15"]);
-    // 终端里给个进度条（几十 MB 呢），被脚本调用时安静点、只要错误信息
-    if std::io::stderr().is_terminal() {
+    // 终端里给个进度条（几十 MB 呢），被脚本调用或者 quiet 时安静点、只要错误信息
+    if std::io::stderr().is_terminal() && !quiet {
         curl.arg("-#");
     } else {
         curl.arg("-sS");
@@ -38,6 +51,9 @@ pub fn download(url: &str, dest: &Path) -> Result<(), String> {
         return Ok(());
     }
     let mut wget = Command::new("wget");
+    if quiet {
+        wget.arg("-nv"); // 安静：只留错误
+    }
     wget.args(["--timeout=15", "-O"]).arg(dest).arg(url);
     if try_run(&mut wget, "wget 下载")? {
         return Ok(());

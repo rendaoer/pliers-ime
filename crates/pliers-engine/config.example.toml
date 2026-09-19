@@ -10,7 +10,7 @@
 [scheme]
 # full-pinyin    全拼：nihao + 空格 → 你好
 # double-pinyin  双拼：两键一个音节，nihc（自然码）→ 你好
-# table          码表方案：五笔、郑码、仓颉这类"键本身就是码"的
+# wubi           码表方案：五笔、郑码、仓颉这类"键本身就是码"的
 kind = "full-pinyin"
 
 # 双拼键位，只在 kind = "double-pinyin" 时看：
@@ -24,8 +24,8 @@ kind = "full-pinyin"
 # ao = "c"      # 把 ao 从 k 挪到 c（小鹤的位置）
 # zh = "v"
 
-# 码表在词库里的名字，只在 kind = "wubi" 时看（郑码/仓颉就写它们的名字）。
-# 码表要用 pliers-dict 导进去：--table 码表.txt --table-scheme wubi
+# 码表在库里的名字，只在 kind = "wubi" 时看（郑码/仓颉就写它们的名字）。
+# 码表从哪来：自己的码表文件 → pliers build wubi 码表.txt（建到 wubi.db 里）
 # name = "wubi"
 
 # 整句候选：库里没有整词时，把音节切成词拼一句（nihaoma → 你好吗）。

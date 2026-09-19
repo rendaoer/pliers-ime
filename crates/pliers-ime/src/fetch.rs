@@ -244,7 +244,9 @@ fn remote_sha(asset: &Asset) -> Option<String> {
 
 fn remote_sha_of(url: &str) -> Option<String> {
     let tmp = std::env::temp_dir().join(format!("pliers-sha-{}", std::process::id()));
-    pliers_engine::fetch::download(&format!("{url}.sha256"), &tmp).ok()?;
+    // 安静地拿：这是个一百来字节的小文件，也画进度条的话终端上会看着像
+    // "下个词库出现两条进度"（第一条是指纹、第二条才是词库本体）
+    pliers_engine::fetch::download_quiet(&format!("{url}.sha256"), &tmp).ok()?;
     let text = std::fs::read_to_string(&tmp).ok()?;
     let _ = std::fs::remove_file(&tmp);
     parse_sha(&text)

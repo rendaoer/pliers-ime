@@ -44,7 +44,7 @@ pub fn default_user_path() -> PathBuf {
     data_dir().join("user.db")
 }
 
-/// 默认的**英文词表**库路径。它也是个独立文件：可以单独更新（`pliers english fetch`），
+/// 默认的**英文词表**库路径。它也是个独立文件：可以单独更新（`pliers fetch english`），
 /// 换词库、重装输入法都不影响它
 pub fn default_english_path() -> PathBuf {
     data_dir().join("english.db")
@@ -94,7 +94,7 @@ pub struct EnglishConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// 词表库（SQLite：一张 `english(word, weight)` 表）。默认就是上面那个数据目录里的
-    /// `english.db`，可以用 `pliers english fetch` 单独更新到新版本
+    /// `english.db`，可以用 `pliers fetch english` 单独更新到新版本
     #[serde(default = "default_english")]
     pub path: String,
     /// 自己**额外**加的词（一行一个）：排在上面的词表前面

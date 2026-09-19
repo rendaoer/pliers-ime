@@ -21,7 +21,7 @@
 //! ```
 //!
 //! 分成两个文件是因为**它们的生命周期完全不一样**：词库 86 MB、是别人整理的数据、
-//! `pliers dict fetch --force` / `pliers dict build` 会把它整个换掉（导入工具是直接把
+//! `pliers fetch pinyin --force` / `pliers build pinyin` 会把它整个换掉（导入工具是直接把
 //! 输出文件删了重建的）；用户数据只有几十 KB，是你自己的东西，换词库时丢一次就再也不
 //! 想用了。分家之后 `dict.db` 随便删、随便换。
 //!
@@ -136,7 +136,7 @@ impl Dict {
         if !path.exists() {
             return Err(format!(
                 "词库不存在：{}\n装一份（写配置 + 下载词库）：\n  pliers --init\n\
-                 也可以用你自己的词表构建：pliers dict build（或 pliers-dict --help）",
+                 也可以用你自己的词表构建：pliers build pinyin（或 pliers-dict --help）",
                 path.display(),
             )
             .into());
@@ -428,7 +428,7 @@ impl Dict {
     }
 
     /// 数一下这个库里有多少东西 —— 刚下载完 / 刚导入完拿它验一验，
-    /// `pliers dict status` 也用它报数
+    /// `pliers status pinyin` 也用它报数
     pub fn stats(&self) -> Result<Stats> {
         let count = |sql: &str| -> Result<i64> {
             let mut stmt = pollster::block_on(self.conn.prepare(sql))?;
@@ -735,7 +735,7 @@ mod tests {
             }
         }
 
-        // 模拟 pliers dict build / fetch --force：把词库文件删了重建一份新的
+        // 模拟 pliers build pinyin / fetch --force：把词库文件删了重建一份新的
         std::fs::remove_file(&dict_path).unwrap();
         make_dict(&dict_path, false);
 

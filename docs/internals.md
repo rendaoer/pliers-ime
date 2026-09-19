@@ -32,9 +32,9 @@ pliers-engine  ←──┬──  pliers-popup  ──┐
 | `dict.rs` | SQLite 词库：建表、查词、记用户词频 |
 | `english.rs` | 英文候选：编译进二进制的词表 + 前缀补全 |
 | `config.rs` | 读 TOML 配置 |
-| `fetch.rs` | 下载 + 解压（`pliers --init` / `pliers dict ...` 装词库用） |
+| `fetch.rs` | 下载 + 解压（`pliers --init` / `pliers build pinyin` 装词库用） |
 
-这么切的好处：**输入方案、词库、候选框长相都能脱离合成器跑测试**（213 个单测），
+这么切的好处：**输入方案、词库、候选框长相都能脱离合成器跑测试**（219 个单测），
 协议层里剩下的全是"Wayland 要求这么做"的东西。想改哪块就只动哪块：
 
 * 加词 / 调词频 → 用 SQL 改词库，或者重新跑一遍 `pliers-dict`
@@ -140,7 +140,7 @@ SELECT text FROM word WHERE code LIKE 'ni%' ORDER BY weight DESC LIMIT 9
 
 ### 词库和用户数据：两个文件 + `ATTACH`
 
-词库（86 MB、别人整理的数据、`pliers fetch pinyin --force` / `dict build` 会整个换掉）和用户数据
+词库（86 MB、别人整理的数据、`pliers fetch pinyin --force` / `pliers build pinyin` 会整个换掉）和用户数据
 （几十 KB、你自己选过的词和拼过的句子）**生命周期完全不一样**，所以放在两个文件里：
 `dict.db` + `user.db`。以前混在一个文件里，换一次词库就把用户习惯一起丢了 ——
 导入工具是先把输出文件删了重建的。

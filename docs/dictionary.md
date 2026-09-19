@@ -16,17 +16,19 @@ pliers --init          # 写配置 + 下载词库
 
 ## 几条命令
 
+命令行是**动词在前、种类在后**（种类：`pinyin` / `wubi` / `english` —— 字典是个总概念）：
+
 | 想干的事 | 命令 |
 | --- | --- |
 | 新机器装一份能用的 | `pliers --init` |
 | 只装（或重装）中文词库 | `pliers fetch pinyin [--force]` |
 | 只更新英文词表 | `pliers fetch english` |
-| 整套字典（两块都拿） | `pliers fetch all`（= `pliers fetch dict`，也可以不写种类） |
+| 整套字典（两块都拿） | `pliers fetch all`（也可以不写种类） |
 | 哪个旧更新哪个 | `pliers update`（先比 Release 上的 sha256，一样就跳过） |
-| 自己下语料、自己构建 | `pliers dict build` |
-| 看现在用的是哪个库、多少词、什么来源 | `pliers dict status` |
-| 拿到词库路径（脚本用） | `pliers dict path` |
-| 手动下载一份放进去 | 放到 `pliers dict path` 打印的那个路径 |
+| 自己下语料、自己构建 | `pliers build pinyin [--refresh]` |
+| 看现在用的是哪个库、多少词、什么来源 | `pliers status pinyin`（不给种类 = 连实例和英文一起看） |
+| 拿到词库路径（脚本用） | `pliers path dict` |
+| 手动下载一份放进去 | 放到 `pliers path dict` 打印的那个路径 |
 
 `--init` 和 `pliers fetch pinyin` 是从**仓库 Release 的资产**拿的：
 
@@ -85,9 +87,14 @@ Release 上除了 `dict.db.zst`，还有一个 **`english.db.zst`**（约 500 KB
 它故意跟词库分开，好处是**能各自独立更新**：
 
 ```nushell
-pliers fetch english     # 只更新词表（约 100 KB），不用重装输入法、也不用重下 27 MB 词库
-pliers english status    # 现在用的是哪份、多少词
+pliers fetch english     # 只更新词表（约 500 KB），不用重装输入法、也不用重下 27 MB 词库
+pliers status english    # 现在用的是哪份、多少词
+pliers build english 词表.txt   # 用自己的一份词表重建（不给文件就是重建兜底那份）
 ```
+
+`pliers build english <文件|目录>` 把活交给 `pliers-dict --english`（格式解析跟引擎共用一份实现），
+一行一个词、`#` 开头的行是注释、按词频从高到低排。不给文件的话就用二进制里那份兜底重建 ——
+那条路**不需要** `pliers-dict`，离线也能跑。
 
 词表库不在时引擎会自动用二进制里那份兜底（编译时嵌进去的同一份数据），
 所以"没装"只会让 `pliers status` 显示成「内置兜底」，不会让英文候选消失。
@@ -169,15 +176,15 @@ pliers-dict --english 词表.txt --out ~/.local/share/pliers/english.db
 
 ## 自己构建
 
-（`pliers dict build` 会去调 `pliers-dict` 这个导入程序：`cargo install pliers-dict`，
+（`pliers build pinyin` 会去调 `pliers-dict` 这个导入程序：`cargo install pliers-dict`，
 或者在仓库里 `cargo build --release -p pliers-dict`。用发布版装的话它是单独一个包，
 不会跟着 `pliers-ime` 一起装。）
 
 不用等 Release，也不用信任何人的二进制：
 
 ```bash
-pliers dict build                    # 下载语料（缓存在 ~/.cache/pliers/rime-frost）→ 构建
-pliers dict build --refresh          # 语料重新下一遍（上游更新了）
+pliers build pinyin            # 下载语料（缓存在 ~/.cache/pliers/rime-frost）→ 构建
+pliers build pinyin --refresh  # 语料重新下一遍（上游更新了）
 ```
 
 它做三件事：下六个 `.dict.yaml` → 调 `pliers-dict --rime <语料目录> --out <词库>` → 验一遍。
@@ -207,7 +214,7 @@ cargo run -p pliers-dict --release -- --rime cn_dicts/base.dict.yaml --rime cn_d
 ## 码表方案（五笔 / 郑码 / 仓颉）
 
 码表和拼音**可以放在同一个库里**，靠 `word.scheme` 那个字段区分（`pinyin` / `wubi` / …，
-`pliers dict status` 会分行数）。码表每行是 `词<TAB>码[<TAB>权重]`（rime 那种 .txt 码表就是这个格式）。
+`pliers status pinyin` 会分行数）。码表每行是 `词<TAB>码[<TAB>权重]`（rime 那种 .txt 码表就是这个格式）。
 
 注意**每次导入都是重建输出文件**（词库是派生物，旧库直接覆盖，用户数据在 `user.db` 里不受影响），
 所以想"拼音 + 五笔"都在，就在同一条命令里把两种语料都给上：
@@ -218,7 +225,7 @@ pliers-dict --rime ~/.cache/pliers/rime-frost \
             --out ~/.local/share/pliers/dict.db
 ```
 
-（顺手说一句：`pliers dict build` 只会导 `--rime` 那部分，码表得自己用 `pliers-dict` 加。）
+（顺手说一句：`pliers build pinyin` 只会导 `--rime` 那部分，码表得自己用 `pliers-dict` 加。）
 见[配置](config.md#五笔--码表方案)。
 
 ## 字典是"总概念"：pinyin / wubi / english
@@ -232,7 +239,7 @@ pliers-dict --rime ~/.cache/pliers/rime-frost \
 | `english` | 自己的 `english.db`（一张 `english(word, weight)` 表） | `english.db.zst` | `pliers fetch english` |
 
 所以 `pliers fetch all`（或不写种类）= 整套字典；`pliers update` = 看哪块不是最新的就更新哪块。
-`pliers dict status` 会把这几块一起报出来。
+`pliers status pinyin` 会把这几块一起报出来。
 
 ## 表结构：词库和用户数据是**两个文件**
 
@@ -255,7 +262,7 @@ user_hidden(code, text)             -- 按 Del 删掉的词（黑名单，英文
 ```
 
 **为什么分成两个文件**：它们的生命周期完全不一样。词库 86 MB、是别人整理的数据、
-`pliers fetch pinyin --force` 和 `pliers dict build` 会把它整个换掉（导入工具是先把输出文件
+`pliers fetch pinyin --force` 和 `pliers build pinyin` 会把它整个换掉（导入工具是先把输出文件
 删了重建的）；用户数据只有几十 KB，是你自己的东西 —— 混在一个文件里，换一次词库就把
 "选过的词、自己拼的句子、拉黑的词"全丢了。分家之后 **`dict.db` 随便删、随便换**。
 
@@ -270,7 +277,7 @@ ORDER BY score DESC LIMIT ?3
 ```
 
 * `scheme` 字段就是"多方案"的落点：一套方案一批行，互不干扰。一个库里可以同时有
-  `pinyin` 和 `wubi` 的条目（`pliers dict status` 会分行数）
+  `pinyin` 和 `wubi` 的条目（`pliers status pinyin` 会分行数）
 * 权重 = 语料权重（缩放后）+ 用户选过的次数 ×100 万（最多算 50 次）。
   所以选过十次的词能压过绝大多数常用词，但压不过「的」「你」这种顶级高频词 ——
   避免误选一次就再也翻不了身
@@ -359,4 +366,4 @@ cargo run -p pliers-engine --release --example lookup -- shijian
 上游仓库和构建脚本（`.github/workflows/dict.yml`）都是公开的，符合 GPL 对"随附相应源码"的要求。
 `pliers` 自己的代码不受影响。
 
-不想碰这个许可就用 `pliers dict build` 自己从上游构建 —— 那只是下载语料，不涉及再分发。
+不想碰这个许可就用 `pliers build pinyin` 自己从上游构建 —— 那只是下载语料，不涉及再分发。

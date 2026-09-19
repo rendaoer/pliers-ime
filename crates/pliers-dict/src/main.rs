@@ -17,7 +17,7 @@
 //!
 //! 权重会等比缩放到 [`RIME_MAX_WEIGHT`]（跟"用户调频 +100 万/次"同一个量纲）。
 //!
-//! `pliers dict build` 会自动下语料再调这个程序，平时不用手敲上面的命令。
+//! `pliers build pinyin` 会自动下语料再调这个程序，平时不用手敲上面的命令。
 
 use std::collections::HashSet;
 use std::fs::File;
@@ -600,7 +600,7 @@ impl Args {
         }
         if args.rime.is_empty() && args.table.is_none() && args.english.is_empty() {
             return Err(
-                "要给 --rime <词库>（推荐：pliers dict build 会自动下语料）\n\
+                "要给 --rime <词库>（推荐：pliers build pinyin 会自动下语料）\n\
                         或者 --table <码表> --table-scheme wubi\n\
                         或者 --english <英文词表>"
                     .into(),

@@ -1,6 +1,6 @@
 # 构建**两个**资产，挂到 Release 上：
 #   dict.db.zst     中文词库（86 MB → 27 MB），pliers --init 下载它
-#   english.db.zst  英文候选词表（SQLite，25k 词 → 约 500 KB），pliers english fetch 下载它
+#   english.db.zst  英文候选词表（SQLite，25k 词 → 约 500 KB），pliers fetch english 下载它
 # 两者分开，是为了能各自独立更新：换词表不用重发词库，反之亦然。
 #
 # 为什么走 Release 而不是直接进仓库：词库是几百 MB 的派生物，GitHub 单文件上限 100 MB，
@@ -97,7 +97,7 @@ jobs:
             echo "::error::dict.db-wal 里有数据帧，说明没 checkpoint，发布出去会是个残缺的库"
             exit 1
           fi
-          PLIERS_DICT="$PWD/dict.db" cargo run --release -p pliers-ime -- dict status | tee /tmp/status.txt
+          PLIERS_DICT="$PWD/dict.db" cargo run --release -p pliers-ime -- status pinyin | tee /tmp/status.txt
           grep -q "词条" /tmp/status.txt
 
       - name: 压缩 + 记指纹
@@ -142,13 +142,13 @@ jobs:
           那份开发常用词。它跟词库**分开**，可以单独更新：
 
           \`\`\`
-          pliers english fetch     # 只更新词表，不用重装输入法
+          pliers fetch english     # 只更新词表，不用重装输入法
           \`\`\`
 
           词条是 \`词 + 拼音 + 权重\`，多音字一行一个读音。想自己构建（不用这个资产）：
 
           \`\`\`
-          pliers dict build
+          pliers build pinyin
           \`\`\`
           EOF
           cat release-body.md

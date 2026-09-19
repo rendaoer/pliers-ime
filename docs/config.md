@@ -104,7 +104,7 @@ pool_size = 90                           # 一次准备多少个候选 = 最多�
 `path` 和 `user_path` 都认 `~`；也可以整个用环境变量顶掉：
 `PLIERS_DICT=/path/to/dict.db`、`PLIERS_USER_DB=/path/to/user.db`。
 
-**词库和用户数据是两个文件**：换词库（`pliers fetch pinyin --force` / `pliers dict build`）
+**词库和用户数据是两个文件**：换词库（`pliers fetch pinyin --force` / `pliers build pinyin`）
 只会动 `path`，`user_path` 里那些"你选过的词、你自己拼出来的句子、你按 Del 拉黑的词"
 不受影响；反过来想把输入法的记性清掉，删 `user_path` 那个文件就行，词库不用重装。
 两个文件内部用 SQLite 的 `ATTACH` 连起来，所以排序还是一条 SQL —— 见[词库](dictionary.md#表结构词库和用户数据是两个文件)。
@@ -141,7 +141,7 @@ limit = 5                                            # 一次最多给几个英�
 ```nushell
 pliers fetch english                  # 从 Release 更新主词表
 pliers fetch english --url <别的地址>  # 换成别的源（认 .zst / 纯文本 / file://）
-pliers english status                 # 看现在用的是哪份、多少词
+pliers status english                 # 看现在用的是哪份、多少词
 
 # 自己构建一份（词表是文本，一行一个词，`#` 注释）
 pliers-dict --english 词表.txt --out ~/.local/share/pliers/english.db
@@ -155,12 +155,12 @@ pliers-dict --english 词表.txt --out ~/.local/share/pliers/english.db
 输入法起来之后会在 `$XDG_RUNTIME_DIR/pliers.sock` 上听命令，另开一个终端就能问它、改它：
 
 ```bash
-pliers status                             # 现在什么方案、哪个词库、几个候选、中还是英
+pliers status                             # 实例现状 + 两种字典（给个种类就只看那一块）
 pliers set                                # 交互模式：上下选着改（最省事）
 pliers set scheme.kind double-pinyin      # 只改**正在跑的实例**（重启就回去了）
 pliers config set scheme.layout flypy      # 改**配置文件**（保留注释，跑着的实例自动重读）
 pliers config set                         # 交互模式，改的也是配置文件
-pliers config show | path | edit           # 看内容 / 看路径 / 用 $EDITOR 打开
+pliers config show | edit                 # 看内容 / 用 $EDITOR 打开（路径看 pliers path config）
 pliers reload                             # 手动让它重读一遍配置文件
 ```
 
@@ -171,12 +171,13 @@ pliers reload                             # 手动让它重读一遍配置文件
 | `pliers set …` | 只改内存里那份配置 | **需要** —— 它就是把这个命令发给那个进程（Unix socket） | 重启就回去 | 试手感（"小鹤换微软试试"） |
 | `pliers config set …` | 写进 `~/.config/pliers/config.toml` | 不需要，**输入法没跑也能改** | 不会失效 | 定下来（写的时候注释、空行、行尾注释都留着） |
 
-（`pliers fetch english` / `pliers fetch pinyin` 这类"下载数据"的命令也都不需要实例在跑；
-只有 `set` / `status` / `reload` 是跟**正在跑的那个进程**说话。）
+（`pliers fetch …` / `pliers build …` / `pliers status …` / `pliers path` 这些都不需要实例在跑；
+只有 `set` 和 `reload` 是跟**正在跑的那个进程**说话 —— `pliers status` 没实例时照样把两种字典
+报出来，只是最上面那行会写「没在跑」。）
 
 没在跑却敲了 `pliers set …` 的话，它会说「连不上正在跑的输入法」并顺手提示你用
-`pliers config set …`（同名的 `pliers status` / `pliers reload` 也一样要实例 ——
-没实例时"现状"就是配置文件本身，`pliers config show` 直接看）
+`pliers config set …`（`pliers reload` 也一样要实例 —— 没实例时"现状"就是配置文件本身，
+`pliers config show` 直接看）
 
 **配置文件改了就自动生效**：跑着的实例每 0.7 秒看一眼文件的 mtime，发现变了就重读
 （`pliers config set`、`$EDITOR` 里保存、`echo >>` 都算），不用重启、也不用敲 `reload`。
@@ -187,17 +188,21 @@ pliers reload                             # 手动让它重读一遍配置文件
 所以 `socat` 接上去也是一眼看懂的数据）：
 
 ```
-方案      双拼（小鹤）
-词库      /home/dao/.local/share/pliers/dict.db（86 MB）
-用户数据  /home/dao/.local/share/pliers/user.db（8 KB）
-候选      一页 9 个，池子 90 个
-英文候选  开（词表 25223 个词，一次最多 5 个）
-中英切换  ctrl+space
-中英提示  开
-模式      中（启动时 chinese）
-配置文件  /home/dao/.config/pliers/config.toml
-socket    /run/user/1000/pliers.sock
+实例        正在跑（socket /run/user/1000/pliers.sock）
+方案        双拼（小鹤）
+词库        /home/dao/.local/share/pliers/dict.db（86 MB）
+用户数据    /home/dao/.local/share/pliers/user.db（8 KB）
+候选        一页 9 个，池子 90 个
+英文候选    开（词表 25223 个词，一次最多 5 个）
+中英切换    ctrl+space
+中英提示    开
+模式        中（启动时 chinese）
+配置文件    /home/dao/.config/pliers/config.toml
+socket      /run/user/1000/pliers.sock
 ```
+
+下面是两种字典各自的现状（磁盘上那份，跟实例现在用的是不是同一个文件也能这么对）：
+想看哪一块就 `pliers status pinyin` / `pliers status english`，细节见[词库](dictionary.md)。
 
 ### 交互模式
 

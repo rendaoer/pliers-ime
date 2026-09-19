@@ -98,7 +98,7 @@ kuber      →  [kubernetes] …                 ← 词表里连开发词都有
 ```nushell
 pliers --init            # 装一份（离线也行：先把二进制里那份兜底写出来）
 pliers fetch english     # 从 GitHub Release 更新到最新那份
-pliers english status    # 现在用的是哪个文件、多少词
+pliers status english    # 现在用的是哪个文件、多少词
 ```
 
 库不在（或者读不了）时引擎自动退回二进制里那份兜底，所以英文候选不会凭空消失，

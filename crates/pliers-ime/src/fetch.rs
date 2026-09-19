@@ -10,7 +10,7 @@
 //! ```text
 //! pliers fetch pinyin      # 只更新中文词库（pinyin + wubi 都在这个库里）
 //! pliers fetch english     # 只更新英文词表
-//! pliers fetch all         # 整套字典（= pliers fetch dict）
+//! pliers fetch all         # 整套字典
 //! pliers update            # 哪个不是最新的就更新哪个（先比 Release 上的 sha256，一样就跳过）
 //! ```
 //!
@@ -25,10 +25,12 @@ use std::path::{Path, PathBuf};
 
 use pliers_engine::Config;
 
+use crate::args::{has, kind, value_of};
+
 /// 一个可以从 Release 拿的资产
 #[derive(Debug)]
 struct Asset {
-    /// 命令里怎么写：`pliers fetch dict`
+    /// 命令里怎么写：`pliers fetch pinyin`
     name: &'static str,
     /// 人看的名字
     label: &'static str,
@@ -60,13 +62,22 @@ const ASSETS: &[Asset] = &[
 
 /// `pliers fetch <pinyin|english|all> [--url 地址] [--force]`
 ///
-/// 想拿的那几种（`dict` 是"整套字典"，跟 `all` 一样）。不认识的名字报错里列出能用的
+/// 想拿的那几种（什么都不写跟 `all` 一样）。不认识的名字报错里列出能用的
 fn targets(what: &str) -> Result<Vec<&'static Asset>, String> {
     Ok(match what {
         "pinyin" => vec![&ASSETS[0]],
         "english" => vec![&ASSETS[1]],
-        // 「整套字典」：dict / all / 不给参数
-        "" | "all" | "dict" => ASSETS.iter().collect(),
+        // 「整套字典」
+        "" | "all" => ASSETS.iter().collect(),
+        // `dict` 是**总概念**（一套字典按方案分成几块），不是种类 ——
+        // 别再让它变成"整套"的第二种写法
+        "dict" => {
+            return Err(
+                "`dict` 是总概念（一套字典里按方案分 pinyin / english），不是种类 ——\n\
+                        \x20     整套下载写 all：pliers fetch all"
+                    .to_string(),
+            );
+        }
         "wubi" => {
             return Err("码表（五笔/郑码）没有单独的资产 —— 它跟拼音在**同一个** dict.db 里\n\
                         \x20     （`word.scheme` 区分）。想加五笔得带上语料一起导入，见 docs/dictionary.md：\n\
@@ -75,38 +86,21 @@ fn targets(what: &str) -> Result<Vec<&'static Asset>, String> {
         }
         other => {
             return Err(format!(
-                "不认识的：{other}。字典按方案分几种，能 fetch 的是：\n\
+                "不认识的种类 {other:?}（fetch 收这些）：\n\
                  \x20     pinyin   中文词库（pinyin + wubi 都在这个库里，27 MB）\n\
                  \x20     english  英文词表（约 500 KB）\n\
-                 \x20     all      整套字典（也可以写 dict，或者不写）\n\
+                 \x20     all      整套字典（也可以不写）\n\
                  \x20 想「哪个不是最新就更新哪个」用：pliers update"
             ));
         }
     })
 }
 
-/// 种类是第一个"不是选项、也不是选项的值"的参数：
-/// `pliers fetch english`、`pliers fetch --force english`、`pliers fetch --url X` 都得认
-fn kind_arg(args: &[String]) -> &str {
-    let mut rest = args.iter();
-    while let Some(arg) = rest.next() {
-        if let Some(flag) = arg.strip_prefix("--") {
-            // `--url X` 这种要连值一起跳过；`--url=X` 只有一个词
-            if !flag.contains('=') && matches!(flag, "url") {
-                rest.next();
-            }
-            continue;
-        }
-        return arg;
-    }
-    ""
-}
-
+/// `pliers fetch ...`
 pub fn command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let what = kind_arg(args);
     let url = value_of(args, "--url");
-    let force = args.iter().any(|arg| arg == "--force");
-    let assets = targets(what)?;
+    let force = has(args, "--force");
+    let assets = targets(kind(args))?;
     if url.is_some() && assets.len() > 1 {
         return Err(
             "`--url` 一次只能配一个种类（两个资产的地址本来就不一样）：\n\
@@ -119,11 +113,8 @@ pub fn command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load()?;
     let mut failed = false;
     for asset in assets {
-        let url = url
-            .clone()
-            .or_else(|| std::env::var(asset.url_env).ok())
-            .unwrap_or_else(|| asset.url.to_string());
-        if let Err(e) = fetch_one(asset, &url, &config, force) {
+        let url = url.clone().or_else(|| env_url(asset));
+        if let Err(e) = fetch_one(asset, url.as_deref(), &config, force) {
             eprintln!("pliers: {}没装上：{e}", asset.label);
             failed = true;
         }
@@ -136,9 +127,24 @@ pub fn command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// 装某一个种类（`pliers --init` 这类调用方用；`url` 不给就按环境变量 / 内置默认）
+pub fn install(
+    name: &str,
+    url: Option<&str>,
+    force: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let asset = ASSETS
+        .iter()
+        .find(|asset| asset.name == name)
+        .ok_or_else(|| format!("没有这个种类：{name}"))?;
+    let url = url.map(str::to_string).or_else(|| env_url(asset));
+    let config = Config::load()?;
+    fetch_one(asset, url.as_deref(), &config, force)
+}
+
 /// `pliers update [--force]`：两个都更新到最新，已经一样的不重复下载
 pub fn update(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let force = args.iter().any(|arg| arg == "--force");
+    let force = has(args, "--force");
     let config = Config::load()?;
     println!("看看 Release 上是什么版本…");
     let mut changed = 0;
@@ -151,8 +157,7 @@ pub fn update(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     "  {}：拿不到 Release 上的指纹（离线？），直接下载试试",
                     asset.label
                 );
-                let url = std::env::var(asset.url_env).unwrap_or_else(|_| asset.url.to_string());
-                fetch_one(asset, &url, &config, true)?;
+                fetch_one(asset, env_url(asset).as_deref(), &config, true)?;
                 changed += 1;
                 continue;
             }
@@ -161,8 +166,7 @@ pub fn update(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             println!("  {}：已经是最新的（{}）", asset.label, short(&remote));
             continue;
         }
-        let url = std::env::var(asset.url_env).unwrap_or_else(|_| asset.url.to_string());
-        fetch_one(asset, &url, &config, true)?;
+        fetch_one(asset, env_url(asset).as_deref(), &config, true)?;
         changed += 1;
     }
     println!();
@@ -174,19 +178,22 @@ pub fn update(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// 某个资产的下载地址：`--url` 优先、然后环境变量、最后内置默认
-pub fn url_for(name: &str) -> Option<String> {
-    let asset = ASSETS.iter().find(|asset| asset.name == name)?;
-    Some(std::env::var(asset.url_env).unwrap_or_else(|_| asset.url.to_string()))
+/// 这个资产的下载地址：环境变量优先（`PLIERS_DICT_URL` / `PLIERS_ENGLISH_URL`），
+/// 否则内置默认（`latest/download/` 永远指向最新 Release 里的同名资产）
+fn env_url(asset: &Asset) -> Option<String> {
+    std::env::var(asset.url_env)
+        .ok()
+        .or_else(|| Some(asset.url.to_string()))
 }
 
-/// 下载一个资产。`force = false` 时本地已经有就不动
+/// 下载一个资产。`url` 不给就用内置那个；`force = false` 时本地已经有就不动
 fn fetch_one(
     asset: &Asset,
-    url: &str,
+    url: Option<&str>,
     config: &Config,
     force: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let url = url.unwrap_or(asset.url);
     let dest = (asset.dest)(config);
     if dest.exists() && !force {
         println!("{}：{}（已有，没动它）", asset.label, dest.display());
@@ -200,7 +207,7 @@ fn fetch_one(
         format!(
             "{e}\n\n\
              下载不到也没关系：\n\
-             \x20 中文词库可以自己构建：pliers dict build（要 pliers-dict）\n\
+             \x20 中文词库可以自己构建：pliers build pinyin（要 pliers-dict）\n\
              \x20 英文词表没装的话输入法会用二进制里那份兜底\n\
              或者手动下载后放到：{}",
             dest.display()
@@ -221,8 +228,7 @@ fn is_current(dest: &Path, remote: &str) -> bool {
 /// 下载地址旁边的 `.sha256`（构建时算的压缩包指纹）。
 /// 拿不到就算了 —— 调用方会当成"不知道，直接下载"
 fn remote_sha(asset: &Asset) -> Option<String> {
-    let url = std::env::var(asset.url_env).unwrap_or_else(|_| asset.url.to_string());
-    remote_sha_of(&url)
+    remote_sha_of(&env_url(asset)?)
 }
 
 fn remote_sha_of(url: &str) -> Option<String> {
@@ -267,39 +273,9 @@ fn short(sha: &str) -> String {
     sha.chars().take(12).collect()
 }
 
-/// `--url X` / `--url=X` 都能写
-fn value_of(args: &[String], flag: &str) -> Option<String> {
-    let mut rest = args.iter();
-    while let Some(arg) = rest.next() {
-        if arg == flag {
-            return rest.next().cloned();
-        }
-        if let Some(value) = arg.strip_prefix(&format!("{flag}=")) {
-            return Some(value.to_string());
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn 种类参数认得出来() {
-        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(kind_arg(&args(&["english"])), "english");
-        assert_eq!(kind_arg(&args(&["--force", "english"])), "english");
-        assert_eq!(kind_arg(&args(&["english", "--force"])), "english");
-        // `--url` 后面那个是它的值，不是种类
-        assert_eq!(kind_arg(&args(&["--url", "http://x/y.zst"])), "");
-        assert_eq!(kind_arg(&args(&["--url=http://x/y.zst"])), "");
-        assert_eq!(
-            kind_arg(&args(&["--url", "http://x/y.zst", "dict"])),
-            "dict"
-        );
-        assert_eq!(kind_arg(&args(&["--force"])), "");
-    }
 
     #[test]
     fn 认得出_sha256_文件的两种写法() {
@@ -334,10 +310,13 @@ mod tests {
         // 单个种类
         assert_eq!(targets("pinyin").unwrap().len(), 1);
         assert_eq!(targets("english").unwrap().len(), 1);
-        // 整套字典：all / dict / 不写都一样
-        for what in ["", "all", "dict"] {
+        // 整套字典：all / 不写都一样
+        for what in ["", "all"] {
             assert_eq!(targets(what).unwrap().len(), 2, "{what:?}");
         }
+        // `dict` 是总概念，不是"整套"的另一种写法 —— 要把它指回 all
+        let message = targets("dict").unwrap_err();
+        assert!(message.contains("pliers fetch all"), "{message}");
         // 码表没有单独资产，但要说清楚为什么、怎么办
         let message = targets("wubi").unwrap_err();
         assert!(message.contains("同一个"), "{message}");

@@ -6,7 +6,7 @@
 
 * **运行时用的那份**是个独立的 SQLite 库 `~/.local/share/pliers/english.db`
   （一张 `english(word, weight)` 表，`pliers-dict --english` 导出来）—— `pliers --init` 装它，
-  `pliers english fetch` 从 Release 上更新它（同一个 Release 里的 `english.db.zst`，
+  `pliers fetch english` 从 Release 上更新它（同一个 Release 里的 `english.db.zst`，
   见 `.github/workflows/dict.yml`）。这样换词表不用重装输入法；
 * 仓库里这份会被 `include_str!` **编进二进制当兜底**：库没装/读不了的时候用它，
   保证"装完就能用、离线也能用"。
@@ -60,7 +60,7 @@ python3 tools/build_english_list.py --source ~/en_50k.txt --limit 30000
 不一样就给个 warning）。生成脚本只认第一列，所以上游换成正体字、BNC、自己统计的词频表都行。
 
 生成完想让装好的用户拿到新词表：推上去 → 跑一次 `词库` 工作流（它会同时更新
-`dict.db.zst` 和 `english.db.zst`）→ 用户 `pliers english fetch`。
+`dict.db.zst` 和 `english.db.zst`）→ 用户 `pliers fetch english`。
 
 **想加自己的词不用改这里**：配置里写
 

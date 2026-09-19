@@ -35,19 +35,28 @@ Arch 是 `libxkbcommon`，Fedora 是 `libxkbcommon-devel`）—— 少了它链�
 text-input 协议**：Firefox / GTK / Qt 应用都行，alacritty 0.17（基于 winit）实测也可以。
 
 词库默认用[白霜拼音 rime-frost](https://github.com/gaboolic/rime-frost)（约 100 万条，自带字频词频，
-多音字一行一个读音；资产 27 MB）。不想下载现成的、想自己从语料构建：`cargo install pliers-dict` 之后 `pliers dict build`；
+多音字一行一个读音；资产 27 MB）。不想下载现成的、想自己从语料构建：`cargo install pliers-dict` 之后 `pliers build pinyin`；
 换源或离线装：`PLIERS_DICT_URL=... pliers fetch pinyin --url file:///...`；
-看现在装的是哪份：`pliers dict status`；想把词库和英文词表**一起更新到最新**：`pliers update`
+看现在装的是哪份：`pliers status pinyin`；想把词库和英文词表**一起更新到最新**：`pliers update`
 （已经是最新的会跳过，不白下 27 MB）—— 见 [docs/dictionary.md](docs/dictionary.md)。
 发布出来的词库资产按 GPL-3.0 分发（语料是 GPL-3.0 的），代码本身不受影响。
+
+命令都是**动词在前、种类在后**（种类就三个：`pinyin` / `wubi` / `english` —— 字典是个总概念）：
+
+```nushell
+pliers status [种类]         # 看现状：不给种类 = 正在跑的实例 + 所有字典
+pliers path   [名字]         # 文件都在哪（config / dict / user / english / corpus / socket）
+pliers build  <种类> [文件]   # 自己构建（pinyin 下语料；english 可以给自己的词表）
+pliers fetch  <种类|all>     # 从 Release 下载预构建的；pliers update = 哪个旧更新哪个
+```
 
 **词库、用户数据、英文词表是三个文件**，各管各的：
 
 | 文件 | 是什么 | 怎么更新 |
 | --- | --- | --- |
-| `~/.local/share/pliers/dict.db` | 中文词库 + 音节表（86 MB） | `pliers fetch pinyin --force` / `pliers dict build` |
+| `~/.local/share/pliers/dict.db` | 中文词库 + 音节表（86 MB） | `pliers fetch pinyin --force` / `pliers build pinyin` |
 | `~/.local/share/pliers/user.db` | 你选过的词、自己拼的句子、按 `Del` 拉黑的词 | 自动写；想清空就删掉它 |
-| `~/.local/share/pliers/english.db` | 英文候选词表（SQLite，25223 词） | `pliers fetch english`（**可以单独更新**） |
+| `~/.local/share/pliers/english.db` | 英文候选词表（SQLite，25223 词） | `pliers fetch english`（**可以单独更新**）/ `pliers build english 词表.txt` |
 
 所以重新装词库不会弄丢你的习惯，换英文词表也不用动词库；两个库内部用 SQLite 的 `ATTACH`
 连起来（见 [docs/dictionary.md](docs/dictionary.md#表结构词库和用户数据是两个文件)）。
@@ -64,7 +73,7 @@ seat」然后退出，所以别同时跑两个。
 想确认自己没跑歪：
 
 ```bash
-cargo test --workspace        # 213 个单测，不需要合成器、不需要词库
+cargo test --workspace        # 219 个单测，不需要合成器、不需要词库
 ./tools/run_mock_tests.sh     # mock 合成器跑 27 个场景 + 2 项在线改配置检查
 ```
 
@@ -125,7 +134,7 @@ cargo test --workspace        # 213 个单测，不需要合成器、不需要�
 * **代码**：[MIT](LICENSE-MIT) 或 [Apache-2.0](LICENSE-APACHE)，随你挑一个用
 * **词库资产**（Release 里的 `dict.db.zst`）：**GPL-3.0** —— 它是
   [rime-frost](https://github.com/gaboolic/rime-frost) 那份 GPL-3.0 语料的衍生作品，
-  跟代码的许可是两回事。不想碰它就 `pliers dict build` 自己从上游构建（那只是下载语料，
+  跟代码的许可是两回事。不想碰它就 `pliers build pinyin` 自己从上游构建（那只是下载语料，
   不涉及再分发）—— 见 [docs/dictionary.md](docs/dictionary.md#许可)
 * **英文词表数据**（`crates/pliers-engine/data/english.txt`，编译进二进制那份兜底；发布出去的
   `english.db.zst` 也是它的衍生作品）：

@@ -5,7 +5,7 @@
 //! 各管各的、可以各自更新：
 //!
 //! 1. `english.db` —— 运行时用的就是它。`pliers --init` 装一份，
-//!    `pliers english fetch` 从 GitHub Release 更新（约 60 KB 的资产，能**单独更新**，
+//!    `pliers fetch english` 从 GitHub Release 更新（约 60 KB 的资产，能**单独更新**，
 //!    不用重装输入法、也不用重下 27 MB 的中文词库）；
 //! 2. `[english] extra` 指的文件（**文本**，一行一个词）—— 你自己额外加的词，排在最前面；
 //! 3. `data/english.txt`（`include_str!` 编译进来那份文本）—— **只当兜底**：
@@ -43,10 +43,10 @@ pub const BUILTIN: &str = include_str!("../data/english.txt");
 /// 完全分不开，运行时也不会拿一个字母去匹配英文（见 [`Words::candidates`]）
 const MIN_LEN: usize = 2;
 
-/// 这份词表是从哪儿来的（`pliers status` / `pliers english status` 报给人看）
+/// 这份词表是从哪儿来的（`pliers status english` 报给人看）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
-    /// 外部那个库（正常情况：`~/.local/share/pliers/english.db`，`pliers english fetch` 更新它）
+    /// 外部那个库（正常情况：`~/.local/share/pliers/english.db`，`pliers fetch english` 更新它）
     Db(std::path::PathBuf),
     /// 二进制里那份兜底文本（库没装 / 读不了）
     Builtin,

@@ -49,7 +49,7 @@ if [ -z "$DICT" ]; then
 fi
 if [ -z "$DICT" ] || [ ! -f "$DICT" ]; then
     echo "找不到词库（试过 target/dict.db 和 ~/.local/share/pliers/dict.db）"
-    echo "先装一份：pliers --init（或 pliers dict build 自己构建）"
+    echo "先装一份：pliers --init（或 pliers build pinyin 自己构建）"
     exit 1
 fi
 # 测试用自己的一份词库副本：选词/记整句都会写进库里，别污染真库

@@ -71,7 +71,7 @@ kind = "full-pinyin"
 
 # ---- 词库 -------------------------------------------------------------------
 [dict]
-# SQLite 词库文件（pliers --init 装一份，或 pliers dict build 自己构建；
+# SQLite 词库文件（pliers --init 装一份，或 pliers build pinyin 自己构建；
 # 见仓库里的 docs/dictionary.md）
 # path = "~/.local/share/pliers/dict.db"
 

@@ -1,12 +1,13 @@
-//! `pliers --init` 和 `pliers dict ...`：装词库。
+//! 字典的 `pinyin` 那种：中文词库（五笔的条目也在**同一份**库里，靠 `word.scheme` 分）
+//! 加它旁边的用户数据 `user.db`。
 //!
 //! 词库是几百 MB 的派生物，不进仓库（GitHub 也不让放这么大的文件），
 //! 但也不该让你自己去哪儿找一份词表、再守着跑一遍导入：
 //!
-//! * `pliers --init`      写配置 + 下载预构建的词库（新机器一条命令能用）
-//! * `pliers fetch dict`  只装词库（可以换源、重装；这个是顶层命令）
-//! * `pliers dict build`  自己下语料、自己构建（Release 上还没有东西时走这条）
-//! * `pliers dict status` 现在用的是哪个库、多少词、来源是什么
+//! * `pliers --init`        写配置 + 装一份能用的（下载预构建的，或 `--build` 自己构建）
+//! * `pliers fetch pinyin`  只装词库（下载统一在 `fetch` 那边，跟英文词表一套）
+//! * `pliers build pinyin`  自己下语料、自己构建（Release 上还没有东西时走这条）
+//! * `pliers status pinyin` 现在用的是哪个库、多少词、来源是什么
 //!
 //! 语料用的是[白霜拼音 rime-frost](https://github.com/gaboolic/rime-frost)（GPL-3.0）：
 //! 字频词频是拿 7.4 亿字语料重新统计的，多音字就是**一行一个读音**（各自带权重，
@@ -16,13 +17,8 @@ use std::path::{Path, PathBuf};
 
 use pliers_engine::{Config, Dict};
 
-use crate::pick;
-
-/// 预构建词库的地址：挂在仓库的 Release 上。
-/// `releases/latest/download/` 永远指向最新 Release 里的同名资产，所以不用跟着版本号改。
-/// 想换源：`PLIERS_DICT_URL=... pliers fetch dict`（公司镜像、自己搭的服务器都行）
-pub const DEFAULT_URL: &str =
-    "https://github.com/rendaoer/pliers-ime/releases/latest/download/dict.db.zst";
+use crate::args::{has, value_of};
+use crate::{note, row, size};
 
 /// 语料：rime-frost 的词表。`corrections`（纠错表）不要，它不是候选词库
 ///
@@ -49,8 +45,8 @@ fn fetch_corpus(name: &str, dest: &Path) -> Result<(), String> {
 
 /// `pliers --init [--force] [--build] [--url <地址>]`
 pub fn init(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let force = args.iter().any(|arg| arg == "--force");
-    let build = args.iter().any(|arg| arg == "--build");
+    let force = has(args, "--force");
+    let build_it = has(args, "--build");
     let url = value_of(args, "--url");
 
     // ---- 配置 ----
@@ -61,92 +57,40 @@ pub fn init(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         crate::init_config(force)?;
     }
 
-    // ---- 英文词表（跟词库分开的文件，顺带装一份；离线也能装，写的是二进制里那份兜底）----
+    // ---- 英文词表（另一种字典，顺带装一份；离线也能装，写的是二进制里那份兜底）----
     crate::english::install_if_missing(force)?;
 
-    // ---- 词库 ----
-    let dest = target_path();
+    // ---- 中文词库 ----
+    let dest = path();
     if dest.exists() && !force {
         println!("词库：{}（已有，没动它）", dest.display());
         // 跑着的实例会独占词库，这时候读不进去很正常 —— 这不是错，
         // 别让 `pliers --init` 带着一个"失败"的退出码结束
         if let Err(e) = describe_path(&dest) {
-            println!("大小        {}", size(&dest));
-            println!("内容        读不了：{e}");
-            println!("            输入法正开着的话词库被它独占着，退掉再看");
+            println!("{}", row("大小", size(&dest).unwrap_or_default()));
+            println!("{}", row("内容", format!("读不了：{e}")));
+            println!("{}", note("输入法正开着的话词库被它独占着，退掉再看"));
         }
         println!();
         println!(
-            "想重装：pliers fetch pinyin --force（整套字典：pliers fetch all；或 pliers dict build）"
+            "想重装：pliers fetch pinyin --force（整套：pliers fetch all；自己构建：pliers build pinyin）"
         );
         return Ok(());
     }
-    if build {
-        build_dict(&dest, false)
-    } else {
-        fetch_dict(&dest, url.as_deref(), true)
+    if build_it {
+        return build(false);
     }
-}
-
-/// `pliers dict build|status|path`（下载在顶层：`pliers fetch dict`）
-pub fn command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    match args.first().map(String::as_str) {
-        // 下载挪到顶层了：`pliers fetch dict`（两个资产放一起，还能 `pliers update`）
-        Some("fetch") => Err(
-            "`pliers dict fetch` 现在叫 `pliers fetch pinyin`（整套字典：pliers fetch all）".into(),
-        ),
-        Some("build") => build_dict(&target_path(), args.iter().any(|arg| arg == "--refresh")),
-        Some("path") => {
-            println!("{}", target_path().display());
-            Ok(())
-        }
-        // 不带参数 = 看现状，跟 `path` 相反：这个给人看，那个给脚本用
-        Some("status") | None => status(),
-        Some(other) => Err(format!(
-            "不认识的：pliers dict {other}\n\
-             能用的是：build（自己下语料构建）/ status / path\n\
-             下载预构建的那份在顶层：pliers fetch dict"
-        )
-        .into()),
-    }
-}
-
-/// 下载预构建的词库装到 `dest`
-fn fetch_dict(
-    dest: &Path,
-    url: Option<&str>,
-    force: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let url = url
-        .map(str::to_string)
-        .or_else(|| crate::fetch::url_for("dict"))
-        .unwrap_or_else(|| DEFAULT_URL.to_string());
-
-    if dest.exists() && !force {
-        println!("词库已经有了：{}", dest.display());
-        println!("（想重装加 --force；想先看看里面是什么用 pliers dict status）");
-        return Ok(());
-    }
-    println!("下载词库：{url}");
-    println!("  目标：{}", dest.display());
-    pliers_engine::fetch::install(&url, dest).map_err(|e| {
-        format!(
-            "{e}\n\n\
-             下载不到也没关系，自己构建一份就行：pliers dict build\n\
-             （那个命令要 pliers-dict：cargo install pliers-dict）\n\
-             或者手动下载后放到：{}",
-            dest.display()
-        )
-    })?;
+    crate::fetch::install("pinyin", url.as_deref(), true)?;
     println!();
-    describe_path(dest)?;
+    describe_path(&dest)?;
     println!();
     println!("搞定 —— 重启输入法就生效（词库是启动时打开的）");
     Ok(())
 }
 
-/// 下载语料 + 调 `pliers-dict` 构建一份词库
-fn build_dict(dest: &Path, refresh: bool) -> Result<(), Box<dyn std::error::Error>> {
+/// 下载语料 + 调 `pliers-dict` 构建一份词库（`pliers build pinyin [--refresh]`）
+pub fn build(refresh: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let dest = path();
     let corpus = corpus_dir();
     std::fs::create_dir_all(&corpus)?;
     println!("语料目录：{}", corpus.display());
@@ -185,61 +129,45 @@ fn build_dict(dest: &Path, refresh: bool) -> Result<(), Box<dyn std::error::Erro
         .arg("--rime")
         .arg(&corpus)
         .arg("--out")
-        .arg(dest)
+        .arg(&dest)
         .status()?;
     if !status.success() {
         return Err(format!("构建失败（退出码 {:?}）", status.code()).into());
     }
     println!();
-    describe_path(dest)?;
+    describe_path(&dest)?;
     println!();
     println!("搞定 —— 重启输入法就生效");
     Ok(())
 }
 
-/// 英文词表（"字典"的另一块，在自己的库里）里的词；读不到就是 None
-fn english_words() -> Option<Vec<String>> {
-    let path = crate::english::target_path();
-    path.exists()
-        .then(|| pliers_engine::english::read_db(&path).ok())
-        .flatten()
-}
-
-/// 这个文件多大（小文件也别显示成 0 MB）
-fn size(path: &Path) -> String {
-    match std::fs::metadata(path) {
-        Ok(meta) if meta.len() >= 1024 * 1024 => format!("{} MB", meta.len() / 1024 / 1024),
-        Ok(meta) => format!("{} KB", meta.len().max(1024) / 1024),
-        Err(_) => "还没有，用着会自动建".to_string(),
-    }
-}
-
-/// 一项一行（标签补到 10 列 —— 中文一个字算两列，所以"用户数据"和"词库"照样对齐）
-fn row(label: &str, value: impl std::fmt::Display) -> String {
-    format!("{} {value}", pick::pad(label, 10))
-}
-
-/// `pliers dict status`：现在用的是哪个库、有没有、多大、里面是什么
-fn status() -> Result<(), Box<dyn std::error::Error>> {
-    let dest = target_path();
-    let user = user_target_path();
-    println!("{}", row("词库", dest.display()));
+/// `pliers status pinyin|wubi`：中文词库这一块现在是什么样
+pub fn report() -> Result<(), Box<dyn std::error::Error>> {
+    let dest = path();
+    let user = user_path();
+    let how_big = size(&dest).unwrap_or_else(|| "还没有".to_string());
     println!(
         "{}",
-        row("用户数据", format!("{}（{}）", user.display(), size(&user)))
+        row("中文词库", format!("{}（{how_big}）", dest.display()))
     );
     if !dest.exists() {
-        println!("          还没有 —— pliers --init 装一份（或 pliers dict build 自己构建）");
+        println!(
+            "{}",
+            note("还没有 —— pliers --init 装一份，或 pliers build pinyin 自己构建")
+        );
         return Ok(());
     }
-    println!("{}", row("大小", size(&dest)));
-    if let Err(e) = describe_contents(&dest) {
+    if let Err(e) = contents(&dest, &user) {
         // 输入法开着的时候词库被它独占（turso 是独占锁），读不进去很正常 ——
         // 这不是词库坏了，所以只说清楚原因，不当成错误
         println!("{}", row("内容", format!("读不了：{e}")));
         println!(
-            "          输入法正开着的话词库被它独占着，退掉再看；它自己报的现状用 pliers status"
+            "{}",
+            note(
+                "输入法正开着的话词库被它独占着，退掉再看；实例自己报的现状在 pliers status 最上面"
+            )
         );
+        println!("{}", user_row(&user, None));
     }
     Ok(())
 }
@@ -247,14 +175,13 @@ fn status() -> Result<(), Box<dyn std::error::Error>> {
 /// 报一下这个库的体检结果：大小、词条数、来源、用户数据。
 /// `Dict::open` 本身就是校验 —— 表缺了、音节表空了都会报错
 fn describe_path(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    println!("{}", row("大小", size(path)));
-    describe_contents(path)
+    println!("{}", row("大小", size(path).unwrap_or_default()));
+    contents(path, &user_path())
 }
 
 /// 打开来数一数里面有什么（下载完 / 构建完用它验一遍）
-fn describe_contents(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let user = user_target_path();
-    let dict = Dict::open(path, &user)?;
+fn contents(path: &Path, user: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let dict = Dict::open(path, user)?;
     let stats = dict.stats()?;
     println!(
         "{}",
@@ -266,16 +193,9 @@ fn describe_contents(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             )
         )
     );
-    // 一个库里可以放好几套方案（全拼 / 五笔 / …），分开报
+    // 一个库里可以放好几套方案（拼音 / 五笔 / …），分开报
     for (scheme, rows) in &stats.schemes {
-        println!("           {scheme}：{rows} 条");
-    }
-    // 英文词表也是"字典"的一块（只是存在自己的库里，见 pliers english status）
-    if let Some(words) = english_words() {
-        println!(
-            "           english：{} 个词（独立库，pliers english status 看细节）",
-            words.len()
-        );
+        println!("{}", note(format!("{scheme}：{rows} 条")));
     }
     if let Some(source) = dict.meta("source") {
         println!("{}", row("来源", source));
@@ -285,21 +205,28 @@ fn describe_contents(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     }
     println!(
         "{}",
-        row(
-            "用户数据",
-            format!(
-                "选过 {} 个词，自己拼的句子 {} 条（{}）",
-                stats.user_words,
-                stats.user_phrases,
-                user.display()
-            )
-        )
+        user_row(user, Some((stats.user_words, stats.user_phrases)))
     );
     Ok(())
 }
 
+/// 用户数据那一行。词库读不进去（被跑着的实例独占）时至少把文件和大小报出来
+fn user_row(user: &Path, counts: Option<(i64, i64)>) -> String {
+    let how_big = size(user).unwrap_or_else(|| "还没有，用着会自动建".to_string());
+    match counts {
+        Some((words, phrases)) => row(
+            "用户数据",
+            format!(
+                "选过 {words} 个词，自己拼的句子 {phrases} 条（{}，{how_big}）",
+                user.display()
+            ),
+        ),
+        None => row("用户数据", format!("{}（{how_big}）", user.display())),
+    }
+}
+
 /// 输入法实际会用的那个**用户数据**文件（认 `PLIERS_USER_DB`）
-fn user_target_path() -> PathBuf {
+pub fn user_path() -> PathBuf {
     Config::load()
         .map(|config| config.user_path())
         .unwrap_or_else(|_| pliers_engine::config::default_user_path())
@@ -307,14 +234,14 @@ fn user_target_path() -> PathBuf {
 
 /// 输入法实际会用的那个词库文件：配置文件里的 `dict.path`（认 `PLIERS_DICT`）。
 /// 配置坏了也不至于装不了 —— 那就退回默认路径
-fn target_path() -> PathBuf {
+pub fn path() -> PathBuf {
     Config::load()
         .map(|config| config.dict_path())
         .unwrap_or_else(|_| pliers_engine::config::default_dict_path())
 }
 
 /// 语料缓存放 `~/.cache/pliers/rime-frost`（重装词库不用再下一遍几十 MB）
-fn corpus_dir() -> PathBuf {
+pub fn corpus_dir() -> PathBuf {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -325,7 +252,7 @@ fn corpus_dir() -> PathBuf {
 
 /// 找 `pliers-dict`：环境变量 → 跟 pliers 放一起（cargo 编出来就在同一个 target 目录）
 /// → PATH
-fn importer_binary() -> Option<PathBuf> {
+pub fn importer_binary() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("PLIERS_DICT_BIN") {
         return Some(PathBuf::from(path));
     }
@@ -340,18 +267,4 @@ fn importer_binary() -> Option<PathBuf> {
             .map(|dir| dir.join("pliers-dict"))
             .find(|path| path.exists())
     })
-}
-
-/// `--url <值>` / `--url=<值>` 都认
-fn value_of(args: &[String], flag: &str) -> Option<String> {
-    let mut rest = args.iter();
-    while let Some(arg) = rest.next() {
-        if arg == flag {
-            return rest.next().cloned();
-        }
-        if let Some(value) = arg.strip_prefix(&format!("{flag}=")) {
-            return Some(value.to_string());
-        }
-    }
-    None
 }

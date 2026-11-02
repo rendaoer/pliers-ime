@@ -26,15 +26,15 @@
         };
         lib = pkgs.lib;
 
-        rustToolchain = pkgs.rust-bin.stable.latest.default.override {
+        # 打包直接用 nixpkgs 的 rustPlatform（当前锁定的 nixpkgs 是 Rust 1.99），
+        # 不把 devShell 那套 rust-analyzer / rust-src 拖进安装闭包。
+        #
+        # 开发环境还是用 rust-overlay，顺手带 rust-src + rust-analyzer。
+        devToolchain = pkgs.rust-bin.stable.latest.default.override {
           extensions = [
             "rust-src"
             "rust-analyzer"
           ];
-        };
-        rustPlatform = pkgs.makeRustPlatform {
-          cargo = rustToolchain;
-          rustc = rustToolchain;
         };
 
         version = (lib.importTOML ./Cargo.toml).workspace.package.version;
@@ -42,7 +42,7 @@
         # 一个包装两个可执行文件：`pliers` 和 `pliers-dict`。
         # `pliers build pinyin` / `build wubi` 会在自己旁边找 `pliers-dict`，
         # 所以两个必须在同一个 $out/bin 里（拆成两个包反而会找不到）。
-        pliers = rustPlatform.buildRustPackage {
+        pliers = pkgs.rustPlatform.buildRustPackage {
           pname = "pliers";
           inherit version;
           # 只把编译需要的东西放进源码树：文档/截图/contrib 改动不该让整个包重编
@@ -101,7 +101,7 @@
 
         devShells.default = pkgs.mkShell {
           buildInputs = [
-            rustToolchain
+            devToolchain
             pkgs.pkg-config
             pkgs.watchexec
             pkgs.pre-commit

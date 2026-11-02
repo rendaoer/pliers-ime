@@ -197,6 +197,17 @@ impl Segmenter {
         out
     }
 
+    /// 切不干净时：已经切完的那段音节 + 最后半截能补成的所有音节。
+    ///
+    /// 整句候选要用它拼最后那个还没打完的音节（`nawoxianz` → `na wo xian` + `z`）。
+    /// 前缀为空（整个输入就是个半截音节）时返回 `None` —— 一个音节拼不出整句。
+    pub fn tail_options(&self, input: &str) -> Option<(Vec<String>, Vec<String>)> {
+        let (prefix, tail) = self.split_tail(input).into_iter().next()?;
+        let prefix: Vec<String> = prefix.split(' ').map(str::to_string).collect();
+        let tails: Vec<String> = self.completions(&tail).map(str::to_string).collect();
+        (!prefix.is_empty()).then_some((prefix, tails))
+    }
+
     /// 所有能把整串切完的切法（最多 `max` 种），音节数少的排前面
     fn segmentations(&self, input: &str, max: usize) -> Vec<Vec<String>> {
         let mut out = Vec::new();

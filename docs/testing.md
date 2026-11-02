@@ -5,8 +5,8 @@
 ## 单测：不需要合成器、不需要词库
 
 ```bash
-cargo test --workspace        # 全部 247 个
-cargo test -p pliers-engine   # 只看引擎（172 个）：切词、方案、词库、英文候选、按键状态机
+cargo test --workspace        # 全部 252 个
+cargo test -p pliers-engine   # 只看引擎（177 个）：切词、方案、词库、英文候选、按键状态机
 cargo test -p pliers-ime      # 命令行那套（21 个）：状态输出、配置校验、交互选择
 cargo test -p pliers-dict     # 导入工具（6 个）：rime 词库解析、权重缩放、格式不对要说清楚
 cargo test -p pliers-popup    # 候选框布局与像素（21 个）

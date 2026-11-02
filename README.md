@@ -29,7 +29,7 @@
 * **命令行不折腾**：`pliers doctor` 自检（字体/词库/Wayland/工具），`pliers status` 秒回，
   改配置有上下选的交互模式；词库下载支持镜像、断点续传、sha256 校验，一个源不行自动换下一个
 * **Nix**：自带 flake 和 Home Manager 模块，装包/写配置/自动启动都能声明式搞定
-* **测试**：247 个单测 + 30 个 mock 合成器场景，不需要真合成器、不需要词库
+* **测试**：252 个单测 + 30 个 mock 合成器场景，不需要真合成器、不需要词库
 
 ## 安装
 
@@ -203,7 +203,7 @@ pliers toggle
 ## 开发与测试
 
 ```bash
-cargo test --workspace        # 247 个单测，不需要合成器、不需要词库
+cargo test --workspace        # 252 个单测，不需要合成器、不需要词库
 ./tools/run_mock_tests.sh     # mock 合成器跑 30 个场景（含在线改配置）
 nix build .#                  # 只编包（同时产出 pliers 和 pliers-dict）
 nix develop                   # Rust + libxkbcommon + wayland + bindgen

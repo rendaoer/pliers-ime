@@ -98,6 +98,12 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
 pub const USER_BOOST: i64 = 1_000_000;
 /// 用户词频最多算多少次（防止某一个词被刷到天上去）
 pub const USER_BOOST_CAP: i64 = 50;
+/// 整句候选里，用户词频要选过**几次**才开始算。
+///
+/// 单个词可以选一次就往前挪；整句是"这几个音节怎么切词"的问题，
+/// 一次误选（比如 `nawoxmz` 顺手点了「那我先」）不该把之后的切法带偏。
+/// 选过 3 次还这样，那就是真的习惯，按用户来。
+pub const SENTENCE_BOOST_AFTER: i64 = 2;
 
 /// `ATTACH '<用户数据文件>' AS user`。路径里的单引号要写成两个（SQL 字符串转义）
 fn attach_user(path: &Path) -> String {
@@ -263,6 +269,29 @@ impl Dict {
                 scheme.into(),
                 code.into(),
                 USER_BOOST_CAP.into(),
+                USER_BOOST.into(),
+                (limit as i64).into(),
+            ],
+        )
+    }
+
+    /// 整句候选用的查词：用户词频要选过 [`SENTENCE_BOOST_AFTER`] 次以上才参与。
+    ///
+    /// 单字/整词的候选可以选一次就调频；整句是"这串音节怎么切词"的问题，
+    /// 一次误选不该把之后的切法带偏。`count` 超过门槛之后照常按 [`USER_BOOST`] 加分。
+    pub fn exact_sentence(&self, scheme: &str, code: &str, limit: usize) -> Vec<(String, i64)> {
+        self.query(
+            "SELECT w.text,
+                    w.weight + MAX(0, MIN(COALESCE(u.count, 0), ?3) - ?4) * ?5 AS score
+             FROM word w LEFT JOIN user.user_word u ON u.text = w.text
+             WHERE w.scheme = ?1 AND w.code = ?2
+             ORDER BY score DESC
+             LIMIT ?6",
+            &[
+                scheme.into(),
+                code.into(),
+                USER_BOOST_CAP.into(),
+                SENTENCE_BOOST_AFTER.into(),
                 USER_BOOST.into(),
                 (limit as i64).into(),
             ],
@@ -955,6 +984,19 @@ pub(crate) mod testing {
                 ("jian", "见", 589_650),
                 ("shi jian", "时间", 332_880),
                 ("hao ma", "号码", 9_800),
+                // 半截音节拼整句（`nawoxmz` → 那我现在）：真词库里
+                // 「那我先」是个权重 1 的边角词，会把「那我」+「现在」的路挤掉
+                ("na", "那", 5_000_000),
+                ("wo", "我", 8_000_000),
+                ("xian", "先", 900_000),
+                ("xian", "现", 1_408_369),
+                ("zai", "在", 4_000_000),
+                ("na wo", "那我", 49_321),
+                ("xian zai", "现在", 1_408_369),
+                ("na wo xian", "那我先", 1),
+                // 补成 zuo 的「那我先做」比补成 zai 的「那我现在」低一大截，
+                // 用来测半截句尾的分数门槛（不该把噪音列出来）
+                ("zuo", "做", 1_149_586),
             ] {
                 pollster::block_on(conn.execute(
                     "INSERT INTO word (scheme, code, text, weight) VALUES ('pinyin', ?1, ?2, ?3)",

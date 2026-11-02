@@ -109,6 +109,29 @@ fn push_sentences(
     }
 }
 
+/// 最后一个音节只打了半截（`nawoxmz` 的 `z`）时，把所有可能的补全都当成
+/// 句尾拼一遍整句。
+///
+/// 不这么做的话，`nawoxmz` 只能靠"分段上屏"给一个「那我先」，
+/// 而用户真正想要的「那我现在」得再多打一个 `d` 才出得来。
+fn push_sentences_with_tail(
+    out: &mut Vec<String>,
+    dict: &Dict,
+    scheme: &str,
+    prefix: &[String],
+    tails: &[String],
+    limit: usize,
+) {
+    for text in sentence::candidates_with_tail(dict, scheme, prefix, tails, limit) {
+        if !out.contains(&text) {
+            out.push(text);
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+}
+
 /// 分段匹配：把输入按音节边界切成"前面一段 + 剩下的一截"，
 /// 前面那段照常查词（整词 + 整句），候选只吃前面那几个字符。
 ///
@@ -184,19 +207,28 @@ impl Scheme for FullPinyin {
     }
 
     fn candidates(&self, dict: &Dict, input: &str, limit: usize) -> Vec<Candidate> {
+        let codes = self.segmenter.lookup_codes(input);
         // 词库里真有的词（整串命中）
-        let words = merge(
-            dict,
-            self.name(),
-            &self.segmenter.lookup_codes(input),
-            limit,
-        );
+        let words = merge(dict, self.name(), &codes, limit);
         // 整句候选：库里没有整词时按词拼出来的，不是词库里的词条
         let mut built = Vec::new();
-        if self.sentence
-            && let Some(syllables) = self.segmenter.complete_segmentations(input).first()
-        {
-            push_sentences(&mut built, dict, self.name(), syllables, limit);
+        if self.sentence {
+            match self.segmenter.complete_segmentations(input).first() {
+                Some(syllables) => push_sentences(&mut built, dict, self.name(), syllables, limit),
+                // 尾巴上还有半截音节（`nawoxianz`）：用完整前缀 + 各种补全拼句尾
+                None => {
+                    if let Some((prefix, tails)) = self.segmenter.tail_options(input) {
+                        push_sentences_with_tail(
+                            &mut built,
+                            dict,
+                            self.name(),
+                            &prefix,
+                            &tails,
+                            limit,
+                        );
+                    }
+                }
+            }
         }
 
         let mut out = whole(input, words, built);
@@ -661,14 +693,29 @@ impl Scheme for DoublePinyin {
     }
 
     fn candidates(&self, dict: &Dict, input: &str, limit: usize) -> Vec<Candidate> {
-        let words = merge(dict, self.name(), &self.lookup_codes(input), limit);
+        let codes = self.lookup_codes(input);
+        let words = merge(dict, self.name(), &codes, limit);
         // 整句候选：键正好两两解完（一组一个音节）时才有得拼
         let mut built = Vec::new();
-        if self.sentence
-            && let Some((syllables, None)) = self.decode_pairs(input)
-            && syllables.len() >= 2
-        {
-            push_sentences(&mut built, dict, self.name(), &syllables, limit);
+        if self.sentence {
+            match self.decode_pairs(input) {
+                Some((syllables, None)) if syllables.len() >= 2 => {
+                    push_sentences(&mut built, dict, self.name(), &syllables, limit);
+                }
+                // 最后还剩一个键（`nawoxmz` 的 `z`）：每种补全都当句尾拼一次
+                Some((syllables, Some(first))) if !syllables.is_empty() => {
+                    let tails: Vec<String> = self.by_first.get(&first).cloned().unwrap_or_default();
+                    push_sentences_with_tail(
+                        &mut built,
+                        dict,
+                        self.name(),
+                        &syllables,
+                        &tails,
+                        limit,
+                    );
+                }
+                _ => {}
+            }
         }
 
         let mut out = whole(input, words, built);
@@ -738,6 +785,7 @@ impl Scheme for CodeTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dict::testing::sample_dict;
 
     /// 词库里的 412 个音节（测试里用一份完整的，别依赖真库）
     fn syllables() -> Vec<String> {
@@ -808,6 +856,33 @@ mod tests {
         // 小鹤：hao = h+c
         let flypy = DoublePinyin::new(Layout::preset("flypy").unwrap(), &syllables(), true);
         assert_eq!(flypy.lookup_codes("nihc"), ["ni hao"]);
+    }
+
+    #[test]
+    fn 双拼半截最后音节也拼整句() {
+        // 用户报的：`nawoxmz`（小鹤）只给「那我先」，
+        // 最后那个 `z` 还没打 `d` 的时候也要能拼出「那我现在」
+        let dict = sample_dict();
+        let flypy = DoublePinyin::new(Layout::preset("flypy").unwrap(), &syllables(), true);
+        let out: Vec<String> = flypy
+            .candidates(&dict, "nawoxmz", 9)
+            .into_iter()
+            .map(|candidate| candidate.text)
+            .collect();
+        assert_eq!(out.first().map(String::as_str), Some("那我现在"), "{out:?}");
+    }
+
+    #[test]
+    fn 全拼半截最后音节也拼整句() {
+        // 全拼同理：`nawoxianz` 的 `z` 补成 zai 之后能拼出「那我现在」
+        let dict = sample_dict();
+        let full = FullPinyin::new(&syllables(), true);
+        let out: Vec<String> = full
+            .candidates(&dict, "nawoxianz", 9)
+            .into_iter()
+            .map(|candidate| candidate.text)
+            .collect();
+        assert_eq!(out.first().map(String::as_str), Some("那我现在"), "{out:?}");
     }
 
     #[test]

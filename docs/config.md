@@ -205,8 +205,9 @@ pliers reload                             # 手动让它重读一遍配置文件
 实例        正在跑（socket /run/user/1000/pliers.sock）
 方案        双拼（小鹤）
 词库        /home/dao/.local/share/pliers/pinyin.db（86 MB）
-用户数据    /home/dao/.local/share/pliers/user.db（8 KB）
+词条        996446（单字 51855 + 词 944591）
 候选        一页 9 个，池子 90 个
+用户数据    /home/dao/.local/share/pliers/user.db（8 KB）
 英文候选    开（词表 25223 个词，一次最多 5 个）
 中英切换    ctrl+space
 中英提示    开
@@ -215,8 +216,10 @@ pliers reload                             # 手动让它重读一遍配置文件
 socket      /run/user/1000/pliers.sock
 ```
 
-下面是两种字典各自的现状（磁盘上那份，跟实例现在用的是不是同一个文件也能这么对）：
-想看哪一块就 `pliers status pinyin` / `pliers status english`，细节见[词库](dictionary.md)。
+实例在跑的时候，`pliers status` 只问它就够了（词库被实例独占着，命令行再去开一次只会
+得到"读不了"，还白等几秒）；要看磁盘上那份的详细体检，先停掉实例，再
+`pliers status pinyin` / `pliers status english`。`pliers doctor` 则是"打不出字"时用的：
+它一项一项检查字体、词库、Wayland、下载/解压工具，标出 ✗ 的还会告诉你怎么修。
 
 ### 交互模式
 

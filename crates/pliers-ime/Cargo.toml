@@ -14,5 +14,7 @@ path = "src/main.rs"
 [dependencies]
 pliers-engine.workspace = true
 pliers-wayland.workspace = true
+# `pliers doctor` 要问一句"候选框字体找到了吗"
+pliers-popup.workspace = true
 # 交互式设置要动 termios（原始模式），还有 poll 等 fd
 libc = "0.2"

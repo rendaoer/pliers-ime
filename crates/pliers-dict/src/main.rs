@@ -126,6 +126,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         ("imported_at", now()),
         ("words", imported.words.to_string()),
         ("singles", imported.singles.to_string()),
+        // 每种方案多少行的小抄：`pliers status` 直接读它，不用再 count(*) 扫全表
+        ("schemes", format!("pinyin={}", imported.words)),
     ] {
         pollster::block_on(conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
@@ -171,7 +173,7 @@ fn import_code_table(
     let conn = db.connect()?;
     create_schema(&conn)?;
 
-    let rows = import_table(&conn, table, scheme)?;
+    let (rows, singles) = import_table(&conn, table, scheme)?;
     if rows == 0 {
         return Err(format!(
             "码表里一行都没读到：{}\n每行是 `词<TAB>码[<TAB>权重]`（权重可省）",
@@ -188,6 +190,9 @@ fn import_code_table(
         ("scheme", scheme.to_string()),
         ("imported_at", now()),
         ("words", rows.to_string()),
+        ("singles", singles.to_string()),
+        // `pliers status` 直接读这份小抄（100 万行的库 count(*) 要 4 秒）
+        ("schemes", format!("{scheme}={rows}")),
     ] {
         pollster::block_on(conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
@@ -348,11 +353,17 @@ fn import_rime(
                 continue; // 跳过的不算词条（第一遍已经报过了）
             };
             let weight = ((weight as f64 * scale).round() as i64).max(1);
-            if text.chars().count() == 1 {
-                singles += 1;
+            let single = text.chars().count() == 1;
+            // INSERT OR IGNORE：重复行（同方案同码同词）不会插进去，
+            // 按实际插入的行数记，meta 里的总数才对得上库里的行数
+            let inserted =
+                pollster::block_on(stmt.execute(turso::params!["pinyin", code, text, weight]))?;
+            if inserted > 0 {
+                if single {
+                    singles += 1;
+                }
+                words += 1;
             }
-            pollster::block_on(stmt.execute(turso::params!["pinyin", code, text, weight]))?;
-            words += 1;
             if words.is_multiple_of(BATCH) {
                 pollster::block_on(conn.execute("COMMIT", ()))?;
                 pollster::block_on(conn.execute("BEGIN", ()))?;
@@ -569,16 +580,19 @@ fn read_english_lists(sources: &[PathBuf]) -> Result<Vec<String>, Box<dyn std::e
     Ok(words)
 }
 
+/// 导一张码表，返回 `(总行数, 单字行数)` —— 单字行数是给 `pliers status` 报数用的，
+/// 顺便写进 meta，免得每次报数都去扫全表
 fn import_table(
     conn: &Connection,
     path: &Path,
     scheme: &str,
-) -> Result<usize, Box<dyn std::error::Error>> {
+) -> Result<(usize, usize), Box<dyn std::error::Error>> {
     let mut stmt = pollster::block_on(conn.prepare(
         "INSERT OR IGNORE INTO word (scheme, code, text, weight) VALUES (?1, ?2, ?3, ?4)",
     ))?;
     pollster::block_on(conn.execute("BEGIN", ()))?;
     let mut rows = 0usize;
+    let mut singles = 0usize;
     for line in BufReader::new(File::open(path)?).lines() {
         let line = line?;
         let line = line.trim();
@@ -589,16 +603,23 @@ fn import_table(
         let (Some(text), Some(code)) = (parts.next(), parts.next()) else {
             continue;
         };
+        let text = text.trim();
         let weight: i64 = parts
             .next()
             .and_then(|w| w.trim().parse().ok())
             .unwrap_or(1);
-        pollster::block_on(stmt.execute(turso::params![scheme, code.trim(), text.trim(), weight]))?;
-        rows += 1;
+        let inserted =
+            pollster::block_on(stmt.execute(turso::params![scheme, code.trim(), text, weight]))?;
+        if inserted > 0 {
+            rows += 1;
+            if text.chars().count() == 1 {
+                singles += 1;
+            }
+        }
     }
     drop(stmt);
     pollster::block_on(conn.execute("COMMIT", ()))?;
-    Ok(rows)
+    Ok((rows, singles))
 }
 
 /// 命令行参数

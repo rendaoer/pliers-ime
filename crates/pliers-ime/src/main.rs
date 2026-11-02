@@ -25,80 +25,134 @@ use pliers_engine::{Config, Engine, Mode};
 use pliers_wayland::Options;
 
 fn help() -> String {
-    format!(
-        "pliers —— 从零手写的 Wayland 中文输入法\n\n\
-         用法：pliers [动词] [种类] [选项]        （不带动词 = 启动输入法）\n\n\
-         \x20 字典是个总概念，按方案分成几种，**各有各的文件**：\n\
-         \x20 pinyin（拼音词库 pinyin.db）/ wubi（码表库 wubi.db，五笔/郑码/仓颉）/ english（英文词表）。\n\
-         \x20 下面四个动词收的都是这几个名字：\n\
-         \x20 pliers status [种类]        看现状：不给种类 = 实例 + 所有库，给了 = 只看那一块\n\
-         \x20 pliers path   [名字]        文件都在哪（config / dict / wubi / user / english / corpus / socket）\n\
-         \x20 pliers build  <种类> [文件]  自己构建（要 pliers-dict：pinyin 下语料，wubi 用自己的码表，\n\
-         \x20                            english 可以给一份自己的词表）\n\
-         \x20 pliers fetch  <种类|all>    从 Release 下载预构建的（--force 重装、--url 换源）\n\
-         \x20 pliers update              哪个不是最新就更新哪个（已经一样就跳过，不白下载）\n\n\
-         \x20 装一份能用的：\n\
-         \x20 pliers --init [--force] [--build]  写配置 + 装字典（--build = 自己下语料构建）\n\
-         \x20 pliers --init-config [--force]     只写配置模板\n\n\
-         \x20 配置：改配置文件的（config …）和只改内存的（set …）是两条路 —— 前者留下来的\n\
-         \x20 东西下次启动还在，后者重启即失效：试手感用 set，定下来用 config set。\n\
-         \x20 pliers config set <项> <值>   写配置文件（保留注释；跑着的实例会自动重读）\n\
-         \x20 pliers config set           交互模式：上下选着改（↑↓ + Enter）\n\
-         \x20 pliers config show|edit     看配置文件 / 用 $EDITOR 打开\n\
-         \x20 pliers set <项> <值>         只改**正在跑的实例**（下次启动就回去了）\n\
-         \x20 pliers set                  交互模式：上下选着改\n\
-         \x20 pliers reload               让它重新读一遍配置文件\n\n\
-         能 set 的项：\n\
-         \x20 scheme.kind           full-pinyin | double-pinyin | wubi\n\
-         \x20 scheme.layout         natural | flypy | mspy | none   （双拼键位）\n\
-         \x20 scheme.sentence       true | false                    （整句候选）\n\
-         \x20 scheme.name           <码表名>                        （kind = wubi 时，默认 wubi）\n\
-         \x20 dict.path             <拼音词库文件>                  （pinyin.db）\n\
-         \x20 dict.wubi_path        <码表库文件>                    （wubi.db，五笔/郑码/仓颉）\n\
-         \x20 dict.user_path        <用户数据文件>                  （选过的词/自己拼的句子；两个库共用）\n\
-         \x20 dict.max_candidates   1-9\n\
-         \x20 dict.pool_size        <正整数>\n\
-         \x20 engine.toggle_keys    ctrl+space,shift                （逗号分隔）\n\
-         \x20 engine.start_mode     chinese | english\n\
-         \x20 engine.indicator      true | false\n\
-         \x20 engine.chinese_punctuation  true | false               （中文标点）\n\
-         \x20 english.enabled       true | false                     （英文候选）\n\
-         \x20 english.limit         1-9                              （一次几个英文候选）\n\
-         \x20 english.path          <词表文件>                        （默认 ~/.local/share/pliers/english.db）\n\
-         \x20 english.extra         <自己加的词文件>                  （排在最前面）\n\n\
-         路径：pliers path 一屏看全，默认是：\n\
-         {}\n\
-         {}\n\
-         {}\n\
-         {}\n\
-         调试：PLIERS_DEBUG=1 pliers 把每个按键的判定打到 stderr\n\
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{} {}\n\n",
+        bold(format!("pliers {}", env!("CARGO_PKG_VERSION"))),
+        dim("一个从零手写的 Wayland 中文输入法")
+    ));
+
+    out.push_str(&heading("开始用"));
+    out.push('\n');
+    for (cmd, what) in [
+        ("pliers", "启动输入法（不带动词就是它）"),
+        ("pliers --init", "写配置 + 装词库（新机器第一件事）"),
+        ("pliers --init-config", "只写一份带注释的配置模板"),
+        ("pliers doctor", "自检：字体、词库、Wayland、下载工具"),
+        ("pliers status [种类]", "看现状（实例 + 所有字典）"),
+    ] {
+        out.push_str(&format!("  {}  {}\n", command(pick::pad(cmd, 30)), what));
+    }
+
+    out.push('\n');
+    out.push_str(&heading("字典"));
+    out.push('\n');
+    out.push_str(&dim(
+        "  一个库一个文件，各管各的：pinyin / wubi / english\n",
+    ));
+    for (cmd, what) in [
+        (
+            "pliers fetch <种类|all>",
+            "下载预构建的（--force 重装 / --url 换源 / --mirror 走镜像）",
+        ),
+        (
+            "pliers update",
+            "哪个不是最新就更新哪个（一样就跳过，不白下）",
+        ),
+        (
+            "pliers build <种类> [文件]",
+            "自己构建（pinyin 下语料，wubi 用码表，english 用词表）",
+        ),
+        ("pliers status <种类>", "只看那一块：词条数、来源、用户数据"),
+        (
+            "pliers path [名字]",
+            "文件都在哪（config / pinyin / wubi / user / english / corpus / socket）",
+        ),
+    ] {
+        out.push_str(&format!("  {}  {}\n", command(pick::pad(cmd, 30)), what));
+    }
+
+    out.push('\n');
+    out.push_str(&heading("配置"));
+    out.push('\n');
+    out.push_str(&dim(
+        "  改文件（config）会留下来，改内存（set）重启就回去。试手感用 set，定下来用 config set。\n",
+    ));
+    for (cmd, what) in [
+        (
+            "pliers config set <项> <值>",
+            "写配置文件（保留注释；跑着的实例自动重读）",
+        ),
+        ("pliers config set", "交互模式：上下选着改"),
+        ("pliers config show|edit", "看配置文件 / 用 $EDITOR 打开"),
+        (
+            "pliers set <项> <值>",
+            "只改正在跑的实例（下次启动就回去了）",
+        ),
+        ("pliers set", "交互模式：上下选着改"),
+        ("pliers reload", "让跑着的实例重新读一遍配置文件"),
+    ] {
+        out.push_str(&format!("  {}  {}\n", command(pick::pad(cmd, 30)), what));
+    }
+
+    out.push_str("\n  能 set 的项：\n");
+    for (key, what) in [
+        ("scheme.kind", "full-pinyin | double-pinyin | wubi"),
+        ("scheme.layout", "natural | flypy | mspy | none（双拼键位）"),
+        ("scheme.sentence", "true | false（整句候选）"),
+        ("scheme.name", "<码表名>（kind = wubi 时，默认 wubi）"),
+        ("dict.path", "<拼音词库文件>（pinyin.db）"),
+        ("dict.wubi_path", "<码表库文件>（wubi.db，五笔/郑码/仓颉）"),
+        (
+            "dict.user_path",
+            "<用户数据文件>（选过的词/自己拼的句子；两个库共用）",
+        ),
+        ("dict.max_candidates", "1-9"),
+        ("dict.pool_size", "<正整数>"),
+        ("engine.toggle_keys", "ctrl+space,shift（逗号分隔）"),
+        ("engine.start_mode", "chinese | english"),
+        ("engine.indicator", "true | false"),
+        ("engine.chinese_punctuation", "true | false（中文标点）"),
+        ("english.enabled", "true | false（英文候选）"),
+        ("english.limit", "1-9（一次几个英文候选）"),
+        (
+            "english.path",
+            "<词表文件>（默认 ~/.local/share/pliers/english.db）",
+        ),
+        ("english.extra", "<自己加的词文件>（排在最前面）"),
+    ] {
+        out.push_str(&format!("    {}  {}\n", dim(pick::pad(key, 28)), what));
+    }
+
+    out.push('\n');
+    out.push_str(&heading("文件都在这"));
+    out.push('\n');
+    for (label, path) in [
+        ("配置", pliers_engine::config::config_path()),
+        ("拼音词库", pliers_engine::config::default_dict_path()),
+        ("码表库", pliers_engine::config::default_wubi_path()),
+        ("英文词表", pliers_engine::config::default_english_path()),
+    ] {
+        out.push_str(&row(label, path.display()));
+        out.push('\n');
+    }
+
+    out.push('\n');
+    out.push_str(&dim(
+        "调试：PLIERS_DEBUG=1 pliers 会把每个按键的判定打到 stderr\n\
          遥控：命令走 Unix socket，路径看 $PLIERS_SOCKET（默认 $XDG_RUNTIME_DIR/pliers.sock）",
-        row("配置", pliers_engine::config::config_path().display()),
-        row(
-            "拼音词库",
-            format!(
-                "{}（pliers status pinyin 看里面有什么）",
-                pliers_engine::config::default_dict_path().display()
-            )
-        ),
-        row(
-            "码表库",
-            format!(
-                "{}（五笔/郑码/仓颉；pliers build wubi <码表.txt> 建一份）",
-                pliers_engine::config::default_wubi_path().display()
-            )
-        ),
-        row(
-            "英文词表",
-            format!(
-                "{}（pliers status english 看现在用的是哪份）",
-                pliers_engine::config::default_english_path().display()
-            )
-        )
-    )
+    ));
+    out.push('\n');
+    out
 }
 
 fn main() {
+    // `pliers status | head` 这种用法：下游读够了就会关掉管道，
+    // Rust 的 println! 遇到 EPIPE 会 panic。恢复系统的默认行为 —— 安静退出
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     if let Err(error) = run() {
         // 自己打错误信息比 `Error: "..."` 好看，也不带 Debug 的引号
         eprintln!("pliers: {error}");
@@ -127,6 +181,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         // 以前是名词在前（pliers dict status / pliers english fetch），现在只留一句"该写什么"
         Some("dict") => return Err(retired("pliers dict", &args[1..])),
         Some("english") => return Err(retired("pliers english", &args[1..])),
+        // 自检：不连合成器、不抢 seat，只看看该有的东西在不在
+        Some("doctor") => return doctor(),
+        Some("--version" | "-V" | "version") => {
+            println!("pliers {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
         Some("--help" | "-h") => {
             println!("{}", help());
             return Ok(());
@@ -182,7 +242,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn status_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     match args::kind(args) {
         "" => {
-            instance_section();
+            let running = instance_section();
+            if running.is_some() {
+                // 实例那一段已经把方案、词库、候选、用户数据、英文词表都报了 ——
+                // 它正**独占**着词库文件，命令行这边再去开一次只会得到"读不了"，
+                // 还要白等几秒。词条数/来源已经由实例自己在 status 字段里带出来了
+                println!();
+                println!(
+                    "{}",
+                    note("更细的词库体检：先停掉实例，再 pliers status pinyin / english")
+                );
+                return Ok(());
+            }
             println!();
             dict::report()?;
             // 码表库是**另一个文件**，只有真在用（或已经建了）才占一屏 ——
@@ -212,8 +283,9 @@ fn wubi_matters() -> bool {
 }
 
 /// 正在跑的那个实例看到的现状。没在跑**不是错误**（字典那两块照样能看），
-/// 所以只报一句，不当成失败
-fn instance_section() {
+/// 所以只报一句，不当成失败。
+/// 返回实例报上来的字段：`Some` = 连上了，调用方可以据此跳过"再开一次词库"
+fn instance_section() -> Option<Fields> {
     match ask("status") {
         Ok(Reply::Done(payload)) => {
             let fields = Fields::parse(&payload);
@@ -222,9 +294,16 @@ fn instance_section() {
                 row("实例", format!("正在跑（socket {}）", fields.get("socket")))
             );
             print_status(&fields);
+            Some(fields)
         }
-        Ok(Reply::Failed(message)) => println!("{}", row("实例", format!("问不动它：{message}"))),
-        Err(_) => println!("{}", row("实例", "没在跑（配置本身：pliers config show）")),
+        Ok(Reply::Failed(message)) => {
+            println!("{}", row("实例", format!("问不动它：{message}")));
+            None
+        }
+        Err(_) => {
+            println!("{}", row("实例", "没在跑（配置本身：pliers config show）"));
+            None
+        }
     }
 }
 
@@ -273,6 +352,413 @@ fn path_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         )
         .into()),
     }
+}
+
+/// `pliers doctor`：不碰合成器、不抢键盘，只把"能不能用"挨个检查一遍。
+///
+/// 这是给"装好了但打不出字"准备的：先看词库在不在、字体找没找到、Wayland 环境
+/// 对不对、下载工具装没装。每一项都带一句"该怎么办"，不用去翻文档。
+fn doctor() -> Result<(), Box<dyn std::error::Error>> {
+    let mut hard = 0usize;
+    let mut soft = 0usize;
+    let mut check = |level: Level, label: &str, value: String| match level {
+        Level::Ok => {
+            println!(
+                "  {} {} {value}",
+                good("✓"),
+                pick::style(&pick::pad(label, 12), "2")
+            )
+        }
+        Level::Warn => {
+            soft += 1;
+            println!(
+                "  {} {} {value}",
+                warn("!"),
+                pick::style(&pick::pad(label, 12), "2")
+            )
+        }
+        Level::Fail => {
+            hard += 1;
+            println!(
+                "  {} {} {value}",
+                bad("✗"),
+                pick::style(&pick::pad(label, 12), "2")
+            )
+        }
+    };
+
+    println!(
+        "{}",
+        heading(format!("pliers {} 自检", env!("CARGO_PKG_VERSION")))
+    );
+    println!();
+
+    // 实例先问一声：它在跑的话，词库被它独占着，我们就不去开
+    let running = match ask("status") {
+        Ok(Reply::Done(payload)) => Some(Fields::parse(&payload)),
+        Ok(Reply::Failed(message)) => {
+            check(Level::Fail, "实例", format!("回话了，但说不行：{message}"));
+            None
+        }
+        Err(_) => None,
+    };
+
+    // ---- 配置文件 ----
+    let config = match Config::load() {
+        Ok(config) => {
+            check(
+                Level::Ok,
+                "配置文件",
+                format!(
+                    "{}（{}）",
+                    pliers_engine::config::config_path().display(),
+                    scheme_label(&config)
+                ),
+            );
+            Some(config)
+        }
+        Err(e) => {
+            check(
+                Level::Fail,
+                "配置文件",
+                format!(
+                    "读不了：{e}\n{}用默认值也能跑，或者 {} 重写一份模板",
+                    " ".repeat(16),
+                    command("pliers --init-config --force")
+                ),
+            );
+            None
+        }
+    };
+
+    // ---- 当前方案用的词库（拼音是 pinyin.db，码表方案是 wubi.db）----
+    let is_wubi = matches!(
+        config.as_ref().map(|config| &config.scheme),
+        Some(pliers_engine::SchemeConfig::Wubi { .. })
+    );
+    let dict_label = if is_wubi { "码表库" } else { "拼音词库" };
+    let dict_install = if is_wubi {
+        "pliers build wubi <码表.txt>"
+    } else {
+        "pliers fetch pinyin --force"
+    };
+    let dict_path = config
+        .as_ref()
+        .map(|config| config.active_dict_path())
+        .unwrap_or_else(pliers_engine::config::default_dict_path);
+    match std::fs::metadata(&dict_path) {
+        Err(_) => check(
+            Level::Fail,
+            dict_label,
+            format!(
+                "{}（还没有）\n{}装一份：{}",
+                dict_path.display(),
+                " ".repeat(16),
+                command(if is_wubi {
+                    dict_install
+                } else {
+                    "pliers --init"
+                })
+            ),
+        ),
+        Ok(meta) => {
+            let size = human_size(meta.len());
+            if running.is_some() {
+                check(
+                    Level::Ok,
+                    dict_label,
+                    format!("{}（{size}，实例正在用）", dict_path.display()),
+                );
+            } else {
+                let user = config
+                    .as_ref()
+                    .map(|config| config.user_path())
+                    .unwrap_or_else(pliers_engine::config::default_user_path);
+                match pliers_engine::Dict::open(&dict_path, &user).and_then(|dict| dict.stats()) {
+                    Ok(stats) => check(
+                        Level::Ok,
+                        dict_label,
+                        format!("{}（{size}，{} 条）", dict_path.display(), stats.words),
+                    ),
+                    Err(e) => check(
+                        Level::Fail,
+                        dict_label,
+                        format!(
+                            "{}（{size}，但打不开：{e}）\n{}重新装：{}",
+                            dict_path.display(),
+                            " ".repeat(16),
+                            command(dict_install)
+                        ),
+                    ),
+                }
+            }
+        }
+    }
+
+    // ---- 英文词表（没有也能用，只是少一层补全）----
+    let english = config
+        .as_ref()
+        .map(|config| config.english_path())
+        .unwrap_or_else(pliers_engine::config::default_english_path);
+    if english.exists() {
+        match pliers_engine::english::read_db(&english) {
+            Ok(words) => check(
+                Level::Ok,
+                "英文词表",
+                format!("{}（{} 个词）", english.display(), words.len()),
+            ),
+            Err(e) => check(
+                Level::Warn,
+                "英文词表",
+                format!("{}（读不了：{e}；会用内置那份兜底）", english.display()),
+            ),
+        }
+    } else {
+        check(
+            Level::Warn,
+            "英文词表",
+            format!(
+                "{}（还没装，先用内置兜底；{} 可以装一份）",
+                english.display(),
+                command("pliers fetch english")
+            ),
+        );
+    }
+
+    // ---- 候选框字体（"框弹出来了但里面没字"就是这儿）----
+    let painter = pliers_popup::Painter::new();
+    match (painter.font_name(), painter.covers_chinese()) {
+        (Some(name), true) => check(Level::Ok, "候选框字体", name.to_string()),
+        (Some(name), false) => check(
+            Level::Fail,
+            "候选框字体",
+            format!(
+                "{name}（没有中文字形）\n{}装个中文字体（如 noto-fonts-cjk），或者用 {} 指定一套",
+                " ".repeat(16),
+                command("PLIERS_FONT=/path/to/font.ttc pliers")
+            ),
+        ),
+        (None, _) => check(
+            Level::Fail,
+            "候选框字体",
+            format!(
+                "一套都没找到，候选框会是空框\n{}装个中文字体（如 noto-fonts-cjk），或者用 {} 指定一套",
+                " ".repeat(16),
+                command("PLIERS_FONT=/path/to/font.ttc pliers")
+            ),
+        ),
+    }
+
+    // ---- Wayland ----
+    match std::env::var_os("WAYLAND_DISPLAY") {
+        Some(display) => {
+            let display = Path::new(&display);
+            let socket = if display.is_absolute() {
+                display.to_path_buf()
+            } else {
+                std::env::var_os("XDG_RUNTIME_DIR")
+                    .map(|dir| Path::new(&dir).join(display))
+                    .unwrap_or_else(|| display.to_path_buf())
+            };
+            if socket.exists() {
+                check(
+                    Level::Ok,
+                    "Wayland",
+                    format!("{}（{}）", display.display(), socket.display()),
+                );
+            } else {
+                check(
+                    Level::Fail,
+                    "Wayland",
+                    format!(
+                        "WAYLAND_DISPLAY={}，但 socket 不在：{}\n{}不在 Wayland 会话里？",
+                        display.display(),
+                        socket.display(),
+                        " ".repeat(16)
+                    ),
+                );
+            }
+        }
+        None => check(
+            Level::Fail,
+            "Wayland",
+            format!(
+                "没有 WAYLAND_DISPLAY —— 这个输入法只跑在 Wayland 下\n{}在图形会话的终端里运行它",
+                " ".repeat(16)
+            ),
+        ),
+    }
+
+    // ---- 合成器协议（只探测，不注册输入法、不抓键盘）----
+    match pliers_wayland::probe() {
+        Ok(protocols) => {
+            let mut missing = Vec::new();
+            if !protocols.seat {
+                missing.push("wl_seat");
+            }
+            if !protocols.input_method {
+                missing.push("zwp_input_method_manager_v2");
+            }
+            if !protocols.virtual_keyboard {
+                missing.push("zwp_virtual_keyboard_manager_v1");
+            }
+            if missing.is_empty() {
+                check(
+                    Level::Ok,
+                    "合成器协议",
+                    format!(
+                        "input_method / virtual_keyboard / seat{}",
+                        if protocols.text_input {
+                            ""
+                        } else {
+                            "（没有 text-input，应用那边可能收不到焦点）"
+                        }
+                    ),
+                );
+            } else {
+                check(
+                    Level::Fail,
+                    "合成器协议",
+                    format!(
+                        "缺 {} —— 这个合成器不支持外挂式输入法\n{}换 niri / sway / hyprland 这类支持 zwp_input_method_v2 的合成器",
+                        missing.join("、"),
+                        " ".repeat(16)
+                    ),
+                );
+            }
+        }
+        Err(e) => check(
+            Level::Warn,
+            "合成器协议",
+            format!(
+                "探测失败，跳过：{e}\n{}（现在没在 Wayland 会话里，或者合成器不让连）",
+                " ".repeat(16)
+            ),
+        ),
+    }
+
+    // ---- 下载 / 解压工具 ----
+    let curl = tool_exists("curl");
+    let wget = tool_exists("wget");
+    if curl || wget {
+        let mut tools = Vec::new();
+        if curl {
+            tools.push("curl");
+        }
+        if wget {
+            tools.push("wget");
+        }
+        check(Level::Ok, "下载工具", tools.join("、"));
+    } else {
+        check(
+            Level::Fail,
+            "下载工具",
+            format!(
+                "curl 和 wget 都没有，装不了词库\n{}Arch: {}  Debian: {}",
+                " ".repeat(16),
+                command("sudo pacman -S curl"),
+                command("sudo apt install curl")
+            ),
+        );
+    }
+    if tool_exists("zstd") {
+        check(Level::Ok, "解压工具", "zstd".to_string());
+    } else {
+        check(
+            Level::Warn,
+            "解压工具",
+            format!(
+                "没装 zstd，下载的 .zst 词库解不开\n{}Arch: {}  Debian: {}",
+                " ".repeat(16),
+                command("sudo pacman -S zstd"),
+                command("sudo apt install zstd")
+            ),
+        );
+    }
+
+    // ---- 实例 ----
+    match &running {
+        Some(fields) => check(
+            Level::Ok,
+            "实例",
+            format!("正在跑（socket {}）", fields.get("socket")),
+        ),
+        None => check(
+            Level::Warn,
+            "实例",
+            format!("没在跑（正常，用的时候再起：{}）", command("pliers")),
+        ),
+    }
+
+    // ---- 环境变量覆盖（排错时最容易被忘掉的东西）----
+    let overrides: Vec<&str> = [
+        "PLIERS_CONFIG",
+        "PLIERS_PINYIN",
+        "PLIERS_WUBI",
+        "PLIERS_ENGLISH",
+        "PLIERS_USER_DB",
+        "PLIERS_SOCKET",
+        "PLIERS_FONT",
+    ]
+    .into_iter()
+    .filter(|name| std::env::var_os(name).is_some())
+    .collect();
+    if !overrides.is_empty() {
+        println!();
+        println!(
+            "{}",
+            dim(format!(
+                "注意：这些环境变量正覆盖默认值：{}",
+                overrides.join("、")
+            ))
+        );
+    }
+
+    println!();
+    if hard > 0 {
+        return Err(format!("自检发现 {hard} 个问题（上面标 ✗ 的）").into());
+    }
+    if soft > 0 {
+        println!("{}", good("能用 —— 标 ! 的只是提醒，不影响打字。"));
+    } else {
+        println!("{}", good("都好，直接 pliers 就能开始打字。"));
+    }
+    Ok(())
+}
+
+/// 自检每一项的严重程度
+enum Level {
+    Ok,
+    Warn,
+    Fail,
+}
+
+/// 人看的文件大小
+fn human_size(len: u64) -> String {
+    if len >= 1024 * 1024 {
+        format!("{} MB", len / 1024 / 1024)
+    } else {
+        format!("{} KB", len.max(1024) / 1024)
+    }
+}
+
+/// 这套配置现在是什么方案（自检那一行里用）
+fn scheme_label(config: &Config) -> &'static str {
+    match &config.scheme {
+        pliers_engine::SchemeConfig::FullPinyin { .. } => "全拼",
+        pliers_engine::SchemeConfig::DoublePinyin { .. } => "双拼",
+        pliers_engine::SchemeConfig::Wubi { .. } => "码表",
+    }
+}
+
+/// 这个命令在不在 PATH 上（不跑它，只看找不找得到）
+fn tool_exists(name: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|dir| {
+            let path = dir.join(name);
+            path.is_file()
+        })
+    })
 }
 
 /// `pliers build <种类> [文件]`：自己构建一份字典
@@ -471,14 +957,50 @@ impl Fields {
 }
 
 /// 现状里的一行：标签补齐到 12 列（中文按两列算，所以"拼音词库"和"来源"照样对齐），
-/// 值跟在后面。状态、字典、路径几块都用它排版，所以列是对齐的
+/// 值跟在后面。状态、字典、路径几块都用它排版，所以列是对齐的。
+/// 标签在终端里是暗色 —— 眼睛先看到值，标签只是说明
 pub(crate) fn row(label: &str, value: impl std::fmt::Display) -> String {
-    format!("{} {value}", pick::pad(label, 12))
+    format!("{} {value}", pick::style(&pick::pad(label, 12), "2"))
 }
 
 /// 续行：不写标签，缩进到值那一列
 pub(crate) fn note(text: impl std::fmt::Display) -> String {
     format!("{}{text}", " ".repeat(13))
+}
+
+/// 加粗（标题、命令名）
+pub(crate) fn bold(text: impl std::fmt::Display) -> String {
+    pick::style(&text.to_string(), "1")
+}
+
+/// 暗色（次要信息、提示）
+pub(crate) fn dim(text: impl std::fmt::Display) -> String {
+    pick::style(&text.to_string(), "2")
+}
+
+/// 绿色（成功、能用）
+pub(crate) fn good(text: impl std::fmt::Display) -> String {
+    pick::style(&text.to_string(), "32")
+}
+
+/// 黄色（警告、还没装但能凑合）
+pub(crate) fn warn(text: impl std::fmt::Display) -> String {
+    pick::style(&text.to_string(), "33")
+}
+
+/// 红色（错误、不能用）
+pub(crate) fn bad(text: impl std::fmt::Display) -> String {
+    pick::style(&text.to_string(), "31")
+}
+
+/// 亮青（命令、可点的东西）
+pub(crate) fn command(text: impl std::fmt::Display) -> String {
+    pick::style(&text.to_string(), "1;36")
+}
+
+/// 一小节标题：`▌ 字典`
+pub(crate) fn heading(text: impl std::fmt::Display) -> String {
+    format!("{} {}", pick::style("▌", "36"), bold(text))
 }
 
 /// 文件多大（小文件也别显示成 0 MB）；读不到（还没建）就是 None
@@ -513,9 +1035,27 @@ fn status_lines(fields: &Fields) -> Vec<String> {
         _ => format!("全拼（整句候选{}）", on_off(fields.get("sentence"))),
     };
     let toggle = fields.get("toggle");
-    vec![
+    let mut lines = vec![
         row("方案", scheme),
         row("词库", fields.get("dict").to_string()),
+    ];
+    // 词条数只有跑着的实例报得出来（它已经打开词库了，读的是导入时写下的 meta）
+    let words = fields.get("dict_words");
+    if !words.is_empty() && words != "0" {
+        let singles = fields.get("dict_singles");
+        lines.push(row(
+            "词条",
+            if singles.is_empty() || singles == "0" {
+                format!("{words} 条")
+            } else {
+                format!(
+                    "{words}（单字 {singles} + 词 {}）",
+                    words.parse::<i64>().unwrap_or(0) - singles.parse::<i64>().unwrap_or(0)
+                )
+            },
+        ));
+    }
+    lines.extend([
         row(
             "候选",
             format!(
@@ -541,7 +1081,8 @@ fn status_lines(fields: &Fields) -> Vec<String> {
         ),
         row("配置文件", fields.get("config").to_string()),
         row("socket", fields.get("socket").to_string()),
-    ]
+    ]);
+    lines
 }
 
 /// 英文候选那一行：关掉就说"关"；开着的话把词表大小也报出来
@@ -1074,6 +1615,7 @@ mod tests {
         "kind=double-pinyin\tlayout=flypy\tname=\tsentence=true\t",
         "dict=/home/dao/.local/share/pliers/pinyin.db（131 MB）\t",
         "dict_path=/home/dao/.local/share/pliers/pinyin.db\t",
+        "dict_words=996446\tdict_singles=51855\t",
         "user=/home/dao/.local/share/pliers/user.db（8 KB）\t",
         "user_path=/home/dao/.local/share/pliers/user.db\t",
         "candidates=9\tpool=90\ttoggle=ctrl+space\tstart=chinese\tindicator=true\t",
@@ -1086,21 +1628,22 @@ mod tests {
     fn 状态按字段渲染成多行() {
         let fields = Fields::parse(PAYLOAD);
         let lines = status_lines(&fields);
-        assert_eq!(lines.len(), 10, "一项一行：{lines:?}");
+        assert_eq!(lines.len(), 11, "一项一行：{lines:?}");
         assert!(lines[0].contains("双拼（小鹤）"), "{:?}", lines[0]);
         assert!(
             lines[1].contains("/home/dao/.local/share"),
             "{:?}",
             lines[1]
         );
-        assert!(lines[2].contains("一页 9 个，池子 90 个"), "{:?}", lines[2]);
-        assert!(lines[3].contains("user.db"), "{:?}", lines[3]);
+        assert!(lines[2].contains("996446"), "{:?}", lines[2]);
+        assert!(lines[3].contains("一页 9 个，池子 90 个"), "{:?}", lines[3]);
+        assert!(lines[4].contains("user.db"), "{:?}", lines[4]);
         assert!(
-            lines[4].contains("开（词表 25223 个词，一次最多 5 个）"),
+            lines[5].contains("开（词表 25223 个词，一次最多 5 个）"),
             "{:?}",
-            lines[4]
+            lines[5]
         );
-        assert!(lines[7].contains("中（启动时 chinese）"), "{:?}", lines[7]);
+        assert!(lines[8].contains("中（启动时 chinese）"), "{:?}", lines[8]);
     }
 
     #[test]
@@ -1109,6 +1652,7 @@ mod tests {
         let labels = [
             "方案",
             "词库",
+            "词条",
             "候选",
             "用户数据",
             "英文候选",

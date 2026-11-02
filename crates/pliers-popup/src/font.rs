@@ -8,9 +8,9 @@
 //! "字符 → 轮廓 → 灰度图"这三步就够了。形状复杂的脚本（阿拉伯文、天城文）得换
 //! cosmic-text 那种带整形（shaping）的库，中文和拉丁文不需要。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use ab_glyph::{Font as _, FontVec, Glyph, PxScale, ScaleFont};
+use ab_glyph::{Font as _, FontVec, Glyph, PxScale, ScaleFont, VariableFont};
 
 /// 优先找的字体家族，越靠前越想要。前几个覆盖了绝大多数 Linux 发行版装的中文字体
 const FAMILIES: &[&str] = &[
@@ -22,6 +22,26 @@ const FAMILIES: &[&str] = &[
     "Droid Sans Fallback",
     "Microsoft YaHei",
     "PingFang SC",
+];
+
+/// 家族名里带这些词的，多半是能画中文的字体（发行版名字五花八门，用来兜底）
+const CJK_HINTS: &[&str] = &[
+    "cjk",
+    "source han",
+    "noto sans sc",
+    "noto serif sc",
+    "wenquanyi",
+    "wqy",
+    "hei",
+    "song",
+    "kai",
+    "ming",
+    "yahei",
+    "pingfang",
+    "sarasa",
+    "lxgw",
+    "droid sans fallback",
+    "unifont",
 ];
 
 /// 一个字光栅化之后的样子。
@@ -82,22 +102,49 @@ impl Font {
 
         let mut db = fontdb::Database::new();
         db.load_system_fonts();
-        let mut families: Vec<fontdb::Family> = FAMILIES
-            .iter()
-            .map(|name| fontdb::Family::Name(name))
-            .collect();
-        families.push(fontdb::Family::SansSerif); // 实在没有中文字体就用系统默认的
+        // fontdb 不认识 NixOS 的字体目录（它们不在 /usr/share/fonts，只在 fontconfig
+        // 的配置里写着）。把 fontconfig 说过的目录补扫一遍，不然候选框会是空框
+        for dir in extra_font_dirs() {
+            db.load_fonts_dir(&dir);
+        }
+
+        // 1. 按喜欢的家族逐个试，**要求真能画出「你」**
+        for family in FAMILIES {
+            let Some(id) = best_face_for(&db, family) else {
+                continue;
+            };
+            let Some(font) = load_face(&db, id) else {
+                continue;
+            };
+            if font.covers('你') {
+                return Some(font);
+            }
+        }
+
+        // 2. 家族名里带 CJK 字样的（不同发行版叫法不一样，没法全列出来）
+        let ids: Vec<fontdb::ID> = db.faces().map(|face| face.id).collect();
+        for id in ids {
+            if !looks_cjk(&db, id) {
+                continue;
+            }
+            if let Some(font) = load_face(&db, id)
+                && font.covers('你')
+            {
+                return Some(font);
+            }
+        }
+
+        // 3. 系统默认字体：可能没有中文，但画页码、英文候选还是清楚的
         let query = fontdb::Query {
-            families: &families,
+            families: &[fontdb::Family::SansSerif],
             weight: fontdb::Weight::NORMAL,
             stretch: fontdb::Stretch::Normal,
             style: fontdb::Style::Normal,
         };
-        let id = db.query(&query)?;
-        let name = db.face(id)?.post_script_name.clone();
-        let font = db.with_face_data(id, |data, index| {
-            Font::from_data(data.to_vec(), index, name)
-        })??;
+        let fallback = db
+            .query(&query)
+            .or_else(|| db.faces().next().map(|face| face.id));
+        let font = fallback.and_then(|id| load_face(&db, id))?;
         if !font.covers('你') {
             eprintln!(
                 "pliers: 选中的字体没有中文字形（装个 noto-fonts-cjk，\
@@ -113,7 +160,17 @@ impl Font {
     }
 
     fn from_data(data: Vec<u8>, index: u32, name: String) -> Option<Font> {
-        let inner = FontVec::try_from_vec_and_index(data, index).ok()?;
+        let mut inner = FontVec::try_from_vec_and_index(data, index).ok()?;
+        // 可变字体（NixOS 的 Noto Sans CJK 就是 VF）默认实例常常是 **Thin**：
+        // 不设轴的话，候选框里的字细得像没画。明确把字重放到 400（常规体）。
+        // 不是可变字体的话 `set_variation` 直接返回 false，什么都不影响
+        let variable = inner.set_variation(b"wght", 400.0);
+        let name = if variable {
+            // postscript 名字还是 "…-Thin"，不注明一下看日志会以为选错了
+            format!("{name}（可变字体，字重设成 400）")
+        } else {
+            name
+        };
         let upem = inner.units_per_em().unwrap_or(1000.0);
         let ratio = inner.height_unscaled() / upem;
         let ratio = if ratio.is_finite() && ratio > 0.1 {
@@ -185,6 +242,184 @@ impl Font {
     }
 }
 
+/// 从 fontdb 里把某个字面加载出来
+fn load_face(db: &fontdb::Database, id: fontdb::ID) -> Option<Font> {
+    let name = db.face(id)?.post_script_name.clone();
+    db.with_face_data(id, |data, index| {
+        Font::from_data(data.to_vec(), index, name)
+    })
+    .flatten()
+}
+
+/// 某个家族里跟「常规体」最接近的那个字面。
+///
+/// 光用 `db.query()` 有个坑：Noto CJK 是 `.ttc` 里的可变字体，`query` 有时会
+/// 挑到 Thin 那一份（`NotoSansCJKsc-Thin`），候选框里的字细得像没画。
+/// 所以自己按家族 + weight 找，取离 400 最近的；找不到再退回 `query`
+fn best_face_for(db: &fontdb::Database, family: &str) -> Option<fontdb::ID> {
+    let mut best: Option<(fontdb::ID, u16)> = None;
+    for face in db.faces() {
+        if face.style != fontdb::Style::Normal {
+            continue;
+        }
+        if !face.families.iter().any(|(name, _)| name == family) {
+            continue;
+        }
+        let distance = face.weight.0.abs_diff(fontdb::Weight::NORMAL.0);
+        if best.is_none_or(|(_, closest)| distance < closest) {
+            best = Some((face.id, distance));
+        }
+    }
+    best.map(|(id, _)| id).or_else(|| {
+        db.query(&fontdb::Query {
+            families: &[fontdb::Family::Name(family)],
+            weight: fontdb::Weight::NORMAL,
+            stretch: fontdb::Stretch::Normal,
+            style: fontdb::Style::Normal,
+        })
+    })
+}
+
+/// 这套字体的家族名看起来像中文字体吗
+fn looks_cjk(db: &fontdb::Database, id: fontdb::ID) -> bool {
+    let Some(face) = db.face(id) else {
+        return false;
+    };
+    face.families.iter().any(|(family, _)| {
+        let family = family.to_lowercase();
+        CJK_HINTS.iter().any(|hint| family.contains(hint))
+    })
+}
+
+/// fontdb 的 `load_system_fonts()` 只看"教科书位置"（/usr/share/fonts 之类）。
+/// NixOS 的字体全在 /nix/store，位置只写在 fontconfig 的配置文件里 ——
+/// 这里把它们找出来补扫一遍。不链接 libfontconfig，也就没有额外的系统依赖。
+fn extra_font_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    // 1. fontconfig 的配置文件（NixOS 在 /etc/fonts/conf.d/00-nixos-cache.conf 里
+    //    写着 /nix/store/...-noto-fonts-cjk-...，标准位置里一个都没有）
+    for conf in fontconfig_files() {
+        if let Ok(text) = std::fs::read_to_string(&conf) {
+            parse_fontconfig_dirs(&text, &mut dirs);
+        }
+    }
+
+    // 2. 常见位置（fontdb 可能已经扫过，重复扫没关系）
+    for dir in [
+        "/usr/share/fonts",
+        "/usr/local/share/fonts",
+        "/run/current-system/sw/share/fonts",
+    ] {
+        dirs.push(PathBuf::from(dir));
+    }
+
+    // 3. Nix profile / XDG data dir 下面的字体
+    if let Some(value) = std::env::var_os("NIX_PROFILES") {
+        for base in std::env::split_paths(&value) {
+            dirs.push(base.join("share/fonts"));
+        }
+    }
+    if let Some(value) = std::env::var_os("XDG_DATA_DIRS") {
+        for base in std::env::split_paths(&value) {
+            dirs.push(base.join("fonts"));
+        }
+    }
+
+    // 4. 用户自己的字体目录
+    if let Some(home) = home() {
+        dirs.push(home.join(".nix-profile/share/fonts"));
+        dirs.push(home.join(".local/state/nix/profile/share/fonts"));
+        dirs.push(home.join(".local/share/fonts"));
+        dirs.push(home.join(".fonts"));
+    }
+
+    // 去重 + 只留真存在的目录
+    let mut seen = std::collections::HashSet::new();
+    dirs.retain(|dir| dir.is_dir() && seen.insert(dir.clone()));
+    dirs
+}
+
+/// 跟 fontconfig 有关的配置文件：主配置 + conf.d 里的每一份 + 用户自己的
+fn fontconfig_files() -> Vec<PathBuf> {
+    let mut files = vec![PathBuf::from("/etc/fonts/fonts.conf")];
+    if let Ok(entries) = std::fs::read_dir("/etc/fonts/conf.d") {
+        let mut extra: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "conf"))
+            .collect();
+        extra.sort();
+        files.extend(extra);
+    }
+    if let Some(home) = home() {
+        let config = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"));
+        files.push(config.join("fontconfig/fonts.conf"));
+    }
+    files
+}
+
+/// 把 fontconfig 配置里的 `<dir>...</dir>` 抠出来。
+///
+/// 只认用得上的两种写法：光秃秃的路径，和 `prefix="xdg"`（相对 XDG data dir）。
+/// `<include>` 不管 —— 上面已经把 conf.d 里的文件都单独读了一遍
+fn parse_fontconfig_dirs(text: &str, out: &mut Vec<PathBuf>) {
+    let mut rest = text;
+    while let Some(start) = rest.find("<dir") {
+        let after = &rest[start + 4..];
+        let Some(gt) = after.find('>') else { break };
+        let attrs = &after[..gt];
+        let body = &after[gt + 1..];
+        let Some(end) = body.find("</dir>") else {
+            break;
+        };
+        let value = body[..end].trim();
+        rest = &body[end + "</dir>".len()..];
+        if value.is_empty() {
+            continue;
+        }
+        let path = match attr(attrs, "prefix").as_deref() {
+            Some("xdg") => xdg_data_home().join(value),
+            Some(_) => continue, // relative 之类的不认
+            None => match value.strip_prefix("~/") {
+                Some(rest) => match home() {
+                    Some(home) => home.join(rest),
+                    None => continue,
+                },
+                None => PathBuf::from(value),
+            },
+        };
+        out.push(path);
+    }
+}
+
+/// XML 属性：`prefix="xdg"` → `xdg`（单双引号都认）
+fn attr(attrs: &str, name: &str) -> Option<String> {
+    let key = format!("{name}=");
+    let start = attrs.find(&key)?;
+    let rest = &attrs[start + key.len()..];
+    let quote = rest.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let rest = &rest[quote.len_utf8()..];
+    let end = rest.find(quote)?;
+    Some(rest[..end].to_string())
+}
+
+fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+fn xdg_data_home() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home().map(|home| home.join(".local/share")))
+        .unwrap_or_else(|| PathBuf::from("/usr/share"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,5 +470,31 @@ mod tests {
         assert!(top < -12.0 && top > -20.0, "上边界 {top}");
         assert!(bottom > 0.0 && bottom < 6.0, "下边界 {bottom}");
         assert_eq!(ink_bounds(&[]), (0.0, 0.0));
+    }
+
+    #[test]
+    fn 认得_fontconfig_里的目录() {
+        // NixOS 的 00-nixos-cache.conf 就长这样
+        let text = r#"<fontconfig>
+          <dir>/nix/store/xxx-noto-fonts-cjk/share/fonts</dir>
+          <dir prefix="xdg">fonts</dir>
+          <cachedir>/nix/store/yyy-fc-cache</cachedir>
+        </fontconfig>"#;
+        let mut dirs = Vec::new();
+        parse_fontconfig_dirs(text, &mut dirs);
+        assert_eq!(dirs.len(), 2, "{dirs:?}");
+        assert_eq!(
+            dirs[0],
+            PathBuf::from("/nix/store/xxx-noto-fonts-cjk/share/fonts")
+        );
+        assert!(dirs[1].ends_with("fonts"), "{:?}", dirs[1]);
+    }
+
+    #[test]
+    fn xml_属性单双引号都认() {
+        assert_eq!(attr(r#" prefix="xdg""#, "prefix").as_deref(), Some("xdg"));
+        assert_eq!(attr(r#" prefix='xdg'"#, "prefix").as_deref(), Some("xdg"));
+        assert_eq!(attr(" prefix=xdg", "prefix"), None);
+        assert_eq!(attr("", "prefix"), None);
     }
 }

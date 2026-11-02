@@ -109,7 +109,7 @@ pub fn install_if_missing(force: bool) -> Result<(), Box<dyn std::error::Error>>
         );
         return Ok(());
     }
-    if let Err(e) = crate::fetch::install("english", None, true) {
+    if let Err(e) = crate::fetch::install("english", None, None, true) {
         // 离线 / 资产还没发版：用二进制里那份兜底，装出同样结构的一个库。
         // 只报错的第一行 —— 后面那几行是"自己构建 / 手动放"的长提示，这里不用重复
         let why = e.to_string();

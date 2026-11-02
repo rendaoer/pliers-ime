@@ -1329,6 +1329,7 @@ version = "0.3.0"
 dependencies = [
  "libc",
  "pliers-engine",
+ "pliers-popup",
  "pliers-wayland",
 ]
 

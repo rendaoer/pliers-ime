@@ -117,6 +117,16 @@ impl Painter {
         self.font.is_some()
     }
 
+    /// 用的是哪套字体（`pliers doctor` 报给人看；没找到就是 None）
+    pub fn font_name(&self) -> Option<&str> {
+        self.font.as_ref().map(Font::name)
+    }
+
+    /// 这套字体能画出汉字吗（字体在、但缺中文字形时是 false）
+    pub fn covers_chinese(&self) -> bool {
+        self.font.as_ref().is_some_and(|font| font.covers('你'))
+    }
+
     /// 画一帧。`scale` 是屏幕缩放：2 表示每个逻辑像素画成 2×2 个物理像素
     /// （合成器那边配 `wl_surface.set_buffer_scale`，不然会被当成两倍大）
     pub fn render(&self, preedit: &Preedit, scale: i32) -> Image {
@@ -180,8 +190,25 @@ impl Painter {
         let baseline = (height - (bottom - top)) / 2.0 - top;
 
         // 3. 画：底 → 选中色块 → 字
-        let mut canvas = Canvas::new(width.round() as i32, height.round() as i32);
-        canvas.round_rect(0.0, 0.0, width, height, px(RADIUS), BG);
+        let scale_i = scale as i32;
+        // 缓冲区宽高必须是缩放的整数倍：合成器按 `set_buffer_scale` 把物理像素
+        // 除回逻辑像素，除不尽时右边/下边会多出一条被拉伸的边。向上取整到整数倍，
+        // 底色也按取整后的尺寸铺满，不然边上会露一条透明缝
+        let align = |v: f32| {
+            let n = v.round() as i32;
+            (n + scale_i - 1) / scale_i * scale_i
+        };
+        let canvas_width = align(width);
+        let canvas_height = align(height);
+        let mut canvas = Canvas::new(canvas_width, canvas_height);
+        canvas.round_rect(
+            0.0,
+            0.0,
+            canvas_width as f32,
+            canvas_height as f32,
+            px(RADIUS),
+            BG,
+        );
         let mut x = px(PAD);
         for item in &items {
             if item.selected {
@@ -464,6 +491,10 @@ mod tests {
             single.width
         );
         assert_eq!(paged.height, single.height);
+
+        if !painter.has_font() {
+            return; // 没字体的话页码也画不出来（宽度估算还在）
+        }
 
         // 右下角那块确实画了东西（不是背景）
         let right = count(&paged, paged.width - 30, paged.width, |r, g, b| {

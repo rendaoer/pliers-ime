@@ -57,6 +57,59 @@ pub struct Options {
     pub debug: bool,
 }
 
+/// `pliers doctor` 想知道的：合成器到底给不给这些协议
+#[derive(Debug, Clone, Default)]
+pub struct Protocols {
+    /// `zwp_input_method_manager_v2` —— 没有它，这个输入法根本注册不进去
+    pub input_method: bool,
+    /// `zwp_virtual_keyboard_manager_v1` —— 没有它，不归输入法管的按键转发不回去
+    pub virtual_keyboard: bool,
+    /// `zwp_text_input_manager_v3` —— 应用那一侧要用的（有它才可能收到输入框焦点）
+    pub text_input: bool,
+    pub seat: bool,
+}
+
+/// 只连上去数一遍全局对象，然后**马上断开**。
+///
+/// 不注册输入法、不抓键盘、不建 surface —— 所以正在打字的实例不会被顶掉。
+/// 这是 `pliers doctor` 用的：合成器少了哪个协议，一眼就能看出来
+pub fn probe() -> Result<Protocols, Box<dyn Error>> {
+    let conn = Connection::connect_to_env()?;
+    let mut queue = conn.new_event_queue();
+    let qh = queue.handle();
+    conn.display().get_registry(&qh, ());
+    let mut state = Probe::default();
+    queue.roundtrip(&mut state)?;
+    let has = |name: &str| state.globals.iter().any(|global| global == name);
+    Ok(Protocols {
+        input_method: has("zwp_input_method_manager_v2"),
+        virtual_keyboard: has("zwp_virtual_keyboard_manager_v1"),
+        text_input: has("zwp_text_input_manager_v3") || has("zwp_text_input_manager_v2"),
+        seat: has("wl_seat"),
+    })
+}
+
+/// [`probe`] 用的空壳：只把 registry 的 global 名字记下来
+#[derive(Default)]
+struct Probe {
+    globals: Vec<String>,
+}
+
+impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
+    fn event(
+        state: &mut Self,
+        _: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_registry::Event::Global { interface, .. } = event {
+            state.globals.push(interface);
+        }
+    }
+}
+
 /// 起一个输入法，一直跑到合成器把协议收回去为止
 ///
 /// `config` 也留一份在手里：`pliers set ...` / `pliers reload` 改的就是它，
@@ -379,6 +432,8 @@ impl State {
     fn status_fields(&mut self) -> String {
         // 先把要用的几样读出来，再借引擎（不然同时可变 + 不可变借用 self）
         let mode = self.engine().mode().label();
+        // 词条数：导入工具把总数写进了 meta，这里只是读小抄（不会扫 100 万行）
+        let stats = self.engine().dict_stats().ok();
         let config = &self.config;
         // 给两种用法：`dict` 是给人看的（带大小），`dict_path` 是原文（编辑框预填要用）。
         // 开的是哪个库由方案决定：拼音开 pinyin.db，五笔这类码表开 wubi.db（两个文件）
@@ -416,6 +471,15 @@ impl State {
             format!("sentence={sentence}"),
             format!("dict={dict}"),
             format!("dict_path={}", dict_path.display()),
+            // 词条数（实例自己报，命令行就不用再去开一次词库、还被锁住）
+            format!(
+                "dict_words={}",
+                stats.as_ref().map_or(0, |stats| stats.words)
+            ),
+            format!(
+                "dict_singles={}",
+                stats.as_ref().map_or(0, |stats| stats.singles)
+            ),
             // 码表库是另一个文件（方案是 wubi 时上面那个 dict_path 就是它）——
             // 交互菜单里要能看/能改，所以两个都报
             format!("wubi_path={}", config.wubi_path().display()),

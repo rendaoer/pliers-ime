@@ -10,6 +10,8 @@
   打 `shou` 这种还在拼音上的串永远只出中文（见[规则](docs/usage.md#英文单词补全英文候选)）
 * **双拼 / 五笔**留好了位置：双拼（自然码/小鹤/微软）已经能用，五笔是"码表方案"那条路
 * **行为都在配置文件里**（TOML）：换方案、换词库、改候选个数都不用改代码
+* **命令行不折腾**：`pliers doctor` 自检（字体/词库/Wayland/工具），`pliers status` 秒回，
+  改配置有上下选的交互模式；词库下载支持镜像、断点续传、sha256 校验，一个源不行自动换下一个
 * **词库在 SQLite 里**：用 [turso](https://github.com/tursodatabase/turso)（Rust 写的 SQLite）读写，
   带权重字段，加词/调权重/看数据都能直接用 SQL
 
@@ -24,6 +26,14 @@ cargo run -- --init      # 装一份能用的：写配置 + 下载词库（几�
 cargo run                # 跑起来
 ```
 
+装完不放心就先自检一下：
+
+```bash
+pliers doctor            # 字体、词库、Wayland、合成器协议、下载工具，一项一项告诉你缺什么
+```
+
+（还在仓库里没 `cargo install` 的话，把 `pliers` 换成 `cargo run --`，比如 `cargo run -- doctor`。）
+
 从源码构建要一个系统库：**libxkbcommon** 的开发包（Debian/Ubuntu 是 `libxkbcommon-dev`，
 Arch 是 `libxkbcommon`，Fedora 是 `libxkbcommon-devel`）—— 少了它链接会报
 `unable to find library -lxkbcommon`。用 `cargo install pliers-ime` 装的话，编的人是你自己，
@@ -34,9 +44,18 @@ Arch 是 `libxkbcommon`，Fedora 是 `libxkbcommon-devel`）—— 少了它链�
 然后把焦点放进输入框，敲 `n i h a o` 再按空格。能不能用取决于**应用自己有没有实现
 text-input 协议**：Firefox / GTK / Qt 应用都行，alacritty 0.17（基于 winit）实测也可以。
 
+**装好了却打不出字？** 先跑 `pliers doctor`。两种最常见的情况它都会直接指出来：
+
+* **没有词库** —— `pliers --init` 没跑成功（下载断了）。重跑同一条命令会接着下；
+* **候选框弹出来但里面没字** —— 系统里没有中文字体，或者字体在 NixOS 的 `/nix/store`
+  这种非常规目录。候选框现在会读 fontconfig 的配置去找字体，找不到时用
+  `PLIERS_FONT=/path/to/font.ttc pliers` 手动指定。
+
 词库默认用[白霜拼音 rime-frost](https://github.com/gaboolic/rime-frost)（约 100 万条，自带字频词频，
 多音字一行一个读音；资产 27 MB）。不想下载现成的、想自己从语料构建：`cargo install pliers-dict` 之后 `pliers build pinyin`；
 换源或离线装：`PLIERS_PINYIN_URL=... pliers fetch pinyin --url file:///...`；
+直连 GitHub 太慢就加镜像：`pliers fetch pinyin --mirror ghproxy`（下载会自动在官方地址和内置镜像
+之间重试，断点续传，下完用 Release 上的 `.sha256` 校验）；
 看现在装的是哪份：`pliers status pinyin`；想把词库和英文词表**一起更新到最新**：`pliers update`
 （已经是最新的会跳过，不白下 27 MB）—— 见 [docs/dictionary.md](docs/dictionary.md)。
 发布出来的词库资产按 GPL-3.0 分发（语料是 GPL-3.0 的），代码本身不受影响。
@@ -45,9 +64,11 @@ text-input 协议**：Firefox / GTK / Qt 应用都行，alacritty 0.17（基于 
 
 ```nushell
 pliers status [种类]         # 看现状：不给种类 = 正在跑的实例 + 所有库
+pliers doctor                # 自检：字体、词库、Wayland、下载工具（打不出字先看它）
 pliers path   [名字]         # 文件都在哪（config / pinyin / wubi / user / english / corpus / socket）
 pliers build  <种类> [文件]   # 自己构建（pinyin 下语料；wubi 用自己的码表；english 可给自己的词表）
-pliers fetch  <种类|all>     # 从 Release 下载预构建的；pliers update = 哪个旧更新哪个
+pliers fetch  <种类|all>     # 从 Release 下载预构建的（--mirror 换镜像、--force 重装）
+pliers update                 # 哪个旧就更新哪个（已经一样就跳过）
 ```
 
 **每个库一个文件**（外加用户数据），各管各的：
@@ -77,8 +98,8 @@ seat」然后退出，所以别同时跑两个。
 想确认自己没跑歪：
 
 ```bash
-cargo test --workspace        # 223 个单测，不需要合成器、不需要词库
-./tools/run_mock_tests.sh     # mock 合成器跑 27 个场景 + 2 项在线改配置检查
+cargo test --workspace        # 229 个单测，不需要合成器、不需要词库
+./tools/run_mock_tests.sh     # mock 合成器跑 28 个场景 + 2 项在线改配置检查（30 项）
 ```
 
 ## 按键速查
@@ -111,7 +132,7 @@ cargo test --workspace        # 223 个单测，不需要合成器、不需要�
 | [docs/dictionary.md](docs/dictionary.md) | 词库怎么装（`pliers --init`）、换成别的源、自己从语料构建、表结构与权重、用 SQL 加词、`lookup` 看候选 |
 | [docs/internals.md](docs/internals.md) | crate 划分、用了哪些 Wayland 协议、**为什么拼音查询不能交给 SQL**、整句候选、长按重复为什么得自己做、候选框是怎么画出来的 |
 | [docs/pitfalls.md](docs/pitfalls.md) | 11 条实测踩出来的坑（Ctrl+A 被吃掉、松手后应用以为键还按着……）+ 已知不足 |
-| [docs/testing.md](docs/testing.md) | 单测、跑起来、`PLIERS_DEBUG`、mock 合成器的 27 个场景都验了什么 |
+| [docs/testing.md](docs/testing.md) | 单测、跑起来、`PLIERS_DEBUG`、`pliers doctor`、mock 合成器的 30 项场景都验了什么 |
 
 ## 代码结构
 

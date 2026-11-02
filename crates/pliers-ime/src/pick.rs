@@ -82,12 +82,12 @@ pub fn pad(text: &str, width: usize) -> String {
 }
 
 /// 要不要上色：不是终端、或者设了 `NO_COLOR`，就老老实实输出纯文本
-fn colors() -> bool {
+pub(crate) fn colors() -> bool {
     std::env::var_os("NO_COLOR").is_none() && io::stdout().is_terminal()
 }
 
 /// ANSI 上色（`code` 比如 `1` 加粗、`2` 变暗、`1;36` 亮青）
-fn style(text: &str, code: &str) -> String {
+pub(crate) fn style(text: &str, code: &str) -> String {
     if colors() {
         format!("\x1b[{code}m{text}\x1b[0m")
     } else {

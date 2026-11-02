@@ -34,7 +34,7 @@ pliers-engine  ←──┬──  pliers-popup  ──┐
 | `config.rs` | 读 TOML 配置 |
 | `fetch.rs` | 下载 + 解压（`pliers --init` / `pliers build pinyin` 装词库用） |
 
-这么切的好处：**输入方案、词库、候选框长相都能脱离合成器跑测试**（223 个单测），
+这么切的好处：**输入方案、词库、候选框长相都能脱离合成器跑测试**（229 个单测），
 协议层里剩下的全是"Wayland 要求这么做"的东西。想改哪块就只动哪块：
 
 * 加词 / 调词频 → 用 SQL 改词库，或者重新跑一遍 `pliers-dict`
@@ -224,9 +224,12 @@ Rust 里重排 —— 那样"权重最高的前 N 个"就得先按语料权重�
 
 **内容那半边**（`crates/pliers-popup`）：
 
-6. **字体去系统里找**：`fontdb` 扫 `/usr/share/fonts` 这些目录，优先 Noto Sans CJK SC
-   之类的常见中文字体；找不到就只画个空框，不报错。`PLIERS_FONT=/path/to/font.ttc`
-   可以指定一套。
+6. **字体去系统里找**：`fontdb` 先扫 `/usr/share/fonts` 这些常见目录，再补扫
+   fontconfig 配置（`/etc/fonts/fonts.conf` 和 `conf.d/*.conf`）里写的 `<dir>` ——
+   NixOS 的字体全在 `/nix/store`，不读这些配置就一套也找不到。找到之后优先
+   Noto Sans CJK SC 之类的常见中文字体，并且要求它真能画出「你」。
+   可变字体（NixOS 的 Noto CJK 就是 VF）默认实例常常是 Thin，代码里会把 `wght`
+   设成 400；`PLIERS_FONT=/path/to/font.ttc` 可以手动指定一套。
 7. **光栅化用 `ab_glyph`**（字符 → 轮廓 → 灰度图）。这里有个坑：它的 `PxScale` 是
    **行高**不是字号，而中文行高是字号的 1.4 倍上下，直接填字号字会小一圈 ——
    代码里先乘一个 `height_unscaled / units_per_em` 换算（`font.rs` 的 `ratio`）。
@@ -235,6 +238,7 @@ Rust 里重排 —— 那样"权重最高的前 N 个"就得先按语料权重�
 9. **画布就是一块 ARGB8888**：`wl_shm` 的 ARGB8888 在内存里是 **B,G,R,A**，而且 alpha
    是**预乘**的（50% 透明的白要存成 `(128,128,128,128)`，存成 `(255,255,255,128)`
    会亮一截）。圆角用"点到圆角矩形的距离"当覆盖率，天然抗锯齿（`paint.rs`）。
+   缓冲区宽高要向上取整到屏幕缩放的整数倍（`set_buffer_scale` 除回来才不会有拉伸的边）。
 
 不想开输入法就想看候选框长什么样：
 

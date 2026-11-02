@@ -101,8 +101,14 @@ fn home() -> PathBuf {
 
 /// 把路径里的 `~` 展开（TOML 里写 `~/.local/...` 比写死 /home/xxx 舒服）
 pub fn expand(path: &str) -> PathBuf {
+    expand_with_home(path, &home())
+}
+
+/// [`expand`] 的本体：家目录显式传进来，测试就不用去改全局的 `HOME`
+///（`cargo test` 是多线程跑的，改环境变量会跟别的测试打架）
+fn expand_with_home(path: &str, home: &Path) -> PathBuf {
     match path.strip_prefix("~/") {
-        Some(rest) => home().join(rest),
+        Some(rest) => home.join(rest),
         None => PathBuf::from(path),
     }
 }
@@ -1176,10 +1182,11 @@ mod tests {
 
     #[test]
     fn 波浪号会展开() {
-        // SAFETY: 测试是单线程跑这一段
-        unsafe { std::env::set_var("HOME", "/home/tester") };
-        assert_eq!(expand("~/a/b"), Path::new("/home/tester/a/b"));
-        assert_eq!(expand("/abs/path"), Path::new("/abs/path"));
+        // 不改进程的 HOME：cargo test 是多线程跑的，改全局环境变量会跟
+        // 「在线改配置_英文候选」那种顺带算默认路径的测试打架
+        let home = Path::new("/home/tester");
+        assert_eq!(expand_with_home("~/a/b", home), home.join("a/b"));
+        assert_eq!(expand_with_home("/abs/path", home), Path::new("/abs/path"));
     }
 
     #[test]

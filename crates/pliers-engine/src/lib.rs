@@ -484,6 +484,12 @@ impl Engine {
         self.english.as_ref().map(|words| words.source().label())
     }
 
+    /// 词库体检数字（词条数、单字、用户词频）—— `pliers status` 报数用。
+    /// 导入工具把总数写进了 `meta`，所以这里是读小抄，不会去扫 100 万行
+    pub fn dict_stats(&self) -> dict::Result<dict::Stats> {
+        self.dict.stats()
+    }
+
     /// 预编辑串原文（拼音 / 码）
     pub fn text(&self) -> &str {
         &self.buffer

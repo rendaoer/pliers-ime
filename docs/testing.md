@@ -5,13 +5,16 @@
 ## 单测：不需要合成器、不需要词库
 
 ```bash
-cargo test --workspace        # 全部 223 个
-cargo test -p pliers-engine   # 只看引擎（163 个）：切词、方案、词库、英文候选、按键状态机
-cargo test -p pliers-ime      # 命令行那套（13 个）：状态输出、配置校验、交互选择
-cargo test -p pliers-dict     # 导入工具（5 个）：rime 词库解析、权重缩放、格式不对要说清楚
-cargo test -p pliers-popup    # 候选框布局与像素（18 个）
+cargo test --workspace        # 全部 229 个
+cargo test -p pliers-engine   # 只看引擎（168 个）：切词、方案、词库、英文候选、按键状态机
+cargo test -p pliers-ime      # 命令行那套（21 个）：状态输出、配置校验、交互选择
+cargo test -p pliers-dict     # 导入工具（6 个）：rime 词库解析、权重缩放、格式不对要说清楚
+cargo test -p pliers-popup    # 候选框布局与像素（20 个）
 cargo test -p pliers-wayland  # 模式提示的超时、长按重复的节拍、命令 socket 一问一答（14 个）
 ```
+
+装好之后先跑 `pliers doctor`：它不碰合成器，只检查字体、词库、Wayland 环境、下载/解压工具，
+打不出字的时候比猜快。
 
 ## 跑起来
 
@@ -59,7 +62,7 @@ wl_compositor / wl_shm / zwp_input_method_v2 / zwp_virtual_keyboard_v1 的够用
 `wl_buffer.release`：
 
 ```bash
-./tools/run_mock_tests.sh                             # 28 个场景 + 2 项在线改配置检查，全绿才算过
+./tools/run_mock_tests.sh                             # 28 个场景 + 2 项在线改配置检查（共 30 项），全绿才算过
 ./tools/run_mock_tests.sh --png target/popup.png      # 顺便存一张候选框实拍
 ```
 

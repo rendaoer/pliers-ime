@@ -22,6 +22,7 @@ pliers --init          # 写配置 + 下载词库
 | --- | --- |
 | 新机器装一份能用的 | `pliers --init` |
 | 只装（或重装）拼音词库 | `pliers fetch pinyin [--force]` |
+| 直连 GitHub 慢，走镜像 | `pliers fetch pinyin --mirror ghproxy` |
 | 只更新英文词表 | `pliers fetch english` |
 | 两个预构建的都要 | `pliers fetch all`（也可以不写种类） |
 | 哪个旧更新哪个 | `pliers update`（先比 Release 上的 sha256，一样就跳过） |
@@ -38,6 +39,23 @@ https://github.com/rendaoer/pliers-ime/releases/latest/download/pinyin.db.zst
 ```
 
 `releases/latest/download/` 永远指向最新 Release 里的同名文件，所以这个地址不用跟着版本号改。
+
+### 下载慢 / 下不动
+
+默认是**直连优先，失败自动试内置镜像**（`ghproxy`、`gh-proxy`），每个源都断了能续传。
+想直接走镜像：
+
+```bash
+pliers fetch pinyin --mirror ghproxy
+PLIERS_MIRROR=ghproxy pliers fetch pinyin       # 等价的写法（环境变量）
+pliers fetch pinyin --mirror https://你的加速前缀/
+pliers fetch pinyin --mirror official           # 只用 GitHub
+```
+
+走镜像也会校验：每个 Release 资产旁边有一个 `.sha256`（压缩包的指纹），下完先对指纹再解压，
+对不上就删掉、换下一个源 —— 镜像转发错了、下坏了都不会把坏库装进去。没装
+`sha256sum`/`shasum` 时这一步会跳过（命令行会提示一句）。
+
 换源（公司镜像、自己搭的服务器、本地文件都行）：
 
 ```bash
@@ -45,8 +63,11 @@ PLIERS_PINYIN_URL=https://内网镜像/pinyin.db.zst pliers fetch pinyin
 pliers fetch pinyin --url file:///mnt/u盘/pinyin.db.zst      # 离线装
 ```
 
+`--url` 是"就试这一个"，不参与镜像兜底。
+
 下载落在 `<目标>.part`，解压到 `<目标>.unpacked`，最后一步才改名 —— 中途断网不会把
-已经装好的词库弄坏。装完它会打开来验一遍（表缺了、音节表空了都会报错），并打印词条数。
+已经装好的词库弄坏；`.part` 还在的话，重跑同一条命令会**接着下**。装完它会打开来验一遍
+（表缺了、音节表空了都会报错），并打印词条数。
 
 ## 默认的词库是什么
 

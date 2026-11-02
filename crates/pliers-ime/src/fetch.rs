@@ -64,6 +64,74 @@ const ASSETS: &[Asset] = &[
     },
 ];
 
+/// 国内常用的 GitHub 加速前缀：直连 GitHub 下不动时自动兜底，
+/// 也可以用 `--mirror ghproxy` / `PLIERS_MIRROR=ghproxy` 主动挑一个。
+///
+/// 走的还是 Release 上同一个文件：下完会用旁边的 `.sha256` 校验，
+/// 镜像转发的东西对不上就不装
+const MIRRORS: &[(&str, &str)] = &[
+    ("gh-proxy", "https://gh-proxy.com/"),
+    ("ghproxy", "https://ghproxy.net/"),
+];
+
+/// 用不用镜像、用哪个
+enum Mirror {
+    /// 直连优先，失败再试内置的几个
+    Auto,
+    /// 只用官方地址
+    Official,
+    /// 这个前缀优先（用户点名要的），官方地址留作最后兜底
+    Prefix(String),
+}
+
+fn parse_mirror(value: Option<&str>) -> Result<Mirror, String> {
+    match value.map(str::trim) {
+        None | Some("") | Some("auto") => Ok(Mirror::Auto),
+        Some("official" | "none" | "off") => Ok(Mirror::Official),
+        Some(name) => {
+            if let Some((_, prefix)) = MIRRORS.iter().find(|(known, _)| *known == name) {
+                return Ok(Mirror::Prefix((*prefix).to_string()));
+            }
+            if name.contains("://") {
+                let mut prefix = name.to_string();
+                if !prefix.ends_with('/') {
+                    prefix.push('/');
+                }
+                return Ok(Mirror::Prefix(prefix));
+            }
+            Err(format!(
+                "不认识的镜像 {name:?}（可以写这些）：\n\
+                 \x20     ghproxy / gh-proxy   内置的加速镜像\n\
+                 \x20     auto                直连优先、失败再试镜像（默认）\n\
+                 \x20     official            只用 GitHub\n\
+                 \x20     https://…/          你自己的加速前缀（后面直接拼 GitHub 地址）"
+            ))
+        }
+    }
+}
+
+/// 这个资产要按什么顺序试哪些地址
+fn candidate_urls(asset: &Asset, explicit: Option<&str>, mirror: &Mirror) -> Vec<String> {
+    // `--url` / 环境变量是用户明确指定的：只试它，不偷偷换
+    if let Some(url) = explicit {
+        return vec![url.to_string()];
+    }
+    let official = asset.url.to_string();
+    match mirror {
+        Mirror::Official => vec![official],
+        Mirror::Prefix(prefix) => vec![format!("{prefix}{official}"), official],
+        Mirror::Auto => {
+            let mut urls = vec![official.clone()];
+            urls.extend(
+                MIRRORS
+                    .iter()
+                    .map(|(_, prefix)| format!("{prefix}{official}")),
+            );
+            urls
+        }
+    }
+}
+
 /// `pliers fetch <pinyin|english|all> [--url 地址] [--force]`
 ///
 /// 想拿的那几种（什么都不写跟 `all` 一样）。不认识的名字报错里列出能用的
@@ -108,6 +176,8 @@ fn targets(what: &str) -> Result<Vec<&'static Asset>, String> {
 pub fn command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let url = value_of(args, "--url");
     let force = has(args, "--force");
+    let mirror_arg = value_of(args, "--mirror").or_else(|| std::env::var("PLIERS_MIRROR").ok());
+    let mirror = parse_mirror(mirror_arg.as_deref())?;
     let assets = targets(kind(args))?;
     if url.is_some() && assets.len() > 1 {
         return Err(
@@ -121,8 +191,8 @@ pub fn command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load()?;
     let mut failed = false;
     for asset in assets {
-        let url = url.clone().or_else(|| env_url(asset));
-        if let Err(e) = fetch_one(asset, url.as_deref(), &config, force) {
+        let explicit = url.clone().or_else(|| env_url(asset));
+        if let Err(e) = fetch_one(asset, explicit.as_deref(), &mirror, &config, force) {
             eprintln!("pliers: {}没装上：{e}", asset.label);
             failed = true;
         }
@@ -135,10 +205,13 @@ pub fn command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// 装某一个种类（`pliers --init` 这类调用方用；`url` 不给就按环境变量 / 内置默认）
+/// 装某一个种类（`pliers --init` 这类调用方用）。
+///
+/// `url` 不给就按环境变量 / 内置地址；`mirror` 是 `--mirror` 的值（None = 读环境变量）
 pub fn install(
     name: &str,
     url: Option<&str>,
+    mirror: Option<&str>,
     force: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let asset = ASSETS
@@ -146,26 +219,34 @@ pub fn install(
         .find(|asset| asset.name == name)
         .ok_or_else(|| format!("没有这个种类：{name}"))?;
     let url = url.map(str::to_string).or_else(|| env_url(asset));
+    let mirror_arg = mirror
+        .map(str::to_string)
+        .or_else(|| std::env::var("PLIERS_MIRROR").ok());
+    let mirror = parse_mirror(mirror_arg.as_deref())?;
     let config = Config::load()?;
-    fetch_one(asset, url.as_deref(), &config, force)
+    fetch_one(asset, url.as_deref(), &mirror, &config, force)
 }
 
 /// `pliers update [--force]`：两个都更新到最新，已经一样的不重复下载
 pub fn update(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let force = has(args, "--force");
+    let mirror_arg = value_of(args, "--mirror").or_else(|| std::env::var("PLIERS_MIRROR").ok());
+    let mirror = parse_mirror(mirror_arg.as_deref())?;
     let config = Config::load()?;
     println!("看看 Release 上是什么版本…");
     let mut changed = 0;
     for asset in ASSETS {
         let dest = (asset.dest)(&config);
-        let remote = match remote_sha(asset) {
+        let explicit = env_url(asset);
+        let urls = candidate_urls(asset, explicit.as_deref(), &mirror);
+        let remote = match remote_sha_any(&urls) {
             Some(sha) => sha,
             None => {
                 println!(
                     "  {}：拿不到 Release 上的指纹（离线？），直接下载试试",
                     asset.label
                 );
-                fetch_one(asset, env_url(asset).as_deref(), &config, true)?;
+                fetch_one(asset, explicit.as_deref(), &mirror, &config, true)?;
                 changed += 1;
                 continue;
             }
@@ -174,7 +255,7 @@ pub fn update(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             println!("  {}：已经是最新的（{}）", asset.label, short(&remote));
             continue;
         }
-        fetch_one(asset, env_url(asset).as_deref(), &config, true)?;
+        fetch_one(asset, explicit.as_deref(), &mirror, &config, true)?;
         changed += 1;
     }
     println!();
@@ -186,49 +267,85 @@ pub fn update(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// 这个资产的下载地址：环境变量优先（`PLIERS_PINYIN_URL` / `PLIERS_ENGLISH_URL`），
-/// 否则内置默认（`latest/download/` 永远指向最新 Release 里的同名资产）
+/// 用户明确指定的地址（`PLIERS_PINYIN_URL` / `PLIERS_ENGLISH_URL` 或老名字）。
+/// 没设就是 None —— 由 [`candidate_urls`] 决定官方 + 镜像的顺序
 fn env_url(asset: &Asset) -> Option<String> {
-    let from_env = std::env::var(asset.url_env).ok().or_else(|| {
+    std::env::var(asset.url_env).ok().or_else(|| {
         asset
             .url_env_legacy
             .and_then(|name| std::env::var(name).ok())
-    });
-    from_env.or_else(|| Some(asset.url.to_string()))
+    })
 }
 
-/// 下载一个资产。`url` 不给就用内置那个；`force = false` 时本地已经有就不动
+/// 下载一个资产。
+///
+/// `explicit` 是用户明确指定的地址；`mirror` 决定直连/镜像的尝试顺序；
+/// `force = false` 时本地已经有就不动。下载完用 Release 上的 `.sha256` 校验，
+/// 一个源不行就自动换下一个
 fn fetch_one(
     asset: &Asset,
-    url: Option<&str>,
+    explicit: Option<&str>,
+    mirror: &Mirror,
     config: &Config,
     force: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let url = url.unwrap_or(asset.url);
     let dest = (asset.dest)(config);
     if dest.exists() && !force {
         println!("{}：{}（已有，没动它）", asset.label, dest.display());
         println!("  想覆盖加 --force，或者用 pliers update");
         return Ok(());
     }
-    println!("{}：下载 {url}", asset.label);
+    let urls = candidate_urls(asset, explicit, mirror);
+    println!("{}：", asset.label);
     println!("  目标：{}", dest.display());
-    let sha = remote_sha_of(url);
-    pliers_engine::fetch::install(url, &dest).map_err(|e| {
-        format!(
-            "{e}\n\n\
-             下载不到也没关系：\n\
-             \x20 拼音词库可以自己构建：pliers build pinyin（要 pliers-dict）\n\
-             \x20 英文词表没装的话输入法会用二进制里那份兜底\n\
-             或者手动下载后放到：{}",
-            dest.display()
-        )
-    })?;
-    if let Some(sha) = &sha {
-        write_marker(&dest, sha);
+    if urls.len() > 1 && asset.name == "pinyin" {
+        println!("  （直连慢会自动换镜像；想直接走镜像加 --mirror ghproxy，断了重跑会接着下）");
     }
-    println!("  {} 装好了（{}）", asset.label, describe(&dest));
-    Ok(())
+    // 指纹先拿：拿不到就退化成"不校验"，但会一直试着从别的源拿
+    let sha = remote_sha_any(&urls);
+    if sha.is_none() && urls.iter().any(|url| url.starts_with("http")) {
+        eprintln!("pliers: 拿不到 Release 上的 .sha256，这次没法校验下载内容");
+    }
+
+    let mut last_error = String::new();
+    for (index, url) in urls.iter().enumerate() {
+        if urls.len() > 1 {
+            println!("  源 {}：{url}", index + 1);
+        } else {
+            println!("  地址：{url}");
+        }
+        match pliers_engine::fetch::install_checked(url, &dest, sha.as_deref()) {
+            Ok(()) => {
+                if let Some(sha) = &sha {
+                    write_marker(&dest, sha);
+                }
+                println!("  {} 装好了（{}）", asset.label, describe(&dest));
+                return Ok(());
+            }
+            Err(e) => {
+                // 只报第一行：后面的"怎么办"等所有源都失败了再统一给
+                let first = e.lines().next().unwrap_or("下载失败");
+                if urls.len() > 1 {
+                    println!("  这个源不行：{first}");
+                }
+                last_error = e;
+            }
+        }
+    }
+    Err(format!(
+        "{last_error}\n\n\
+         所有下载源都试过了（{} 个）。可以：\n\
+         \x20 换个镜像：pliers fetch {} --mirror ghproxy\n\
+         \x20 或者用自己的地址：pliers fetch {} --url <地址>\n\
+         \x20 拼音词库也可以自己构建：pliers build pinyin（要 pliers-dict）\n\
+         \x20 英文词表没装的话输入法会用二进制里那份兜底\n\
+         手动下载后放到：{}",
+        urls.len(),
+        asset.name,
+        asset.name,
+        dest.display()
+    )
+    .into())
 }
 
 /// 本地这份是不是就是 Release 上那个版本（比 sha256 小抄）
@@ -236,10 +353,10 @@ fn is_current(dest: &Path, remote: &str) -> bool {
     matches!(read_marker(dest), Some(local) if local.trim() == remote.trim())
 }
 
-/// 下载地址旁边的 `.sha256`（构建时算的压缩包指纹）。
+/// 按顺序从这些候选地址里拿第一个能拿到的 `.sha256`（构建时算的压缩包指纹）。
 /// 拿不到就算了 —— 调用方会当成"不知道，直接下载"
-fn remote_sha(asset: &Asset) -> Option<String> {
-    remote_sha_of(&env_url(asset)?)
+fn remote_sha_any(urls: &[String]) -> Option<String> {
+    urls.iter().find_map(|url| remote_sha_of(url))
 }
 
 fn remote_sha_of(url: &str) -> Option<String> {
@@ -342,5 +459,47 @@ mod tests {
             assert!(asset.url.starts_with("https://"), "{}", asset.url);
             assert!(asset.url.ends_with(".zst"), "{}", asset.url);
         }
+    }
+
+    #[test]
+    fn 镜像几种写法() {
+        assert!(matches!(parse_mirror(None), Ok(Mirror::Auto)));
+        assert!(matches!(parse_mirror(Some("auto")), Ok(Mirror::Auto)));
+        assert!(matches!(
+            parse_mirror(Some("official")),
+            Ok(Mirror::Official)
+        ));
+        let Mirror::Prefix(prefix) = parse_mirror(Some("ghproxy")).unwrap() else {
+            panic!("点名的镜像该是 Prefix");
+        };
+        assert_eq!(prefix, "https://ghproxy.net/");
+        // 自己的加速前缀：没写结尾的 / 就补上
+        let Mirror::Prefix(prefix) = parse_mirror(Some("https://my.mirror")).unwrap() else {
+            panic!("自定义前缀该是 Prefix");
+        };
+        assert_eq!(prefix, "https://my.mirror/");
+        assert!(parse_mirror(Some("不认识")).is_err());
+    }
+
+    #[test]
+    fn 直连优先_失败再试镜像() {
+        let urls = candidate_urls(&ASSETS[0], None, &Mirror::Auto);
+        assert_eq!(urls[0], ASSETS[0].url);
+        assert!(urls.len() > 1, "默认要带镜像兜底");
+        assert!(urls[1].starts_with("https://gh-proxy.com/"), "{urls:?}");
+        // 用户明确给了地址：只试它，不偷偷换
+        let urls = candidate_urls(&ASSETS[0], Some("file:///tmp/a.db"), &Mirror::Auto);
+        assert_eq!(urls, vec!["file:///tmp/a.db".to_string()]);
+        // 点名的镜像排最前，官方留作最后兜底
+        let urls = candidate_urls(
+            &ASSETS[0],
+            None,
+            &Mirror::Prefix("https://my.mirror/".to_string()),
+        );
+        assert_eq!(urls[0], format!("https://my.mirror/{}", ASSETS[0].url));
+        assert_eq!(urls[1], ASSETS[0].url);
+        // 只要官方
+        let urls = candidate_urls(&ASSETS[1], None, &Mirror::Official);
+        assert_eq!(urls, vec![ASSETS[1].url.to_string()]);
     }
 }

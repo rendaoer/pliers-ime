@@ -44,11 +44,12 @@ fn fetch_corpus(name: &str, dest: &Path) -> Result<(), String> {
     Err(format!("下载失败：{last}"))
 }
 
-/// `pliers --init [--force] [--build] [--url <地址>]`
+/// `pliers --init [--force] [--build] [--url <地址>] [--mirror <镜像>]`
 pub fn init(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let force = has(args, "--force");
     let build_it = has(args, "--build");
     let url = value_of(args, "--url");
+    let mirror = value_of(args, "--mirror");
 
     // ---- 配置 ----
     let config = pliers_engine::config::config_path();
@@ -81,11 +82,21 @@ pub fn init(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if build_it {
         return build(false);
     }
-    crate::fetch::install("pinyin", url.as_deref(), true)?;
+    println!("拼音词库大约 27 MB（解开 86 MB），下载中 … 断了就重跑同一条命令，会接着下");
+    crate::fetch::install("pinyin", url.as_deref(), mirror.as_deref(), true)?;
     println!();
     describe_path(&dest)?;
     println!();
-    println!("搞定 —— 重启输入法就生效（词库是启动时打开的）");
+    println!(
+        "搞定 —— 现在跑 {} 就能开始打字（词库是启动时打开的）",
+        crate::bold("pliers")
+    );
+    println!(
+        "{}",
+        crate::dim(
+            "  想让它在登录后自动启动，就把这条命令放进合成器的启动项（niri/sway/hyprland 都是 exec = pliers）"
+        )
+    );
     Ok(())
 }
 

@@ -428,7 +428,12 @@ impl Dict {
     }
 
     /// 数一下这个库里有多少东西 —— 刚下载完 / 刚导入完拿它验一验，
-    /// `pliers status pinyin` 也用它报数
+    /// `pliers status pinyin` 也用它报数。
+    ///
+    /// **不要每次都去 `count(*)`**：100 万行的词库上光这一条就要 4 秒多，
+    /// 每次 `pliers status` 都扫一遍，命令行会卡得像死机。导入工具早就把
+    /// `words` / `singles` / `schemes` 写进 `meta` 了，这里先读小抄；
+    /// 只有老库（meta 里没这些键）才退回全表扫。
     pub fn stats(&self) -> Result<Stats> {
         let count = |sql: &str| -> Result<i64> {
             let mut stmt = pollster::block_on(self.conn.prepare(sql))?;
@@ -439,28 +444,73 @@ impl Dict {
                 .copied()
                 .ok_or_else(|| "不是数字".into())
         };
-        let mut schemes = Vec::new();
-        {
-            let mut stmt = pollster::block_on(self.conn.prepare(
-                "SELECT scheme, count(*) FROM word GROUP BY scheme ORDER BY count(*) DESC",
-            ))?;
-            let mut rows = pollster::block_on(stmt.query(()))?;
-            while let Some(row) = pollster::block_on(rows.next())? {
-                if let (turso::Value::Text(scheme), turso::Value::Integer(n)) =
-                    (row.get_value(0)?, row.get_value(1)?)
-                {
-                    schemes.push((scheme, n));
-                }
+        // 用户数据在 user.db 里，只有几十 KB —— 这里 count 一下不心疼
+        let user_words = count("SELECT count(*) FROM user.user_word")?;
+        let user_phrases = count("SELECT count(*) FROM user.user_phrase")?;
+
+        let meta_number = |key: &str| -> Option<i64> {
+            self.meta(key).and_then(|value| value.trim().parse().ok())
+        };
+        let words = meta_number("words");
+        let singles = meta_number("singles");
+        let schemes = match self.scheme_counts_from_meta() {
+            Some(schemes) => schemes,
+            // 有总数、meta 里却没写 schemes：说明是这一版导入工具写的，只是没写多方案小抄。
+            // 拼音库没写 `scheme`（默认就是 pinyin），码表库写了
+            None if words.is_some() => {
+                let name = self.meta("scheme").unwrap_or_else(|| "pinyin".to_string());
+                vec![(name, words.unwrap_or(0))]
             }
-        }
+            // 更老的布局（用户数据也混在词库里那种）：老老实实扫一遍
+            None => self.scan_schemes()?,
+        };
+        let words = match words {
+            Some(words) => words,
+            None => count("SELECT count(*) FROM word")?,
+        };
+        let singles = match singles {
+            Some(singles) => singles,
+            None => count("SELECT count(*) FROM word WHERE length(text) = 1")?,
+        };
         Ok(Stats {
-            words: count("SELECT count(*) FROM word")?,
-            singles: count("SELECT count(*) FROM word WHERE length(text) = 1")?,
-            phrasal: count("SELECT count(*) FROM word WHERE length(text) > 1")?,
-            user_words: count("SELECT count(*) FROM user.user_word")?,
-            user_phrases: count("SELECT count(*) FROM user.user_phrase")?,
+            words,
+            singles,
+            phrasal: (words - singles).max(0),
+            user_words,
+            user_phrases,
             schemes,
         })
+    }
+
+    /// `meta.schemes` 里的小抄：`pinyin=996446\twubi=2`。没有就返回 None
+    fn scheme_counts_from_meta(&self) -> Option<Vec<(String, i64)>> {
+        let raw = self.meta("schemes")?;
+        let parsed: Vec<(String, i64)> = raw
+            .split('\t')
+            .filter_map(|entry| {
+                let (name, count) = entry.rsplit_once('=')?;
+                Some((name.to_string(), count.trim().parse().ok()?))
+            })
+            .collect();
+        (!parsed.is_empty()).then_some(parsed)
+    }
+
+    /// 全表扫一遍每种方案各多少行（只有老库会走到这儿）
+    fn scan_schemes(&self) -> Result<Vec<(String, i64)>> {
+        let mut schemes = Vec::new();
+        let mut stmt =
+            pollster::block_on(self.conn.prepare(
+                "SELECT scheme, count(*) FROM word GROUP BY scheme ORDER BY count(*) DESC",
+            ))?;
+        let mut rows = pollster::block_on(stmt.query(()))?;
+        while let Some(row) = pollster::block_on(rows.next())? {
+            if let (turso::Value::Text(scheme), turso::Value::Integer(n)) =
+                (row.get_value(0)?, row.get_value(1)?)
+            {
+                schemes.push((scheme, n));
+            }
+        }
+        Ok(schemes)
     }
 }
 
@@ -781,6 +831,32 @@ mod tests {
             3
         );
         assert_eq!(words(dict.exact("pinyin", "ni", 2)).len(), 2);
+    }
+
+    #[test]
+    fn 统计优先读导入时写下的_meta() {
+        let dict = sample_dict();
+        // 真库导入时会把总数写进 meta（100 万行上 count(*) 要 4 秒多）。
+        // 这里故意写一组跟真实行数对不上的数：stats 该信 meta，而不是去扫表
+        for (key, value) in [
+            ("words", "999"),
+            ("singles", "9"),
+            ("schemes", "pinyin=999\twubi=1"),
+        ] {
+            pollster::block_on(dict.conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+                turso::params![key, value],
+            ))
+            .unwrap();
+        }
+        let stats = dict.stats().unwrap();
+        assert_eq!(stats.words, 999);
+        assert_eq!(stats.singles, 9);
+        assert_eq!(stats.phrasal, 990, "phrasal = words - singles");
+        assert_eq!(
+            stats.schemes,
+            vec![("pinyin".to_string(), 999), ("wubi".to_string(), 1)]
+        );
     }
 
     #[test]

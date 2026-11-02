@@ -23,12 +23,16 @@
 //! 一堆 `xiang` 的字（坏事）
 
 /// 一次按键最多查几个码。切分分支 × 补全数量可能爆掉，得有个上限：
-/// 每个码是一次数据库查询（60µs 上下），32 个也就 2ms
-pub const MAX_CODES: usize = 32;
+/// 每个码是一次数据库查询（60µs 上下），48 个也就 3ms。
+///
+/// 为什么是 48 而不是更小：只打一个字母（`s`）时要把**所有** s 开头的音节都试一遍
+/// （sa/se/si/su…、sha/shan/shang/…、shi…），少一个就可能漏掉「是」这种最常用的字。
+/// 全部音节最多三十几个，48 留足了余量。
+pub const MAX_CODES: usize = 48;
 /// 最多考虑几种切法（`xian` 那种歧义一般只有两三种）
 const MAX_SEGMENTATIONS: usize = 4;
-/// 一个半截音节最多补全成几个音节
-const MAX_COMPLETIONS: usize = 24;
+/// 一个半截音节最多补全成几个音节（够覆盖任何一个字母开头的全部音节）
+const MAX_COMPLETIONS: usize = 48;
 
 /// 这些"感叹词音节"很少落在分段点上（`nihaom` 不该切成 `ni hao m`）
 const NOT_A_SEGMENT_TAIL: &[&str] = &["m", "n", "ng", "hm", "hng"];
@@ -335,6 +339,20 @@ mod tests {
         assert!(codes.contains(&"na".to_string()), "{codes:?}");
         assert!(codes.contains(&"nuo".to_string()), "{codes:?}");
         assert!(codes.len() <= MAX_CODES);
+    }
+
+    #[test]
+    fn 单字母要覆盖全部同首字母音节() {
+        // 以前补全只取 24 个、而且按长度从长到短排，s 开头的音节里
+        // shi/shang 这些会被挤出去 —— 打一个 s 连「是」「上」都看不见
+        let codes = segmenter().lookup_codes("s");
+        for want in ["shi", "shang", "sheng", "si", "shou"] {
+            assert!(codes.contains(&want.to_string()), "少了 {want}：{codes:?}");
+        }
+        // z 开头的常用音节也一样
+        let codes = segmenter().lookup_codes("z");
+        assert!(codes.contains(&"zhong".to_string()), "{codes:?}");
+        assert!(codes.contains(&"zi".to_string()), "{codes:?}");
     }
 
     #[test]

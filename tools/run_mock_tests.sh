@@ -9,6 +9,9 @@
 set -u
 cd "$(dirname "$0")/.."
 
+# mock 跑的是真 DBus 会话：别让每个场景都往桌面的 tray 里挂一个图标
+export PLIERS_NO_TRAY=1
+
 # 参数写法跟 shell 无关（${VAR=x cmd} 这种前缀在 zsh/bash/nushell 里写法不一样）：
 #   --dict <路径>   词库。不给就依次找 target/pinyin.db、~/.local/share/pliers/pinyin.db，
 #                   也认 PLIERS_PINYIN 环境变量。
@@ -104,8 +107,32 @@ run_control() {
         esac
     }
 
+    raw() { # raw <输出里该出现的内容> <socket 命令>：测没有 CLI 动词的内部命令
+        local want="$1"; shift
+        local out
+        out=$(printf '%s\n' "$*" | nc -U "$ctl" 2>&1)
+        case "$out" in
+            *"$want"*) echo "        \$ $* → 有「$want」✓" ;;
+            *) echo "        \$ $* → 没有「$want」：$out"; bad=1 ;;
+        esac
+    }
+
     # 输出的排版在命令行这边：一项一行
     say "全拼（整句候选开）" status
+
+    # 状态栏那条路：mode 只回一行，toggle 切一下再切回来
+    say "中" mode
+    say "切到英文" toggle
+    say "英" mode
+    say "切到中文" toggle
+    say "中" mode
+    say "英" mode english
+    say "中" mode chinese
+    raw "changed=dict.max_candidates = 7" save dict.max_candidates 7
+    say "一页 7 个" status
+    # 上面的交互测试假设初始是 9（从 9 往下挪一格回到 1），先恢复
+    raw "changed=dict.max_candidates = 9" save dict.max_candidates 9
+    say "一页 9 个" status
     say "重新读了配置文件" reload
     say "改好了：scheme.kind = double-pinyin" set scheme.kind double-pinyin
     say "改好了：scheme.layout = flypy" set scheme.layout flypy

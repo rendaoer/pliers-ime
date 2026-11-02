@@ -164,6 +164,22 @@ pliers-dict --english 词表.txt --out ~/.local/share/pliers/english.db
 词表的来历（上游 FrequencyWords + 我们那份开发词）和重新生成的办法见
 [`crates/pliers-engine/data/README.md`](../crates/pliers-engine/data/README.md)。
 
+## 托盘菜单样式
+
+右键菜单默认是分组子菜单（`grouped`）。Noctalia 的二级菜单是向下展开的独立弹层，
+没有“返回上一级”，翻起来别扭；想一次改多项可以切成一层平铺（`flat`）：
+
+```toml
+[tray]
+menu = "grouped"          # grouped（分组子菜单，好看）| flat（一层平铺，好翻）
+```
+
+也可以不改文件，直接点菜单顶部那行「切换为平铺菜单」，或者：
+
+```bash
+pliers config set tray.menu flat      # 写进配置文件，跑着的实例会自己重读
+```
+
 ## 跑着的时候改配置（不用重启）
 
 输入法起来之后会在 `$XDG_RUNTIME_DIR/pliers.sock` 上听命令，另开一个终端就能问它、改它：
@@ -176,6 +192,9 @@ pliers config set scheme.layout flypy      # 改**配置文件**（保留注释�
 pliers config set                         # 交互模式，改的也是配置文件
 pliers config show | edit                 # 看内容 / 用 $EDITOR 打开（路径看 pliers path config）
 pliers reload                             # 手动让它重读一遍配置文件
+pliers mode                               # 只打印「中」/「英」（状态栏、脚本用）
+pliers mode chinese|english               # 直接定模式（托盘右键菜单也走这条）
+pliers toggle                             # 切一下中英文（跟 Ctrl+空格 一样）
 ```
 
 **`set` 和 `config set` 是两条路**，想清楚再敲：
@@ -186,8 +205,8 @@ pliers reload                             # 手动让它重读一遍配置文件
 | `pliers config set …` | 写进 `~/.config/pliers/config.toml` | 不需要，**输入法没跑也能改** | 不会失效 | 定下来（写的时候注释、空行、行尾注释都留着） |
 
 （`pliers fetch …` / `pliers build …` / `pliers status …` / `pliers path` 这些都不需要实例在跑；
-只有 `set` 和 `reload` 是跟**正在跑的那个进程**说话 —— `pliers status` 没实例时照样把两种字典
-报出来，只是最上面那行会写「没在跑」。）
+只有 `set`、`reload`、`mode`、`toggle` 是跟**正在跑的那个进程**说话 —— `pliers status` 没实例时
+照样把两种字典报出来，只是最上面那行会写「没在跑」。）
 
 没在跑却敲了 `pliers set …` 的话，它会说「连不上正在跑的输入法」并顺手提示你用
 `pliers config set …`（`pliers reload` 也一样要实例 —— 没实例时"现状"就是配置文件本身，
@@ -286,3 +305,7 @@ $ pliers set
 
 `~` 在两边都会展开（包括传给 `cargo` / `curl` 这种外部命令的参数），`mkdir` 在 Nushell 里
 本身就会建中间目录，不用 `-p`。
+
+托盘图标默认开（`[engine]` 里没有开关）；不想要就 `PLIERS_NO_TRAY=1 pliers`。mock 测试
+也是这么关的，免得每跑一个场景都往真桌面的 tray 里挂一个图标。托盘右键菜单里改的方案/开关
+会**写回配置文件**（跟 `pliers config set` 一样），不是只改内存。

@@ -156,6 +156,45 @@ impl Painter {
         self.draw(vec![self.item("", label, true, scale)], None, scale)
     }
 
+    /// 画一个**单色**托盘图标：透明底 + 居中一个**加粗**的字 + 一圈深色描边。
+    ///
+    /// 22px 的汉字用正常字重会显得发虚，所以这里用多画几遍的方式合成加粗
+    ///（偏移半像素，ab_glyph 的抗锯齿会把它叠实）。描边让深/浅 bar 上都看得见；
+    /// 不做彩色底 —— 中/英靠字区分，颜色留给桌面主题。
+    pub fn render_glyph(&self, text: &str, size: i32, fg: [u8; 4]) -> Image {
+        let size = size.clamp(8, 256);
+        let side = size as f32;
+        let mut canvas = Canvas::new(size, size);
+        if let Some(font) = &self.font {
+            let font_size = side * 0.80;
+            let rasters = font.glyphs(text, font_size);
+            let width = font.width(text, font_size);
+            let (top, bottom) = ink_bounds(&rasters);
+            let baseline = (side - (bottom - top)) / 2.0 - top;
+            let x = (side - width) / 2.0;
+            let unit = (side / 22.0).max(1.0);
+            let outline = unit;
+            // 先铺一圈深色描边（四个方向），再叠 2x2 的加粗字
+            for (dx, dy) in [
+                (outline, 0.0),
+                (-outline, 0.0),
+                (0.0, outline),
+                (0.0, -outline),
+            ] {
+                canvas.glyphs(&rasters, x + dx, baseline + dy, [0x00, 0x00, 0x00, 0x90]);
+            }
+            let bold = unit * 0.55;
+            for (dx, dy) in [(0.0, 0.0), (bold, 0.0), (0.0, bold), (bold, bold)] {
+                canvas.glyphs(&rasters, x + dx, baseline + dy, fg);
+            }
+        }
+        Image {
+            width: size,
+            height: size,
+            pixels: canvas.pixels,
+        }
+    }
+
     /// 把排好版的候选画成像素。`page` 有值就在右下角画个 "第几页/共几页"
     fn draw(&self, items: Vec<Item>, page: Option<(usize, usize)>, scale: f32) -> Image {
         let px = |logical: f32| logical * scale;
@@ -379,6 +418,21 @@ mod tests {
         let image = Painter::new().render(&Preedit::default(), 1);
         assert_eq!(image.width, 0);
         assert!(image.pixels.is_empty());
+    }
+
+    #[test]
+    fn 托盘图标是透明底的单色字() {
+        let painter = Painter::new();
+        let image = painter.render_glyph("中", 22, [0xE8, 0xE8, 0xE8, 0xFF]);
+        assert_eq!((image.width, image.height), (22, 22));
+        assert_eq!(image.pixels.len(), 22 * 22 * 4);
+        assert_eq!(at(&image, 0, 0)[3], 0, "没有底色，角落是透明的");
+        if painter.has_font() {
+            assert!(
+                image.pixels.as_chunks::<4>().0.iter().any(|p| p[3] > 0),
+                "中间该有字"
+            );
+        }
     }
 
     #[test]

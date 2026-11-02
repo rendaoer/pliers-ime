@@ -13,6 +13,13 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/rendaoer/pliers-ime"
 keywords = ["input-method", "wayland", "ime", "pinyin", "chinese"]
 
+# 开发构建也开优化。输入法每敲一个键都要切词 + 查好几次库，opt-level=0 时
+# 实测一次按键 40–90ms（`cargo run` 起来会觉得"打字发涩"），开到 2 之后
+# 跟 release 差不多（3–6ms）。代价只是 cargo build / cargo test 慢一点 ——
+# 依赖树里 turso 是大头，日常改代码的增量编译还是几秒。
+[profile.dev]
+opt-level = 2
+
 # 发布版的编译选项。默认的 release 会留着符号表、也不做跨 crate 优化，
 # 实测（turso 这个依赖树）：22.9 MB → 13.9 MB
 #   strip          去掉符号表，省 ~4.6 MB（二进制里没人看那些名字）

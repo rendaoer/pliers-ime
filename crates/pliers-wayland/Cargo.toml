@@ -14,3 +14,6 @@ pliers-engine.workspace = true
 pliers-popup.workspace = true
 # poll(2)：主循环要同时等 Wayland socket 和命令 socket
 libc = "0.2"
+# 托盘图标（StatusNotifierItem）：Noctalia / waybar 这类 tray 会自动收。
+# 只用 blocking 那套 API，不带 tokio。
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }

@@ -1,6 +1,7 @@
 {
+  description = "pliers：一个从零手写的 Wayland 中文输入法";
+
   inputs = {
-    naersk.url = "github:nix-community/naersk";
     nixpkgs.url = "https://channels.nixos.org/nixpkgs-unstable/nixexprs.tar.zst";
     utils.url = "github:numtide/flake-utils";
     rust-overlay = {
@@ -14,7 +15,6 @@
       self,
       nixpkgs,
       utils,
-      naersk,
       rust-overlay,
     }:
     utils.lib.eachDefaultSystem (
@@ -24,6 +24,7 @@
           inherit system;
           overlays = [ rust-overlay.overlays.default ];
         };
+        lib = pkgs.lib;
 
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
           extensions = [
@@ -31,56 +32,107 @@
             "rust-analyzer"
           ];
         };
-
-        naersk-lib = pkgs.callPackage naersk {
+        rustPlatform = pkgs.makeRustPlatform {
           cargo = rustToolchain;
           rustc = rustToolchain;
         };
 
-        isLinux = pkgs.lib.strings.hasInfix "linux" system;
+        version = (lib.importTOML ./Cargo.toml).workspace.package.version;
 
-        # 编译期需要:头文件、.pc 文件、clang 链接器
-        nativeDeps = with pkgs; [
-          pkg-config
-          clang
-          lld
-        ];
+        # 一个包装两个可执行文件：`pliers` 和 `pliers-dict`。
+        # `pliers build pinyin` / `build wubi` 会在自己旁边找 `pliers-dict`，
+        # 所以两个必须在同一个 $out/bin 里（拆成两个包反而会找不到）。
+        pliers = rustPlatform.buildRustPackage {
+          pname = "pliers";
+          inherit version;
+          # 只把编译需要的东西放进源码树：文档/截图/contrib 改动不该让整个包重编
+          src = lib.fileset.toSource {
+            root = ./.;
+            fileset = lib.fileset.unions [
+              ./Cargo.toml
+              ./Cargo.lock
+              ./crates
+            ];
+          };
 
-        # Linux 上需要链接的系统库
-        linuxLibs = with pkgs; [
-          libxkbcommon
-          wayland
-        ];
+          cargoLock.lockFile = ./Cargo.lock;
+          cargoBuildFlags = [ "--workspace" ];
+
+          nativeBuildInputs = [
+            pkgs.pkg-config
+            pkgs.wayland-scanner
+            pkgs.rustPlatform.bindgenHook
+          ];
+          buildInputs = [
+            pkgs.libxkbcommon
+            pkgs.wayland
+          ];
+
+          # 单测要词库/字体，属于开发期的事；nix build 只负责编出可执行文件
+          doCheck = false;
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out/bin
+            install -m755 target/${pkgs.stdenv.hostPlatform.rust.cargoShortTarget}/release/pliers $out/bin/pliers
+            install -m755 target/${pkgs.stdenv.hostPlatform.rust.cargoShortTarget}/release/pliers-dict $out/bin/pliers-dict
+            runHook postInstall
+          '';
+
+          meta = {
+            description = "一个从零手写的 Wayland 中文输入法（全拼 / 双拼 / 五笔）";
+            homepage = "https://github.com/rendaoer/pliers-ime";
+            license = lib.licenses.mit;
+            mainProgram = "pliers";
+            platforms = lib.platforms.linux;
+          };
+        };
       in
       {
-        packages.default = naersk-lib.buildPackage {
-          src = ./.;
-          meta.mainProgram = "pliers";
-          nativeBuildInputs = nativeDeps;
-          buildInputs = pkgs.lib.optionals isLinux linuxLibs;
-          cargoBuildOptions = x: x ++ [ "--no-default-features" ];
+        packages = {
+          default = pliers;
+          pliers = pliers;
         };
 
-        devShells.default =
-          with pkgs;
-          mkShell {
-            buildInputs = [
-              rustToolchain
-              pre-commit
-              pkg-config
-              watchexec
-            ]
-            ++ lib.optionals isLinux (
-              linuxLibs
-              ++ [
-                clang
-                lld
-              ]
-            );
+        apps.default = {
+          type = "app";
+          program = "${pliers}/bin/pliers";
+          meta.description = "pliers Wayland 中文输入法";
+        };
 
-            RUST_SRC_PATH = pkgs.rustPlatform.rustLibSrc;
-            LD_LIBRARY_PATH = lib.makeLibraryPath (lib.optionals isLinux linuxLibs);
-          };
+        devShells.default = pkgs.mkShell {
+          buildInputs = [
+            rustToolchain
+            pkgs.pkg-config
+            pkgs.watchexec
+            pkgs.pre-commit
+            pkgs.clang
+            pkgs.lld
+            pkgs.libxkbcommon
+            pkgs.wayland
+            pkgs.wayland-scanner
+            pkgs.rustPlatform.bindgenHook
+          ];
+
+          RUST_SRC_PATH = pkgs.rustPlatform.rustLibSrc;
+          LD_LIBRARY_PATH = lib.makeLibraryPath [
+            pkgs.libxkbcommon
+            pkgs.wayland
+          ];
+        };
+
+        formatter = pkgs.nixfmt;
       }
-    );
+    )
+    // {
+      # `pkgs.pliers`：把这个 flake 的包塞进 nixpkgs，方便 Home Manager / NixOS
+      # 里直接写 `pkgs.pliers`（不写 overlay 的话也能用 `inputs.pliers.packages...`）
+      overlays.default = final: prev: {
+        pliers = self.packages.${final.stdenv.hostPlatform.system}.default;
+      };
+
+      # `inputs.pliers.homeManagerModules.default`
+      # （`homeModules.default` 是新名字，两个都导出一份）
+      homeManagerModules.default = import ./nix/home-manager.nix { inherit self; };
+      homeModules.default = self.homeManagerModules.default;
+    };
 }

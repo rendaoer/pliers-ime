@@ -123,6 +123,9 @@ pub struct Config {
     pub engine: EngineConfig,
     #[serde(default)]
     pub english: EnglishConfig,
+    /// 托盘图标/右键菜单的界面偏好
+    #[serde(default)]
+    pub tray: TrayConfig,
     /// 上一次用过的双拼键位（`pliers set scheme.kind double-pinyin` 切回来时接着用）。
     /// `serde(skip)`：这只是运行期的记忆，配置文件里没这一项
     #[serde(skip)]
@@ -165,6 +168,28 @@ fn default_english() -> String {
 
 fn default_english_limit() -> usize {
     5
+}
+
+/// 托盘图标/右键菜单的界面偏好
+#[derive(Debug, Clone, Deserialize)]
+pub struct TrayConfig {
+    /// 右键菜单样式：
+    /// `"grouped"` = 分组子菜单（好看；但 Noctalia 的子菜单没有"返回上一级"）
+    /// `"flat"` = 一层平铺（好翻；菜单会长一些）
+    #[serde(default = "default_tray_menu")]
+    pub menu: String,
+}
+
+impl Default for TrayConfig {
+    fn default() -> Self {
+        Self {
+            menu: default_tray_menu(),
+        }
+    }
+}
+
+fn default_tray_menu() -> String {
+    "grouped".to_string()
 }
 
 /// 引擎行为：中英文怎么切之类
@@ -491,6 +516,7 @@ impl Config {
     /// | `english.limit` | 一次最多几个英文候选 |
     /// | `english.path` | 词表文件（默认 `~/.local/share/pliers/english.txt`） |
     /// | `english.extra` | 自己额外加的英文词（排在最前面） |
+    /// | `tray.menu` | `grouped`（分组子菜单）/ `flat`（一层平铺） |
     ///
     /// 换 `kind` 时会把另一套方案的字段带过去（比如全拼 → 双拼保留原来的键位），
     /// 省得每换一次都要重设一遍。报错信息是给用户看的，所以都说人话
@@ -594,6 +620,13 @@ impl Config {
                 }
                 self.dict.pool_size = size;
             }
+            "tray.menu" => {
+                self.tray.menu = match value {
+                    "grouped" | "分组" => "grouped".into(),
+                    "flat" | "平铺" => "flat".into(),
+                    _ => return Err(bad("grouped（分组）/ flat（平铺）")),
+                };
+            }
             "engine.toggle_keys" => {
                 let keys: Vec<String> = value
                     .split(',')
@@ -645,7 +678,7 @@ impl Config {
                      dict.max_candidates / dict.pool_size / engine.toggle_keys / \
                      engine.start_mode / engine.indicator / \
                      engine.chinese_punctuation / english.enabled / english.limit /
-                     english.path / english.extra）"
+                     english.path / english.extra / tray.menu）"
                 ));
             }
         }
@@ -758,6 +791,21 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    #[test]
+    fn 托盘菜单样式只认分组和平铺() {
+        let mut config = Config::default();
+        assert_eq!(config.tray.menu, "grouped");
+        config.set("tray.menu", "flat").unwrap();
+        assert_eq!(config.tray.menu, "flat");
+        config.set("tray.menu", "分组").unwrap();
+        assert_eq!(config.tray.menu, "grouped");
+        assert!(config.set("tray.menu", "fancy").is_err());
+        assert_eq!(config.tray.menu, "grouped", "报错了就不该改动");
+
+        let config = Config::parse("[tray]\nmenu = \"flat\"\n").unwrap();
+        assert_eq!(config.tray.menu, "flat");
+    }
 
     #[test]
     fn 在线改方案_换_kind_会带走键位和整句开关() {

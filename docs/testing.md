@@ -5,12 +5,12 @@
 ## 单测：不需要合成器、不需要词库
 
 ```bash
-cargo test --workspace        # 全部 229 个
-cargo test -p pliers-engine   # 只看引擎（168 个）：切词、方案、词库、英文候选、按键状态机
+cargo test --workspace        # 全部 247 个
+cargo test -p pliers-engine   # 只看引擎（172 个）：切词、方案、词库、英文候选、按键状态机
 cargo test -p pliers-ime      # 命令行那套（21 个）：状态输出、配置校验、交互选择
 cargo test -p pliers-dict     # 导入工具（6 个）：rime 词库解析、权重缩放、格式不对要说清楚
-cargo test -p pliers-popup    # 候选框布局与像素（20 个）
-cargo test -p pliers-wayland  # 模式提示的超时、长按重复的节拍、命令 socket 一问一答（14 个）
+cargo test -p pliers-popup    # 候选框布局与像素（21 个）
+cargo test -p pliers-wayland  # 模式提示/长按重复/命令 socket/托盘菜单/ARGB 转换（27 个）
 ```
 
 装好之后先跑 `pliers doctor`：它不碰合成器，只检查字体、词库、Wayland 环境、下载/解压工具，
@@ -21,6 +21,10 @@ cargo test -p pliers-wayland  # 模式提示的超时、长按重复的节拍、
 ```bash
 cargo run                     # workspace 里默认就跑 pliers
 ```
+
+（开发构建也开了 `opt-level=2`，见根目录 `Cargo.toml`：输入法每敲一个键都要切词 + 查几次库，
+`opt-level=0` 时实测一次按键 40–90ms，`cargo run` 起来会觉得打字发涩；开了之后跟 release
+差不多（3–6ms）。代价只是首次编译慢一点。）
 
 （源码构建需要 libxkbcommon 的开发包：Debian/Ubuntu `libxkbcommon-dev`、Arch `libxkbcommon`、
 Fedora `libxkbcommon-devel`。没装的话链接阶段会报 `unable to find library -lxkbcommon`。）
@@ -80,6 +84,9 @@ cp ~/.local/share/pliers/pinyin.db target/dict-copy.db
 这种事就不可能发生了（以前真踩过：`pick` 选完「事件」，`nav` 里「事件」就跑到第一位），
 你自己那份 `user.db` 也不会被测试动到。
 
+脚本还会设 `PLIERS_NO_TRAY=1`：mock 连的是真 DBus 会话，不关的话每个场景都会往你桌面的
+tray 里挂一个「中」/「英」图标。
+
 ### 场景
 
 | 场景 | 喂什么 | 验什么 |
@@ -106,7 +113,7 @@ cp ~/.local/share/pliers/pinyin.db target/dict-copy.db
 | `forget` | `nihaoma` | 记住的那句被 `Del` 删掉后，退回词库自己给的第一候选「你好吗」 |
 | `del_swallow` | `nihaoma` + 3× `Del` + 空格 | 组词当中 `Del` 一律吃掉，一个键都不漏给应用 |
 | `hidpi` | 同 `active`，但客户端带 `PLIERS_SCALE=2` | 候选框按 2 倍像素画（高 84）且发了 `set_buffer_scale(2)` |
-| `control` | 客户端跑着时 `pliers set` 切小鹤，再喂 `nihc` | 提交的仍是「你好」—— 真的换了引擎；顺带跑一遍交互模式和 `status` |
+| `control` | 客户端跑着时 `pliers mode`/`toggle`/`mode chinese\|english` 来回切，`save` 写回候选数，再 `pliers set` 切小鹤、喂 `nihc` | `mode` 能读到「中/英」、`toggle`/`mode chinese/english` 真能切；`save` 写回配置并生效；切回中文后提交的仍是「你好」—— 真的换了引擎；顺带跑一遍交互模式和 `status` |
 | `watch` | 直接改配置文件（没人通知它） | 一秒内自动生效；文件写坏了继续用旧配置 |
 | `shortcut` / `shortcut_nomods` | Ctrl+A / Ctrl+C | 8 个事件全部转发，不能被当成拼音吃掉 |
 | `inactive` / `inactive_nomods` | `nihao ` | 先发 `deactivate`：12 个按键事件全部原样转发、零提交、候选框一次都不弹 |

@@ -1,0 +1,12 @@
+id          = "rendaoer/pliers-ime"
+name        = "Pliers IME"
+version     = "0.1.0"
+plugin_api  = 3
+author      = "rendaoer"
+license     = "MIT"
+description = "在 Noctalia 状态栏显示 pliers 输入法的中/英状态，点击切换"
+tags        = ["ime", "input", "chinese"]
+
+[[widget]]
+id    = "ime"
+entry = "widget.luau"

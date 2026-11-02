@@ -19,6 +19,7 @@ mod keyboard;
 mod poll;
 mod popup;
 mod repeat;
+pub mod tray;
 
 use std::error::Error;
 use std::os::fd::{AsFd, AsRawFd};
@@ -55,6 +56,8 @@ const KEYMAP_FORMAT_XKB_V1: u32 = 1;
 pub struct Options {
     /// 把每个按键的判定过程打到 stderr（也可以直接设环境变量 PLIERS_DEBUG=1）
     pub debug: bool,
+    /// 要不要在桌面托盘里放一个「中」/「英」图标（StatusNotifierItem）
+    pub tray: bool,
 }
 
 /// `pliers doctor` 想知道的：合成器到底给不给这些协议
@@ -155,6 +158,16 @@ pub fn run(config: Config, engine: Engine, options: Options) -> Result<(), Box<d
     // 第二次往返：等这两个对象在合成器那边建好，之后它才会给我们 activate
     queue.roundtrip(&mut state)?;
 
+    // 托盘图标（SNI）：有控制 socket 才起 —— 它靠 status/toggle 跟主循环说话。
+    // 放在两次往返**之后**：托盘一起来就会问 `status`，而这时候主循环还没开始
+    // `serve_control`，起太早客户端会干等读超时。起不来不影响打字，只是桌面的
+    // tray 里没有那个「中」/「英」。
+    if options.tray
+        && let Some(control) = &state.control
+    {
+        tray::spawn(control.path(), debug);
+    }
+
     run_loop(&mut state, &mut queue)
 }
 
@@ -171,7 +184,7 @@ fn bind_control() -> Option<Control> {
         }
         Err(e) => {
             eprintln!(
-                "pliers: 命令 socket {} 建不起来（{e}）：pliers status/reload/set 这次用不了",
+                "pliers: 命令 socket {} 建不起来（{e}）：pliers status/mode/toggle/reload/set 这次用不了",
                 path.display()
             );
             None
@@ -312,24 +325,32 @@ impl State {
         self.engine.as_mut().expect("引擎还没放进来")
     }
 
-    // ---- 命令行遥控（`pliers status` / `reload` / `set ...`）----------------
+    // ---- 命令行遥控（`pliers status` / `mode` / `toggle` / `reload` / `set ...`）----
 
     /// 命令 socket 上来的请求：收一条办一条。
     /// 一轮尽量把排队的都办完（accept 到 WouldBlock 为止）
     fn serve_control(&mut self) {
         while let Some(mut stream) = self.control.as_ref().and_then(Control::accept) {
             let answer = match control::read_request(&stream) {
-                Ok(request) if request.is_empty() => {
+                // 连上就关：`Control::bind` 在查"这个 socket 上还有没有活实例"。
+                // 不用回话，更不该把它当成一条空命令（回过去只会撞上 Broken pipe）
+                Ok(control::Request::Closed) => continue,
+                Ok(control::Request::Line(request)) if request.is_empty() => {
                     "ERR 空命令（试试 status / reload）".to_string()
                 }
-                Ok(request) => self.run_command(&request),
+                Ok(control::Request::Line(request)) => self.run_command(&request),
                 Err(e) => format!("ERR 读请求失败：{e}"),
             };
             if self.debug {
                 eprintln!("pliers: 命令回话：{answer}");
             }
-            if let Err(e) = control::reply(&mut stream, &answer) {
-                eprintln!("pliers: 回命令失败：{e}");
+            match control::reply(&mut stream, &answer) {
+                // 客户端先走了（timeout 掐掉、管道关了）：这句回复本来也没人收，
+                // 安静收工。以前这里会把 Broken pipe 当成错误刷屏
+                Ok(true) => {}
+                Ok(false) if self.debug => eprintln!("pliers: 命令没送出去：客户端已经走了"),
+                Ok(false) => {}
+                Err(e) => eprintln!("pliers: 回命令失败：{e}"),
             }
         }
     }
@@ -338,10 +359,33 @@ impl State {
     fn run_command(&mut self, request: &str) -> String {
         let mut parts = request.splitn(3, ' ');
         let (command, rest) = (parts.next().unwrap_or(""), parts.next());
+        // 托盘点击用 `toggle quiet`：图标本身就是反馈，不用再在光标处弹「中/英」
+        let quiet = command == "toggle" && rest == Some("quiet");
         match command {
             // 状态是一堆 tab 分隔的 `名=值`：怎么排版（换行、对齐）是命令行的事，
             // 这样 `socat` 之类自己接上来也能一眼看懂
             "status" => format!("OK\t{}", self.status_fields()),
+
+            // 状态栏/脚本用：只回一行"现在是中还是英"，别把整份 status 拼出来。
+            // `mode chinese` / `mode english` 可以直接定模式（托盘右键菜单走这条）。
+            "mode" => {
+                let quiet = parts.next() == Some("quiet");
+                match rest {
+                    None => format!("OK\tmode={}", self.engine().mode().label()),
+                    Some("chinese" | "中" | "中文") => self.switch_mode(Mode::Chinese, quiet),
+                    Some("english" | "英" | "英文") => self.switch_mode(Mode::English, quiet),
+                    Some(other) => {
+                        format!("ERR mode 只认 chinese / english（给的是 {other:?}）")
+                    }
+                }
+            }
+
+            // 从状态栏/脚本切一下中英文：跟 Ctrl+空格 一个规矩 ——
+            // 打了一半的拼音先上屏，再切；`quiet` 时不弹提示
+            "toggle" => {
+                let mode = self.engine().mode().toggle();
+                self.switch_mode(mode, quiet)
+            }
 
             // 重新读配置文件：读坏了、写得不对，都保持原样继续跑（正在打字的人不该被打断）
             "reload" => match Config::load() {
@@ -351,6 +395,47 @@ impl State {
                 },
                 Err(e) => format!("ERR 读配置失败，保持原样：{e}"),
             },
+
+            // 改一项并**写回配置文件**（托盘右键菜单走这条：菜单里改的应该留下来）。
+            // 先备份旧文件；新配置起不来（比如切五笔但没有 wubi.db）就恢复，
+            // 别让下次启动直接挂掉。
+            "save" => {
+                let (Some(key), Some(value)) = (rest, parts.next()) else {
+                    return "ERR 用法：save <项> <值>".to_string();
+                };
+                let path = pliers_engine::config::config_path();
+                let before = std::fs::read_to_string(&path).ok();
+                if let Err(e) = pliers_engine::config::write_setting(&path, key, value) {
+                    return format!("ERR {e}");
+                }
+                // 纯界面项（菜单样式）不影响引擎，别为它重开词库
+                let applied = match Config::load() {
+                    Ok(config) if key == "tray.menu" => {
+                        self.config.tray.menu = config.tray.menu;
+                        Ok(())
+                    }
+                    Ok(config) => self.apply_config(config),
+                    Err(e) => Err(e),
+                };
+                match applied {
+                    Ok(()) => {
+                        // 文件是我们刚写的：把 mtime 记下来，别再让自动重读白跑一遍
+                        self.config_stamp = config_stamp();
+                        format!("OK\tchanged={key} = {value}")
+                    }
+                    Err(e) => {
+                        match &before {
+                            Some(text) => {
+                                let _ = std::fs::write(&path, text);
+                            }
+                            None => {
+                                let _ = std::fs::remove_file(&path);
+                            }
+                        }
+                        format!("ERR {e}（已经恢复原来的配置）")
+                    }
+                }
+            }
 
             // 改一项：先改内存里的配置，重建失败就整个回滚
             "set" => {
@@ -362,7 +447,13 @@ impl State {
                 if let Err(e) = self.config.set(key, value) {
                     return format!("ERR {e}");
                 }
-                match self.apply_config(self.config.clone()) {
+                let applied = if key == "tray.menu" {
+                    // 纯界面项：不用重建引擎
+                    Ok(())
+                } else {
+                    self.apply_config(self.config.clone())
+                };
+                match applied {
                     Ok(()) => format!(
                         "OK\tchanged={key} = {value}{}\t{}",
                         self.status_note(key),
@@ -376,7 +467,9 @@ impl State {
             }
 
             other => {
-                format!("ERR 不认识的命令 {other:?}（能用的：status / reload / set <项> <值>）")
+                format!(
+                    "ERR 不认识的命令 {other:?}（能用的：status / mode / toggle / reload / set <项> <值>）"
+                )
             }
         }
     }
@@ -426,6 +519,20 @@ impl State {
             self.set_preedit(&preedit);
         }
         Ok(())
+    }
+
+    /// 切到指定模式：正在组的半截拼音先上屏（跟 Ctrl+空格 一个规矩），
+    /// `quiet` 时不弹「中/英」提示。返回控制 socket 的一行回复。
+    fn switch_mode(&mut self, mode: Mode, quiet: bool) -> String {
+        let leftover = self.engine().take_raw();
+        self.engine().set_mode(mode);
+        if let Some(text) = leftover {
+            self.commit_text(&text);
+        }
+        if !quiet {
+            self.show_notice(mode.label());
+        }
+        format!("OK\tmode={}", mode.label())
     }
 
     /// 现状：tab 分隔的 `名=值`，排版（换行、对齐）交给命令行
@@ -483,6 +590,8 @@ impl State {
             // 码表库是另一个文件（方案是 wubi 时上面那个 dict_path 就是它）——
             // 交互菜单里要能看/能改，所以两个都报
             format!("wubi_path={}", config.wubi_path().display()),
+            // 托盘菜单用它决定「五笔」能不能点：没有 wubi.db 时点了也起不来
+            format!("wubi_ready={}", config.wubi_path().exists()),
             format!("user={user}"),
             format!("user_path={}", user_path.display()),
             format!("candidates={}", config.dict.max_candidates),
@@ -498,6 +607,7 @@ impl State {
             format!("indicator={}", config.engine.indicator),
             format!("chinese_punctuation={}", config.engine.chinese_punctuation),
             format!("english={}", config.english.enabled),
+            format!("tray_menu={}", config.tray.menu),
             format!("english_limit={}", config.english.limit),
             format!("english_path={}", config.english.path),
             format!(

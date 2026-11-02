@@ -65,6 +65,10 @@ pub const KEY_DELETE: u32 = 0xffff;
 /// 数字 1..9：直接选第几个候选上屏（keysym 就是 ASCII '1'..'9'）
 const KEY_1: u32 = 0x31;
 const KEY_9: u32 = 0x39;
+/// 小键盘的数字（NumLock 开着时是 KP_1..KP_9）。用惯了数字小键盘的人
+/// 选词也会去按它 —— 不认的话这些键会漏给应用，在输入框里打出 "1"
+const KEY_KP_1: u32 = 0xffb1;
+const KEY_KP_9: u32 = 0xffb9;
 
 /// 中英文模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
@@ -287,6 +291,10 @@ pub struct Candidate {
     pub from_dict: bool,
     /// 内置英文词表补出来的（`hel` → `hello`）—— 按 Del 是"这个词以后别给我了"
     pub english: bool,
+    /// 查不到任何候选时贴出来的**原文**（`wm`、`zzzz`）。
+    /// 它不是词库里的词、也不是补全：上屏它不该记用户词频，
+    /// 按 Del 也不该当成"自己拼的句子"删掉
+    pub raw: bool,
 }
 
 impl Candidate {
@@ -298,6 +306,7 @@ impl Candidate {
             learned: false,
             from_dict: false,
             english: false,
+            raw: false,
         }
     }
 
@@ -309,6 +318,7 @@ impl Candidate {
             learned: false,
             from_dict: false,
             english: false,
+            raw: false,
         }
     }
 
@@ -327,6 +337,12 @@ impl Candidate {
     /// 英文词表补出来的（Del = 这个词以后不再出现）
     pub fn english(mut self) -> Self {
         self.english = true;
+        self
+    }
+
+    /// 查不到候选时贴出来的原文（上屏不记词频，见 [`Candidate::raw`]）
+    pub fn as_raw(mut self) -> Self {
+        self.raw = true;
         self
     }
 }
@@ -529,9 +545,12 @@ impl Engine {
         self.buffer.chars().any(|c| c.is_ascii_uppercase())
     }
 
-    /// 问方案要候选。词库查不到、或者这串键根本不是有效输入，就是空的
-    /// 查一次库，把候选池灌满（只在输入变了的时候调 ——
-    /// 翻页/换选中都只是挪游标，不重新查）
+    /// 问方案要候选。查一次库，把候选池灌满（只在输入变了的时候调 ——
+    /// 翻页/换选中都只是挪游标，不重新查）。
+    ///
+    /// 一个都查不到时**不会让候选池空着**：把原文当成一个候选贴出来（[`Candidate::raw`]）。
+    /// 这样候选框始终有东西显示 —— 在终端这类不画预编辑的应用里，
+    /// 空候选框看起来就像"输入法没反应"；空格照样把原文交出去
     fn refresh_pool(&mut self) {
         if self.buffer.is_empty() || self.literal() {
             // 空串没什么好查的；带大写的串是英文原文（`nN`、`NIHAO`），
@@ -568,6 +587,13 @@ impl Engine {
                 .retain(|candidate| candidate.from_dict || !hidden.contains(&candidate.text));
         }
         self.pool.truncate(self.pool_size);
+        // 一个候选都没有：把原文贴出来（见函数头的说明）。注意不能在这里
+        // 借 `self.buffer` 的同时改 `self.pool`，先克隆一份
+        if self.pool.is_empty() {
+            let text = self.buffer.clone();
+            self.pool
+                .push(Candidate::whole(text.clone(), &text).as_raw());
+        }
     }
 
     /// 英文补全候选，接进候选池（在"用户自己拼的句子"之后、方案的中文候选之前）。
@@ -577,7 +603,10 @@ impl Engine {
     /// 1. `[english] enabled = true`（关掉就一个都不出）；
     /// 2. 这串字母**不像拼音**（[`Scheme::looks_pinyin`]）—— 打 `shou` 是在打「手」，
     ///    不该冒出 `should`；打 `hello` 切不出音节，才轮到英文；
-    /// 3. 至少两个字母 —— 一个字母永远是拼音的"首字母联想"（`n` 要出你/那/年）。
+    /// 3. 至少两个字母（一个字母永远是拼音的"首字母联想"：`n` 要出你/那/年）；
+    ///    两个字母时还至少要有一个元音/半元音 —— `nh`、`wm`、`bj` 这种纯辅音串
+    ///    多半是在打简拼或者打错了，拿 `nhs`、`bjorn` 来补全是帮倒忙；
+    ///    `go`、`my` 这种照常给
     ///
     /// 排序：用户选过的排前面（跟中文共用 `user_word` 那张表），其余按词频 ——
     /// 词表本身就是按词频排的，所以只要稳定地按"用过没有/用过几次"排一遍就够了
@@ -585,7 +614,12 @@ impl Engine {
         let Some(words) = &self.english else {
             return;
         };
-        if self.buffer.chars().count() < 2 || self.scheme.looks_pinyin(&self.buffer) {
+        let letters = self.buffer.chars().count();
+        let vowel = self
+            .buffer
+            .chars()
+            .any(|c| matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'y'));
+        if letters < 2 || self.scheme.looks_pinyin(&self.buffer) || (letters == 2 && !vowel) {
             return;
         }
         // 用户按 Del 删过的英文词（黑名单按**词**记，不管当前打的是 `con` 还是 `conf`）
@@ -850,9 +884,14 @@ impl Engine {
                 self.step(self.limit as i32)
             }
 
-            // 数字 1-9：直接选第几个候选上屏（拼音里的数字没法组词，吃掉不亏）
-            KEY_1..=KEY_9 if composing => {
-                let index = (key.keysym - KEY_1) as usize;
+            // 数字 1-9（主键盘和小键盘）：直接选第几个候选上屏
+            //（拼音里的数字没法组词，吃掉不亏）
+            keysym @ (KEY_1..=KEY_9 | KEY_KP_1..=KEY_KP_9) if composing => {
+                let index = if keysym >= KEY_KP_1 {
+                    (keysym - KEY_KP_1) as usize
+                } else {
+                    (keysym - KEY_1) as usize
+                };
                 self.eat(key.keycode);
                 // 数字选的是**这一页**的第几个：超出一页（`limit`）或者这一页没那么多个，
                 // 都当没按过 —— 池子里后面的候选得先翻页才轮得到
@@ -931,8 +970,12 @@ impl Engine {
         let rest: String = self.buffer.chars().skip(consumed).collect();
         let eaten: String = self.buffer.chars().take(consumed).collect();
 
-        self.record_pick(&eaten, &candidate.text);
-        self.note_pick(&candidate.text);
+        // 原文兜底只是一个"显示出来的东西"，不是用户挑的词：
+        // 记进词频反而会让下次打同一个错串时它排得更前
+        if !candidate.raw {
+            self.record_pick(&eaten, &candidate.text);
+            self.note_pick(&candidate.text);
+        }
 
         if rest.is_empty() {
             self.clear_composing();
@@ -1020,7 +1063,9 @@ impl Engine {
             .cloned();
         match picked {
             Some(candidate) => {
-                self.note_pick(&candidate.text);
+                if !candidate.raw {
+                    self.note_pick(&candidate.text);
+                }
                 self.abandon();
                 candidate.text
             }
@@ -1223,12 +1268,32 @@ mod tests {
 
     #[test]
     fn 词表里没有的就原样上屏() {
-        // 英文候选不是"万能兜底"：词表里没有、拼音也切不动，就是一个候选都没有，
-        // 空格照样把打的原文交出去（不能凭空吞掉）
+        // 英文候选不是"万能兜底"：词表里没有、拼音也切不动，就只剩原文。
+        // 但候选框**不能空着** —— 把原文贴成一个候选，空格照样把它交出去
+        //（不能凭空吞掉，也不能让用户觉得输入法没反应）
         let mut engine = engine();
         type_letters(&mut engine, "zzzz");
-        assert!(engine.preedit().candidates.is_empty());
+        assert_eq!(engine.preedit().candidates, ["zzzz"]);
         assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Commit("zzzz".into()));
+    }
+
+    #[test]
+    fn 两个辅音不冒英文() {
+        // `nh`、`bj` 是简拼/打错，不是英文单词的开头；以前会拿 `nhs`、`bjorn` 来补全。
+        // 现在两个字母里没有元音就不查英文词表，候选框里只留原文
+        let mut ime = engine();
+        type_letters(&mut ime, "nh");
+        assert_eq!(ime.preedit().candidates, ["nh"]);
+        assert!(!has(&ime, "nhs"), "{:?}", ime.preedit().candidates);
+        // 有元音/半元音的两个字母照旧给补全（do → do/down…）。
+        // 注意 `go` 不算：它是 `gou` 的半截，属于拼音的地盘
+        let mut do_ = engine();
+        type_letters(&mut do_, "do");
+        assert!(
+            do_.preedit().candidates.iter().any(|word| word == "do"),
+            "{:?}",
+            do_.preedit().candidates
+        );
     }
 
     #[test]
@@ -1275,13 +1340,13 @@ mod tests {
     }
 
     #[test]
-    fn 关掉英文候选就一个都不出() {
+    fn 关掉英文候选就只剩原文() {
         let mut engine = engine_with(Settings {
             english: false,
             ..Settings::default()
         });
         type_letters(&mut engine, "hel");
-        assert!(engine.preedit().candidates.is_empty());
+        assert_eq!(engine.preedit().candidates, ["hel"]);
         assert_eq!(engine.on_key(key(KEY_SPACE)), Action::Commit("hel".into()));
     }
 
@@ -1827,6 +1892,17 @@ mod tests {
         type_letters(&mut engine, "ni");
         let third = engine.preedit().candidates[2].clone();
         assert_eq!(engine.on_key(key(0x33)), Action::Commit(third)); // '3'
+        assert_eq!(engine.text(), "");
+    }
+
+    #[test]
+    fn 小键盘数字也能选词() {
+        // NumLock 开着时小键盘 2 的 keysym 是 KP_2（0xffb2）：
+        // 不认它的话这个键会漏给应用，在输入框里打出个 "2"
+        let mut engine = engine();
+        type_letters(&mut engine, "ni");
+        let second = engine.preedit().candidates[1].clone();
+        assert_eq!(engine.on_key(key(0xffb2)), Action::Commit(second));
         assert_eq!(engine.text(), "");
     }
 

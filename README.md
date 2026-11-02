@@ -5,6 +5,14 @@
 中文模式下打英文单词也有补全：`hel` + 空格 → `help`（`kuber` → `kubernetes`）。
 
 * **全拼**是完整实现的：150 万词的词库、音节切分、**整句候选**、词频排序、用户调频
+* **候选框不会空着**：一个候选都查不到时把原文贴出来（`wm` → `[wm]`），终端里也看得见自己敲了啥；
+  单个字母会覆盖该字母开头的全部音节（`s` 不会漏掉「是」）
+* **托盘图标**：像 Steam 一样注册 `StatusNotifierItem`，一启动就自动出现在 Noctalia / waybar / KDE
+  的 tray 里；图标是单色的「中」/「英」，左键切中英文，右键是配置菜单：输入方案
+  （全拼/双拼/五笔）、双拼键位、切换键、候选个数和常用开关（写回 config.toml）。
+  菜单能选分组子菜单或一层平铺（`[tray] menu`），默认分组；不需要插件、不需要改 bar 配置；
+  不想要就 `PLIERS_NO_TRAY=1 pliers`
+  （文字版插件仍留在 [`contrib/noctalia`](contrib/noctalia/README.md)）
 * **英文候选**：两万五千个词的词表是自己的一个 SQLite 库（`~/.local/share/pliers/english.db`），
   打一半就补全（`hel` → help/hello），可以 `pliers fetch english` **单独更新**，不用重装输入法；
   打 `shou` 这种还在拼音上的串永远只出中文（见[规则](docs/usage.md#英文单词补全英文候选)）
@@ -40,6 +48,9 @@ Arch 是 `libxkbcommon`，Fedora 是 `libxkbcommon-devel`）—— 少了它链�
 所以一样要装。
 
 （发到 crates.io 之后也可以直接装：`cargo install pliers-ime` —— 装出来的命令叫 `pliers`）
+
+**NixOS / Home Manager**：仓库带了 `flake.nix`，`nix run github:rendaoer/pliers-ime` 直接跑；
+Home Manager 里可以装包、写配置、自动启动，见 [docs/nix.md](docs/nix.md)。
 
 然后把焦点放进输入框，敲 `n i h a o` 再按空格。能不能用取决于**应用自己有没有实现
 text-input 协议**：Firefox / GTK / Qt 应用都行，alacritty 0.17（基于 winit）实测也可以。
@@ -95,10 +106,18 @@ pliers update                 # 哪个旧就更新哪个（已经一样就跳过
 **同一个 seat 上只能有一个输入法**：起第二个实例时旧实例会打印「有另一个输入法接管了这个
 seat」然后退出，所以别同时跑两个。
 
+托盘图标是**自动**的：输入法启动时注册一个 `org.kde.StatusNotifierItem`，桌面带的
+`StatusNotifierWatcher`（Noctalia 的 tray 就是）会自己发现它 —— 跟 Steam 出现在状态栏是同一条路。
+图标显示当前「中」/「英」，左键点一下切中英文；没在跑/读不到状态时显示「?」。
+不想开：`PLIERS_NO_TRAY=1 pliers`。
+
+如果更想要 bar 里的一行文字（而不是 tray 里的小图标），`contrib/noctalia` 里还有一个
+文字版插件，二选一即可。
+
 想确认自己没跑歪：
 
 ```bash
-cargo test --workspace        # 229 个单测，不需要合成器、不需要词库
+cargo test --workspace        # 247 个单测，不需要合成器、不需要词库
 ./tools/run_mock_tests.sh     # mock 合成器跑 28 个场景 + 2 项在线改配置检查（30 项）
 ```
 
@@ -133,6 +152,7 @@ cargo test --workspace        # 229 个单测，不需要合成器、不需要�
 | [docs/internals.md](docs/internals.md) | crate 划分、用了哪些 Wayland 协议、**为什么拼音查询不能交给 SQL**、整句候选、长按重复为什么得自己做、候选框是怎么画出来的 |
 | [docs/pitfalls.md](docs/pitfalls.md) | 11 条实测踩出来的坑（Ctrl+A 被吃掉、松手后应用以为键还按着……）+ 已知不足 |
 | [docs/testing.md](docs/testing.md) | 单测、跑起来、`PLIERS_DEBUG`、`pliers doctor`、mock 合成器的 30 项场景都验了什么 |
+| [docs/nix.md](docs/nix.md) | flake 安装、Home Manager 模块、NixOS `/etc/nixos` 改法、词库和 service 的注意事项 |
 
 ## 代码结构
 
@@ -142,7 +162,7 @@ cargo test --workspace        # 229 个单测，不需要合成器、不需要�
 | --- | --- |
 | `crates/pliers-engine` | 按键状态机 + 输入方案（全拼/双拼/码表）+ 词库 + 英文词表 + 配置 |
 | `crates/pliers-popup` | 候选框长什么样：找字体、排版、画像素、共享内存文件 |
-| `crates/pliers-wayland` | 跟合成器说协议：注册、抓键盘、转发按键、贴候选框 |
+| `crates/pliers-wayland` | 跟合成器说协议：注册、抓键盘、转发按键、贴候选框、托盘图标 |
 | `crates/pliers-ime` | `main()`：读配置、把上面几个拼起来（命令是 `pliers`） |
 | `crates/pliers-dict` | 导入工具：rime 词库（`.dict.yaml`）→ SQLite 词库 |
 

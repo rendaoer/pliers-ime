@@ -9,7 +9,7 @@
 //!
 //! 命令行是**动词在前、种类在后**：`pliers status|path|build|fetch [pinyin|wubi|english]`，
 //! 种类只有那三个（字典是个总概念）。跑起来之后还能隔着一条 Unix socket 遥控它
-//!（`pliers status` / `reload` / `set scheme.kind double-pinyin`）—— 见 `pliers --help`。
+//!（`pliers status` / `mode` / `toggle` / `reload` / `set scheme.kind double-pinyin`）—— 见 `pliers --help`。
 
 mod args;
 mod dict;
@@ -40,6 +40,11 @@ fn help() -> String {
         ("pliers --init-config", "只写一份带注释的配置模板"),
         ("pliers doctor", "自检：字体、词库、Wayland、下载工具"),
         ("pliers status [种类]", "看现状（实例 + 所有字典）"),
+        (
+            "pliers mode [chinese|english]",
+            "打印/设置当前中/英（状态栏、脚本用）",
+        ),
+        ("pliers toggle", "切一下中英文（发给正在跑的实例）"),
     ] {
         out.push_str(&format!("  {}  {}\n", command(pick::pad(cmd, 30)), what));
     }
@@ -120,6 +125,7 @@ fn help() -> String {
             "<词表文件>（默认 ~/.local/share/pliers/english.db）",
         ),
         ("english.extra", "<自己加的词文件>（排在最前面）"),
+        ("tray.menu", "grouped | flat（托盘右键菜单样式）"),
     ] {
         out.push_str(&format!("    {}  {}\n", dim(pick::pad(key, 28)), what));
     }
@@ -193,6 +199,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         // 遥控正在跑的那个实例。注意这里**不**碰合成器：
         // 起第二个输入法会把 seat 抢走，正在打字的人就被顶掉了
+        // 状态栏/脚本只要一行：现在是中还是英。
+        // 走 status（不新开控制命令）—— 这样老版本实例也问得出来
+        Some("mode") if args.len() == 1 => return mode_command(),
+        // `pliers mode chinese|english`：直接定模式（托盘右键菜单也走这条）
+        Some("mode") => {
+            let request = args.join(" ");
+            return remote(&request, "没在跑就没法切 —— 先启动 pliers");
+        }
+        // 从命令行/状态栏切一下中英文（跟 Ctrl+空格 一样）
+        Some("toggle") if args.len() == 1 => {
+            return remote(
+                "toggle",
+                "没在跑就不用切 —— 启动时按 engine.start_mode 决定\
+                 （pliers config set engine.start_mode chinese）",
+            );
+        }
         Some("reload") if args.len() == 1 => {
             return remote(
                 "reload",
@@ -222,6 +244,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let options = Options {
         // PLIERS_DEBUG=1 时把每个按键的判定过程打出来，排查按键问题用
         debug: std::env::var_os("PLIERS_DEBUG").is_some(),
+        // 托盘图标默认开；mock 测试 / 不想要它的环境用 PLIERS_NO_TRAY=1 关掉
+        tray: std::env::var_os("PLIERS_NO_TRAY").is_none(),
     };
 
     if options.debug {
@@ -918,6 +942,29 @@ fn config_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+/// `pliers mode`：只打印当前中/英，给状态栏和脚本用。
+///
+/// 故意走 `status` 而不是新控制命令：老实例（还没有 `mode` 命令的版本）也问得出来，
+/// 状态栏不会因为输入法没重启就显示成"没在跑"。
+fn mode_command() -> Result<(), Box<dyn std::error::Error>> {
+    match ask("status") {
+        Ok(Reply::Done(payload)) => {
+            let fields = Fields::parse(&payload);
+            let mode = fields.get("mode");
+            if mode.is_empty() {
+                return Err("实例没报模式（status 里没有 mode=…）".into());
+            }
+            println!("{mode}");
+            Ok(())
+        }
+        Ok(Reply::Failed(message)) => {
+            eprintln!("{message}");
+            std::process::exit(1)
+        }
+        Err(e) => Err(offline_hint(&e, "没在跑就没有模式可报 —— 先启动 pliers").into()),
+    }
+}
+
 /// 把一条命令发给实例、按结果说话。脚本用：出错就退出码 1
 fn remote(command: &str, hint: &str) -> Result<(), Box<dyn std::error::Error>> {
     let answer = ask(command).map_err(|error| offline_hint(&error, hint))?;
@@ -1129,8 +1176,24 @@ fn print_status(fields: &Fields) {
 fn print_reply(command: &str, payload: &str) {
     let fields = Fields::parse(payload);
     match command.split(' ').next().unwrap_or("status") {
+        // 状态栏/脚本只关心这一行，别把整份现状也打出来
+        "mode" => {
+            println!("{}", fields.get("mode"));
+            return;
+        }
+        "toggle" => {
+            println!(
+                "切到{}",
+                match fields.get("mode") {
+                    "中" => "中文",
+                    "英" => "英文",
+                    other => other,
+                }
+            );
+            return;
+        }
         "reload" => println!("重新读了配置文件，现在是："),
-        "set" if !fields.get("changed").is_empty() => {
+        "set" | "save" if !fields.get("changed").is_empty() => {
             println!("改好了：{}", fields.get("changed"));
         }
         _ => {}
@@ -1216,6 +1279,12 @@ const ITEMS: &[(&str, &str, Kind, &str)] = &[
     // 三个"文件在哪"的项排在一起（加在最后，前面那些项的编号就不会变——
     // mock 测试里的交互模式断言是按编号走的）
     ("dict.wubi_path", "码表库文件", Kind::Text, "wubi_path"),
+    (
+        "tray.menu",
+        "托盘菜单样式",
+        Kind::Choice(&["grouped", "flat"]),
+        "tray_menu",
+    ),
 ];
 
 /// 菜单里除了改配置，还有这两件事

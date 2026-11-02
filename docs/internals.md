@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | `crates/pliers-engine` | 按键状态机 + 输入方案（全拼/双拼/码表）+ 词库 + 配置 | turso / toml / serde |
 | `crates/pliers-popup` | 候选框长什么样：找字体、排版、画像素、共享内存文件 | ab_glyph / fontdb |
-| `crates/pliers-wayland` | 跟合成器说协议：注册、抓键盘、转发按键、贴候选框 | wayland-client / xkbcommon |
+| `crates/pliers-wayland` | 跟合成器说协议：注册、抓键盘、转发按键、贴候选框、托盘图标 | wayland-client / xkbcommon / ksni |
 | `crates/pliers-ime` | `main()`：读配置、把上面几个拼起来（包名是 `pliers-ime`，命令是 `pliers`） | pliers-engine + pliers-wayland |
 | `crates/pliers-dict` | 导入工具：rime 词库（`.dict.yaml`）→ SQLite 词库 | turso |
 
@@ -34,7 +34,7 @@ pliers-engine  ←──┬──  pliers-popup  ──┐
 | `config.rs` | 读 TOML 配置 |
 | `fetch.rs` | 下载 + 解压（`pliers --init` / `pliers build pinyin` 装词库用） |
 
-这么切的好处：**输入方案、词库、候选框长相都能脱离合成器跑测试**（229 个单测），
+这么切的好处：**输入方案、词库、候选框长相都能脱离合成器跑测试**（247 个单测），
 协议层里剩下的全是"Wayland 要求这么做"的东西。想改哪块就只动哪块：
 
 * 加词 / 调词频 → 用 SQL 改词库，或者重新跑一遍 `pliers-dict`
@@ -45,6 +45,7 @@ pliers-engine  ←──┬──  pliers-popup  ──┐
 
 `crates/pliers-wayland` 内部也分了几个文件：`lib.rs`（状态 + 各个 Dispatch 实现）、
 `keyboard.rs`（keycode→keysym、修饰键状态）、`popup.rs`（候选框 surface）、
+`tray.rs`（StatusNotifierItem 托盘图标）、
 `control.rs` + `poll.rs`（那条 Unix socket 和 `poll(2)` 主循环）。
 
 ## 用了哪些协议
@@ -185,6 +186,8 @@ Rust 里重排 —— 那样"权重最高的前 N 个"就得先按语料权重�
 * 用户想加词就指一个 txt（`[english] path`），不用为一个词表去重新构建词库。
 
 引擎里候选池的顺序是：**用户自己拼过的整句 → 英文补全 → 方案给的中文候选**。
+一个都查不到时会补一个**原文候选**（`Candidate::raw`）：候选框不空着，空格照样把原文交出去，
+但它不记用户词频（只是"显示出来的东西"，不是用户挑的词）。
 英文能排到中文前面，是因为它只在"这串字母已经不像拼音"时才出现：
 
 | 输入 | `looks_pinyin` | 道理 |
@@ -196,11 +199,53 @@ Rust 里重排 —— 那样"权重最高的前 N 个"就得先按语料权重�
 "还挂在音节上"这一条（`Segmenter::is_syllable_prefix`，412 个音节扫一遍）是**关键的一小步**：
 只看"能不能切完"的话，`sho`、`cho`、`zho` 这些打到一半的拼音会一路闪英文候选。
 双拼方案没法这么判（键位跟拼音字母不是一回事），用"两键一组解不解得完"代替；
-码表方案干脆永远算"在打中文"（敲的每个字母都是码）。
+码表方案干脆永远算"在打中文"（敲的每个字母都是码）。另外两个字母的纯辅音串
+（`nh`、`wm`、`bj`）不查英文词表 —— 那多半是简拼或打错，拿 `nhs`、`bjorn` 来补全是帮倒忙。
 
 `Del` 也按词的粒度记：英文候选在 `con`/`conf`/`confi` 上都会冒出来，所以黑名单
 （`user_hidden`）里 `code` 固定写 `#english`，效果是"这个词以后别给我了"。
 `#` 不是拼音字符，不会跟真实输入撞车。
+
+## 控制 socket：一问一答，客户端先走不算错
+
+`pliers status` / `mode` / `toggle` / `reload` / `set` 都走 `$XDG_RUNTIME_DIR/pliers.sock`：
+客户端连上、发一行、读一行。主循环里 `serve_control` 每轮把排队的连接都处理掉，
+用 `poll(2)` 和 Wayland 一起等，所以不用线程。
+
+两种"没有请求"要分开：**连上就关**（`Control::bind` 判断路径上有没有活实例的探活，
+或者 `timeout` 正好在连接后排到它）返回 `Request::Closed`，直接关掉不回话；
+**真发了个空行**才回 `ERR 空命令`。回话写不出去时，如果错误是 `BrokenPipe` /
+`ConnectionReset` 这一类，说明对端已经走了（`pliers status | head`、`timeout` 掐掉的命令），
+`reply()` 返回 `Ok(false)` 静默收工 —— 这不是输入法的故障，不该往 stderr 上刷
+`回命令失败：Broken pipe`。只有真正的写错误才打印。
+
+## 托盘图标：用 SNI，而不是自己造状态协议
+
+`zwp_input_method_v2` 没有“当前中/英”这个字段，状态得输入法自己说出去。托盘走的是
+`org.kde.StatusNotifierItem`（跟 Steam 出现在状态栏是同一条路）：`tray.rs` 用 `ksni` 注册一个
+SNI item，`pliers-popup` 画 22px / 33px / 44px 的单色加粗「中」/「英」/「?」ARGB 图标；
+`run()` 在控制 socket 建好后起一个线程，每 500ms 读一次 `status` 的快照
+（mode / 方案 / 双拼键位 / 开关 / 候选数），变了就 `Handle::update()` 让托盘重画图标和菜单。
+一次没读到（实例正忙、正在重载配置）就保持上一份快照，图标不会闪成「?」，500ms 后再问。
+左键 `activate` 先乐观翻图标，再把 `toggle quiet` 丢后台线程；右键菜单里的配置项发
+`save <项> <值>`，由输入法写回 `config.toml`（写坏了/起不来会恢复旧文件）。
+
+右键菜单有两套样式，`config.tray.menu` 决定（默认 `grouped`）：
+
+* `grouped`：四组设置（方案 / 键位 / 切换键 / 候选个数）各是一个 `SubMenu`，
+  四个开关平铺在下面 —— 就是最开始那套紧凑的菜单。最上面还有一个「关闭二级菜单」，
+  它是个带**隐藏子项**的 `SubMenu`：点它会走宿主的 `openSubmenuAtLevel(0, ...)`，
+  先关掉已打开的子菜单，再因为这一层没有可显示的子项而什么都不开 —— 绕开 Noctalia
+  没有“返回上一级”的限制。
+* `flat`：四组都用灰掉的 `StandardItem` 当标题（顺便显示当前值），
+  `RadioGroup` 直接放在顶层，ksni 会把它摊成一组 radio 项；所有选项一层展开。
+
+为什么要有 `flat`：Noctalia 的子菜单是**向下展开的独立 popup surface**，弹出来会盖住
+下面的项，而且没有“退回上一级”的动作 —— 点外面只会把整个菜单关掉。所以好看和好翻
+在它这里没法同时满足；菜单顶部放了一行「菜单样式」随时切换，两个样式都写回
+`config.toml`，重启也还在。`flat` 下不是双拼方案时“双拼键位”整组不显示，少占地方。
+
+托盘起不来不影响打字（没有 SNI host 就安静地不显示），`PLIERS_NO_TRAY=1` 可以主动关掉。
 
 ## 候选框是怎么做出来的
 

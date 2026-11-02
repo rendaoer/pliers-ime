@@ -191,3 +191,7 @@ nix develop          # Rust + libxkbcommon + wayland + bindgen
 cargo test --workspace
 nix build .#         # 只编包，不跑单测
 ```
+
+> NixOS 上不要把 `cargo build` 出来的 `target/release/pliers` 直接放进 PATH：
+> 它没有 rpath，会报 `libxkbcommon.so.0: cannot open shared object file`。
+> 用 `nix develop`（会设 `LD_LIBRARY_PATH`）或 Nix 包/`/etc/profiles` 里的二进制。

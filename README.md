@@ -85,6 +85,9 @@ cargo build --release
 ./target/release/pliers
 ```
 
+> NixOS 上别把 `target/release/pliers` 直接放进 PATH：cargo 编出来的二进制没有 rpath，
+> 会报 `libxkbcommon.so.0: cannot open shared object file`。用 Nix 包或 `nix develop`。
+
 ### 词库
 
 `--init` 会装拼音词库和英文词表；也可以只装词库：
